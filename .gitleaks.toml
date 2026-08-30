@@ -1,0 +1,14 @@
+title = "Lingsway Platform gitleaks configuration"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Permit documented placeholders only"
+paths = [
+  '''\.env\.example$''',
+  '''docs/.*\.asc\.example$''',
+]
+regexes = [
+  '''(?i)(change-me|replace-me|example-only)''',
+]
