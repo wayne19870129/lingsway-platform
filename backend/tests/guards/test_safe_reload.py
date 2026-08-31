@@ -40,10 +40,12 @@ class Runtime:
         self.health_values = health or [True]
         self.events: list[str] = []
         self.reload_calls = 0
-        self._current = config()
+        self._current: Mapping[str, object] = config()
+        self._backup: Mapping[str, object] = self._current
 
     def backup(self) -> object:
         self.events.append("backup")
+        self._backup = self._current
         return Path("backup.json")
 
     def current(self) -> Mapping[str, object]:
@@ -55,6 +57,7 @@ class Runtime:
 
     def install(self, content: Mapping[str, object]) -> None:
         self.events.append("install")
+        self._current = content
 
     def reload(self) -> None:
         self.reload_calls += 1
@@ -67,6 +70,7 @@ class Runtime:
 
     def restore(self, backup: object) -> None:
         self.events.append("restore")
+        self._current = self._backup
 
 
 def test_invalid_candidate_stops_before_reload() -> None:

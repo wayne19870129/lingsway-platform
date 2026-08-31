@@ -104,9 +104,13 @@ class XrayFileProvider:
         self._runtime.reload()
         self._audit("reload", {"version": candidate.version})
         report = self._runtime.health()
-        if report.healthy:
+        post_reload_errors = _preservation_errors(candidate.content, self._runtime.current())
+        if report.healthy and not post_reload_errors:
             self._audit("health_ok", report.details)
             return ApplyResult(True, candidate.version)
+
+        if post_reload_errors:
+            self._audit("post_reload_routes_failed", {"errors": post_reload_errors})
 
         self._runtime.restore(backup)
         self._audit("backup_restored", {})
@@ -117,7 +121,7 @@ class XrayFileProvider:
         if new_username is not None:
             self._disable_user(new_username)
             self._audit("new_user_disabled", {"username": new_username})
-        self._alert("Xray health check failed; backup restored")
+        self._alert("Xray health or route check failed; backup restored")
         self._audit("alert_sent", {})
         raise XrayReloadError("post-reload health check failed")
 
