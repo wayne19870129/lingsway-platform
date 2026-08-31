@@ -1,0 +1,15 @@
+# Default ownership
+* @arrickcherney-ops
+
+/backend/app/providers/ @arrickcherney-ops
+/backend/app/domain/ @arrickcherney-ops
+/backend/app/api/ @arrickcherney-ops
+/frontend/ @arrickcherney-ops
+/ops/ @arrickcherney-ops
+/infrastructure/ @arrickcherney-ops
+/deploy/ @arrickcherney-ops
+/docs/80-decisions/ @arrickcherney-ops
+/docs/81-reviews/ @arrickcherney-ops
+/docs/82-tasks/ @arrickcherney-ops
+/ARCHITECTURE.md @arrickcherney-ops
+/AGENTS.md @arrickcherney-ops
