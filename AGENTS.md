@@ -9,6 +9,8 @@
    必须先在 docs/80-decisions/ 提交或引用对应 ADR;新建这两个模块的
    首个实现视为已由本条覆盖,引用对应 ADR 即可。
 6. 任何会重载 Xray 的改动,必须经过九步安全重载,不得直连重启
+7. Alembic 历史 revision 一律不得改写。schema 与代码不一致时,只能新增
+   reconciliation migration 补救,且新增迁移必须幂等
 
 ## 模块写权限(同一时间一个模块只有一个 Agent 可写)
 backend/app/providers/**   → Codex

@@ -1,0 +1,12 @@
+api:
+  base_url: https://proxy.webshare.io
+  timeout_seconds: 20
+  rate_limits_per_minute:
+    general: 240
+    proxy_list: 60
+    replacement: 60
+safety:
+  read_only: true
+  dry_run_replacement_only: true
+  auto_purchase: false
+  auto_replace: false

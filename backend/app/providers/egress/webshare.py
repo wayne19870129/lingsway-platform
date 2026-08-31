@@ -9,7 +9,9 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Protocol
-from urllib.parse import unquote, urljoin, urlsplit
+from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qsl, unquote, urljoin, urlsplit
+from urllib.request import ProxyHandler, Request, build_opener
 
 from backend.app.providers.base import (
     CapacityDTO,
@@ -33,6 +35,61 @@ class Response(Protocol):
     status_code: int
 
     def json(self) -> object: ...
+
+
+@dataclass(slots=True)
+class UrllibResponse:
+    status_code: int
+    headers: Mapping[str, str]
+    body: bytes
+
+    def json(self) -> object:
+        import json
+
+        return json.loads(self.body.decode("utf-8"))
+
+
+class UrllibTransport:
+    """Small transport used by procurement; policy remains in WebshareProvider."""
+
+    def __init__(self, *, timeout: float = 20.0, proxy_url: str | None = None) -> None:
+        self.timeout = timeout
+        handler = ProxyHandler(
+            {"http": proxy_url, "https": proxy_url} if proxy_url else {}
+        )
+        self._opener = build_opener(handler)
+
+    def __call__(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: Mapping[str, str],
+        params: Mapping[str, object] | None,
+        json: Mapping[str, object] | None,
+    ) -> UrllibResponse:
+        import json as json_module
+        from urllib.parse import urlencode
+
+        query = f"?{urlencode(params)}" if params else ""
+        body = json_module.dumps(json).encode("utf-8") if json is not None else None
+        request = Request(
+            f"{url}{query}", data=body, headers=dict(headers), method=method
+        )
+        request.add_header("Accept", "application/json")
+        if body is not None:
+            request.add_header("Content-Type", "application/json")
+        try:
+            with self._opener.open(request, timeout=self.timeout) as response:
+                return UrllibResponse(
+                    response.status, dict(response.headers.items()), response.read()
+                )
+        except HTTPError as error:
+            return UrllibResponse(
+                error.code, dict(error.headers.items()), error.read()
+            )
+        except URLError as error:
+            raise ConnectionError(f"Webshare transport failed: {error.reason}") from error
 
 
 Transport = Callable[..., Response]
@@ -117,8 +174,14 @@ class WebshareProvider:
             if response.status_code != 429:
                 return response
             if attempt == 3:
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "webshare_429_exhausted attempts=%d", attempt + 1
+                )
                 raise WebshareRateLimitError("Webshare returned 429 after 3 retries")
-            self._sleep(float(2**attempt))
+            retry_after = _retry_after(response)
+            self._sleep(retry_after if retry_after is not None else float(2**attempt))
         raise AssertionError("unreachable")
 
     @classmethod
@@ -170,3 +233,112 @@ class WebshareProvider:
     def replace_endpoint(self, endpoint_id: str, dry_run: bool = True) -> ReplacementDTO:
         self.request("POST", f"/api/v3/proxy/replace/{endpoint_id}/", dry_run=dry_run)
         return ReplacementDTO(endpoint_id, None, dry_run)
+
+
+class WebshareApiError(RuntimeError):
+    """Parsed API error returned by the procurement adapter."""
+
+    def __init__(self, message: str, status_code: int, payload: object) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.payload = payload
+
+
+class WebshareReadOnlyAdapter:
+    """Procurement facade: JSON and pagination, with a stricter write policy."""
+
+    def __init__(self, provider: WebshareProvider) -> None:
+        self._provider = provider
+
+    def request_json(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: Mapping[str, object] | None = None,
+        json_body: Mapping[str, object] | None = None,
+    ) -> object:
+        parsed_url = urlsplit(path)
+        normalized_path = _procurement_path(path)
+        normalized_method = method.upper()
+        dry_run = (
+            json_body.get("dry_run") is True if json_body is not None else None
+        )
+        if normalized_method != "GET" and not (
+            normalized_method == "POST"
+            and normalized_path.startswith("/api/v3/proxy/replace/")
+            and dry_run is True
+        ):
+            raise WebshareGuardError(
+                "procurement adapter permits GET and dry_run replacement only"
+            )
+        response = self._provider.request(
+            normalized_method,
+            normalized_path,
+            dry_run=dry_run,
+            params=_merge_query_params(parsed_url.query, params),
+            json=json_body,
+        )
+        payload = response.json()
+        if response.status_code >= 400:
+            raise WebshareApiError(
+                f"Webshare API HTTP {response.status_code}: {payload}",
+                response.status_code,
+                payload,
+            )
+        return payload
+
+    def get(
+        self, path: str, *, params: Mapping[str, object] | None = None
+    ) -> object:
+        return self.request_json("GET", path, params=params)
+
+    def paginate(
+        self, path: str, *, params: Mapping[str, object] | None = None
+    ) -> list[dict[str, object]]:
+        results: list[dict[str, object]] = []
+        next_path: str | None = path
+        query = dict(params or {})
+        while next_path:
+            payload = self.get(next_path, params=query)
+            query = {}
+            if not isinstance(payload, dict):
+                return results
+            page = payload.get("results")
+            if isinstance(page, list):
+                results.extend(item for item in page if isinstance(item, dict))
+            next_value = payload.get("next")
+            next_path = str(next_value) if next_value else None
+        return results
+
+
+def _procurement_path(path: str) -> str:
+    parsed = urlsplit(path)
+    normalized = unquote(parsed.path)
+    if normalized.startswith("/api/"):
+        return normalized
+    prefix = "/api/v3" if normalized.startswith(("/proxy/config", "/proxy/replace")) else "/api/v2"
+    return f"{prefix}/{normalized.lstrip('/')}"
+
+
+def _retry_after(response: Response) -> float | None:
+    headers = getattr(response, "headers", {}) or {}
+    value = next(
+        (item for key, item in headers.items() if key.lower() == "retry-after"), None
+    )
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _merge_query_params(
+    query: str, params: Mapping[str, object] | None
+) -> dict[str, object] | None:
+    merged: dict[str, object] = dict(parse_qsl(query, keep_blank_values=True))
+    if params:
+        merged.update(params)
+    return merged or None
