@@ -24,7 +24,8 @@ def test_mysql_84_database_is_reachable() -> None:
     database_url = os.environ.get("TEST_DATABASE_URL")
     if not database_url:
         pytest.fail("TEST_DATABASE_URL is required; integration tests are never skipped")
-    engine = create_engine(database_url)
+    sync_database_url = database_url.replace("mysql+asyncmy://", "mysql+pymysql://", 1)
+    engine = create_engine(sync_database_url)
     try:
         with engine.connect() as connection:
             assert connection.scalar(text("SELECT 1")) == 1
