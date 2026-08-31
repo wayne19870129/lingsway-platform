@@ -1,0 +1,223 @@
+"""Provider contracts for every side effect used by the domain layer.
+
+ADR-009 defines this boundary. Domain code may depend on these contracts and DTOs,
+but never on a concrete provider implementation.
+"""
+
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from datetime import datetime
+from decimal import Decimal
+from typing import Protocol
+
+
+@dataclass(frozen=True, slots=True)
+class EgressEndpointDTO:
+    endpoint_id: str
+    host: str
+    port: int
+    protocol: str = "socks5"
+    public_ip: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CapacityDTO:
+    total_gb: Decimal
+    allocated_gb: Decimal
+    reserved_gb: Decimal
+
+    @property
+    def available_gb(self) -> Decimal:
+        return self.total_gb - self.allocated_gb - self.reserved_gb
+
+
+@dataclass(frozen=True, slots=True)
+class TenantDTO:
+    tenant_id: str
+    label: str
+    quota_gb: Decimal
+    thread_limit: int
+
+
+@dataclass(frozen=True, slots=True)
+class UsageDTO:
+    tenant_id: str
+    used_gb: Decimal
+    measured_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class CredentialDTO:
+    username: str
+    password: str = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class ReplacementDTO:
+    endpoint_id: str
+    replacement_endpoint_id: str | None
+    dry_run: bool
+
+
+@dataclass(frozen=True, slots=True)
+class AccountUserDTO:
+    username: str
+    quota_bytes: int
+    expire_at: datetime | None
+    enabled: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class DesiredRoutingState:
+    user_routes: Mapping[str, str] = field(default_factory=dict)
+    outbound_tags: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class DesiredForwarderState:
+    listeners: Mapping[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateConfig:
+    content: Mapping[str, object]
+    version: str
+
+
+@dataclass(frozen=True, slots=True)
+class ValidationResult:
+    valid: bool
+    errors: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ApplyResult:
+    applied: bool
+    version: str
+    rolled_back: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class HealthReport:
+    healthy: bool
+    details: Mapping[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class PaymentIntentDTO:
+    intent_id: str
+    status: str
+    amount: Decimal
+    currency: str
+
+
+@dataclass(frozen=True, slots=True)
+class WebhookResult:
+    accepted: bool
+    event_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class NotifyEvent:
+    event_type: str
+    payload: Mapping[str, object] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class DeliveryResult:
+    delivered: bool
+    delivery_id: str | None = None
+    error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BlobDTO:
+    key: str
+    size: int
+    checksum: str
+
+
+class NotSupportedError(RuntimeError):
+    """Raised when a provider deliberately does not support an operation."""
+
+
+class EgressProvider(Protocol):
+    name: str
+
+    def list_endpoints(self) -> list[EgressEndpointDTO]: ...
+
+    def capacity(self) -> CapacityDTO: ...
+
+    def create_tenant(
+        self, label: str, quota_gb: Decimal, thread_limit: int
+    ) -> TenantDTO: ...
+
+    def update_tenant_quota(self, tenant_id: str, quota_gb: Decimal) -> TenantDTO: ...
+
+    def get_tenant_usage(self, tenant_id: str) -> UsageDTO: ...
+
+    def get_credentials(self, tenant_id: str, endpoint_id: str) -> CredentialDTO: ...
+
+    def replace_endpoint(
+        self, endpoint_id: str, dry_run: bool = True
+    ) -> ReplacementDTO: ...
+
+
+class AccountingProvider(Protocol):
+    def create_user(
+        self, username: str, quota_bytes: int, expire_at: datetime | None
+    ) -> AccountUserDTO: ...
+
+    def disable_user(self, username: str) -> None: ...
+
+    def get_connection_links(self, username: str) -> list[str]: ...
+
+    def get_usage(self, username: str) -> int: ...
+
+
+class GatewayProvider(Protocol):
+    def render(self, desired: DesiredRoutingState) -> CandidateConfig: ...
+
+    def validate(self, candidate: CandidateConfig) -> ValidationResult: ...
+
+    def apply(self, candidate: CandidateConfig) -> ApplyResult: ...
+
+    def health(self) -> HealthReport: ...
+
+
+class ForwarderProvider(Protocol):
+    def render(self, desired: DesiredForwarderState) -> CandidateConfig: ...
+
+    def apply(self, candidate: CandidateConfig) -> ApplyResult: ...
+
+    def health(self) -> HealthReport: ...
+
+
+class PaymentProvider(Protocol):
+    def create_intent(self, order: object) -> PaymentIntentDTO: ...
+
+    def confirm_manual(self, order: object, reference: str) -> None: ...
+
+    def verify_webhook(self, headers: Mapping[str, str], body: bytes) -> WebhookResult: ...
+
+
+class NotifyProvider(Protocol):
+    def send(self, event: NotifyEvent) -> DeliveryResult: ...
+
+
+class EmailProvider(Protocol):
+    def send(self, to: str, template: str, ctx: dict[str, object]) -> DeliveryResult: ...
+
+
+class CaptchaProvider(Protocol):
+    def verify(self, token: str, remote_ip: str | None) -> bool: ...
+
+
+class BlobStorage(Protocol):
+    def put(self, key: str, path: str) -> None: ...
+
+    def list(self, prefix: str) -> list[BlobDTO]: ...
+
+    def delete(self, key: str) -> None: ...
+
+    def checksum(self, key: str) -> str: ...

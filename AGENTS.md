@@ -6,7 +6,8 @@
 3. 外部系统写操作走白名单,不提供 force / override / bypass 开关
 4. 账务用户开通失败时 disable,永不 DELETE(保留用量历史)
 5. 修改 backend/app/domain/ 或 backend/app/providers/base.py 之前,
-   必须先在 docs/80-decisions/ 提交 ADR
+   必须先在 docs/80-decisions/ 提交或引用对应 ADR;新建这两个模块的
+   首个实现视为已由本条覆盖,引用对应 ADR 即可。
 6. 任何会重载 Xray 的改动,必须经过九步安全重载,不得直连重启
 
 ## 模块写权限(同一时间一个模块只有一个 Agent 可写)

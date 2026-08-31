@@ -12,6 +12,15 @@ test:
 	$(PYTHON) -m pytest backend/tests/unit backend/tests/integration backend/tests/guards
 
 test-unit:
+	EGRESS_PROVIDER=mock \
+	ACCOUNTING_PROVIDER=mock \
+	GATEWAY_PROVIDER=mock \
+	FORWARDER_PROVIDER=mock \
+	PAYMENT_PROVIDER=mock \
+	NOTIFY_PROVIDER=noop \
+	EMAIL_PROVIDER=noop \
+	CAPTCHA_PROVIDER=noop \
+	STORAGE_PROVIDER=mock \
 	$(PYTHON) -m pytest backend/tests/unit
 
 lint: lint-python lint-frontend
