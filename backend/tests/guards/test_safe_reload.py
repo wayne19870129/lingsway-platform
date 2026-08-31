@@ -39,12 +39,14 @@ class Runtime:
         self.xray_valid = xray_valid
         self.health_values = health or [True]
         self.events: list[str] = []
+        self.timeline: list[str] = []
         self.reload_calls = 0
         self._current: Mapping[str, object] = config()
         self._backup: Mapping[str, object] = self._current
 
     def backup(self) -> object:
         self.events.append("backup")
+        self.timeline.append("backup")
         self._backup = self._current
         return Path("backup.json")
 
@@ -53,23 +55,28 @@ class Runtime:
 
     def xray_test(self, content: Mapping[str, object]) -> bool:
         self.events.append("xray_test")
+        self.timeline.append("xray_test")
         return self.xray_valid
 
     def install(self, content: Mapping[str, object]) -> None:
         self.events.append("install")
+        self.timeline.append("install")
         self._current = content
 
     def reload(self) -> None:
         self.reload_calls += 1
         self.events.append(f"reload:{self.reload_calls}")
+        self.timeline.append(f"reload:{self.reload_calls}")
 
     def health(self) -> HealthReport:
         self.events.append("health")
+        self.timeline.append("health")
         value = self.health_values.pop(0)
         return HealthReport(value)
 
     def restore(self, backup: object) -> None:
         self.events.append("restore")
+        self.timeline.append("restore")
         self._current = self._backup
 
 
@@ -91,10 +98,19 @@ def test_failed_post_reload_health_executes_complete_rollback_sequence() -> None
     disabled: list[str] = []
     alerts: list[str] = []
     audits: list[str] = []
+
+    def disable(username: str) -> None:
+        disabled.append(username)
+        runtime.timeline.append("disable")
+
+    def alert(message: str) -> None:
+        alerts.append(message)
+        runtime.timeline.append("alert")
+
     provider = XrayFileProvider(
         runtime,
-        disable_user=disabled.append,
-        alert=alerts.append,
+        disable_user=disable,
+        alert=alert,
         audit=lambda event, _details: audits.append(event),
     )
 
@@ -118,6 +134,14 @@ def test_failed_post_reload_health_executes_complete_rollback_sequence() -> None
     assert runtime.reload_calls == 2
     assert disabled == ["new-user"]
     assert len(alerts) == 1
+    restore_index = runtime.timeline.index("restore")
+    assert runtime.timeline[restore_index : restore_index + 5] == [
+        "restore",
+        "reload:2",
+        "health",
+        "disable",
+        "alert",
+    ]
     assert audits[-5:] == [
         "backup_restored",
         "rollback_reload",
@@ -135,6 +159,99 @@ def test_preservation_rejects_missing_existing_user_and_outbound() -> None:
     assert not result.valid
     assert any("missing existing users" in error for error in result.errors)
     assert any("missing existing outbounds" in error for error in result.errors)
+
+
+def _apply_rejection(
+    candidate: dict[str, object],
+    *,
+    new_username: str | None = None,
+    match: str = "",
+) -> Runtime:
+    runtime = Runtime()
+    with pytest.raises(XrayValidationError, match=match):
+        XrayFileProvider(runtime).apply(
+            CandidateConfig(candidate, "new-preservation-check"),
+            new_username=new_username,
+        )
+    assert runtime.reload_calls == 0
+    return runtime
+
+
+def test_missing_inbound_client_is_rejected_before_reload() -> None:
+    runtime = Runtime()
+    runtime._current = {
+        **config(),
+        "inbounds": [{"settings": {"clients": [{"id": "old-client"}]}}],
+    }
+    candidate = dict(runtime._current)
+    candidate["inbounds"] = [{"settings": {"clients": []}}]
+
+    with pytest.raises(XrayValidationError, match="inbound clients"):
+        XrayFileProvider(runtime).apply(CandidateConfig(candidate, "missing-client"))
+
+    assert runtime.reload_calls == 0
+
+
+def test_missing_complete_old_route_is_rejected_before_reload() -> None:
+    runtime = Runtime()
+    candidate = config()
+    candidate["outbounds"] = [
+        {"tag": "BLOCK", "protocol": "blackhole"},
+        {"tag": "egress-1", "protocol": "socks"},
+        {"tag": "egress-2", "protocol": "socks"},
+    ]
+    candidate["routing"] = {
+        "rules": [
+            {"type": "field", "ip": ["geoip:private"], "outboundTag": "BLOCK"},
+            {"type": "field", "user": ["old-user"], "outboundTag": "egress-2"},
+            {"type": "field", "network": "tcp,udp", "outboundTag": "BLOCK"},
+        ]
+    }
+
+    runtime = _apply_rejection(candidate, match="existing routing rules")
+    assert runtime.reload_calls == 0
+
+
+def test_missing_candidate_outbound_is_rejected_before_reload() -> None:
+    candidate = config()
+    candidate["routing"] = {
+        "rules": [
+            {"type": "field", "ip": ["geoip:private"], "outboundTag": "BLOCK"},
+            {"type": "field", "user": ["old-user"], "outboundTag": "egress-1"},
+            {"type": "field", "user": ["new-user"], "outboundTag": "missing-egress"},
+            {"type": "field", "network": "tcp,udp", "outboundTag": "BLOCK"},
+        ]
+    }
+
+    runtime = _apply_rejection(candidate, match="missing outbounds")
+    assert runtime.reload_calls == 0
+
+
+def test_direct_fallback_is_rejected_before_reload() -> None:
+    candidate = config()
+    candidate["outbounds"] = [
+        {"tag": "BLOCK", "protocol": "blackhole"},
+        {"tag": "egress-1", "protocol": "socks"},
+        {"tag": "DIRECT", "protocol": "freedom"},
+    ]
+    candidate["routing"] = {
+        "rules": [
+            {"type": "field", "ip": ["geoip:private"], "outboundTag": "BLOCK"},
+            {"type": "field", "user": ["old-user"], "outboundTag": "egress-1"},
+            {"type": "field", "domain": ["example.com"], "outboundTag": "DIRECT"},
+            {"type": "field", "network": "tcp,udp", "outboundTag": "BLOCK"},
+        ]
+    }
+
+    runtime = _apply_rejection(candidate, match="DIRECT fallback")
+    assert runtime.reload_calls == 0
+
+
+def test_missing_new_user_route_is_rejected_before_reload() -> None:
+    runtime = _apply_rejection(
+        config(), new_username="new-user", match="new user route"
+    )
+    assert runtime.reload_calls == 0
 
 
 def test_backend_dockerfile_copies_and_checks_all_xray_assets() -> None:
