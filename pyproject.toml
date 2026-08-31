@@ -7,7 +7,13 @@ name = "lingsway-platform"
 version = "0.1.0"
 description = "Provider-pluggable network subscription platform"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+  "alembic>=1.16,<2",
+  "cryptography>=46,<47",
+  "PyJWT>=2.10,<3",
+  "pymysql[rsa]>=1.1,<2",
+  "sqlalchemy>=2.0,<3",
+]
 
 [project.optional-dependencies]
 dev = [
@@ -25,6 +31,9 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+"backend/app/models/*.py" = ["UP037", "UP042"]
 
 [tool.mypy]
 python_version = "3.12"
