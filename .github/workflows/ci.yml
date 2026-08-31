@@ -72,3 +72,23 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
       - run: npm run build
+
+  backend-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build backend image
+        run: docker build -f backend/Dockerfile -t lingsway-backend:t4 .
+      - name: Verify Xray runtime assets
+        run: |
+          docker run --rm --entrypoint sh lingsway-backend:t4 -c '
+            set -eu
+            test "$(command -v xray)" = /usr/local/bin/xray
+            test -x /usr/local/bin/xray
+            test -s /usr/local/share/xray/geoip.dat
+            test -s /usr/local/share/xray/geosite.dat
+            xray version
+            sha256sum /usr/local/bin/xray \
+              /usr/local/share/xray/geoip.dat \
+              /usr/local/share/xray/geosite.dat
+          '
