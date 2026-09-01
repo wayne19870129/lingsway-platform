@@ -92,8 +92,6 @@ class ProvisionRunStore(Protocol):
 
 
 class ProvisioningState(Protocol):
-    def mark_paid(self, order_id: str) -> None: ...
-
     def reject_capacity(self, order_id: str, reason: str) -> None: ...
 
     def allocate_endpoint(self, customer_id: str) -> EgressEndpointDTO: ...
@@ -141,7 +139,6 @@ class ProvisioningService:
             self._alert("CAPACITY_EXCEEDED", {"run_id": run_id, "order_id": request.order_id})
             self._failed(run_id, ProvisionStep.CAPACITY, exc)
             raise
-        self.state.mark_paid(request.order_id)
         self._success(run_id, ProvisionStep.CAPACITY)
 
         self._start(run_id, ProvisionStep.ALLOCATE_ENDPOINT)
