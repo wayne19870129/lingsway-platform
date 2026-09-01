@@ -80,7 +80,9 @@ class XrayFileProvider:
             version=datetime.now(UTC).strftime("%Y%m%d%H%M%S%f"),
         )
 
-    def validate(self, candidate: CandidateConfig) -> ValidationResult:
+    def validate(
+        self, candidate: CandidateConfig, *, new_username: str | None = None
+    ) -> ValidationResult:
         errors: list[str] = []
         try:
             parsed = json.loads(json.dumps(candidate.content))
@@ -88,13 +90,17 @@ class XrayFileProvider:
             return ValidationResult(False, (f"invalid JSON: {exc}",))
         if not self._runtime.xray_test(candidate.content):
             errors.append("xray run -test failed")
-        errors.extend(_preservation_errors(self._runtime.current(), parsed))
+        errors.extend(
+            _preservation_errors(
+                self._runtime.current(), parsed, new_username=new_username
+            )
+        )
         return ValidationResult(not errors, tuple(errors))
 
     def apply(self, candidate: CandidateConfig, *, new_username: str | None = None) -> ApplyResult:
         backup = self._runtime.backup()
         self._audit("backup_created", {"version": candidate.version})
-        validation = self.validate(candidate)
+        validation = self.validate(candidate, new_username=new_username)
         if not validation.valid:
             self._audit("candidate_rejected", {"errors": validation.errors})
             self._alert("Xray candidate rejected before reload")
@@ -104,7 +110,11 @@ class XrayFileProvider:
         self._runtime.reload()
         self._audit("reload", {"version": candidate.version})
         report = self._runtime.health()
-        post_reload_errors = _preservation_errors(candidate.content, self._runtime.current())
+        post_reload_errors = _preservation_errors(
+            candidate.content,
+            self._runtime.current(),
+            new_username=new_username,
+        )
         if report.healthy and not post_reload_errors:
             self._audit("health_ok", report.details)
             return ApplyResult(True, candidate.version)
@@ -130,7 +140,10 @@ class XrayFileProvider:
 
 
 def _preservation_errors(
-    current: Mapping[str, object], candidate: Mapping[str, object]
+    current: Mapping[str, object],
+    candidate: Mapping[str, object],
+    *,
+    new_username: str | None = None,
 ) -> list[str]:
     errors: list[str] = []
     current_outbounds = _outbound_tags(current)
@@ -141,6 +154,17 @@ def _preservation_errors(
     candidate_users = _routed_users(candidate)
     if missing := current_users - candidate_users:
         errors.append(f"missing existing users: {sorted(missing)}")
+    current_clients = _inbound_clients(current)
+    candidate_clients = _inbound_clients(candidate)
+    if missing := current_clients - candidate_clients:
+        errors.append("candidate removes existing inbound clients")
+    current_routes = _rule_signatures(current)
+    candidate_routes = _rule_signatures(candidate)
+    if missing := current_routes - candidate_routes:
+        errors.append("candidate removes existing routing rules")
+    referenced_outbounds = _routing_outbound_tags(candidate)
+    if missing := referenced_outbounds - candidate_outbounds:
+        errors.append(f"candidate references missing outbounds: {sorted(missing)}")
     rules = _rules(candidate)
     private = {"type": "field", "ip": ["geoip:private"], "outboundTag": "BLOCK"}
     if not rules or rules[0] != private:
@@ -148,6 +172,13 @@ def _preservation_errors(
     fallback = {"type": "field", "network": "tcp,udp", "outboundTag": "BLOCK"}
     if not rules or rules[-1] != fallback:
         errors.append("tcp,udp BLOCK fallback must be last")
+    if any(
+        isinstance(rule, Mapping) and rule.get("outboundTag") == "DIRECT"
+        for rule in rules
+    ):
+        errors.append("DIRECT fallback is not permitted")
+    if new_username is not None and new_username not in candidate_users:
+        errors.append(f"candidate is missing the new user route: {new_username}")
     return errors
 
 
@@ -167,6 +198,44 @@ def _outbound_tags(config: Mapping[str, object]) -> set[str]:
         tag
         for item in outbounds
         if isinstance(item, Mapping) and isinstance((tag := item.get("tag")), str)
+    }
+
+
+def _inbound_clients(config: Mapping[str, object]) -> set[str]:
+    clients: set[str] = set()
+    inbounds = config.get("inbounds")
+    if not isinstance(inbounds, list):
+        return clients
+    for inbound in inbounds:
+        if not isinstance(inbound, Mapping):
+            continue
+        settings = inbound.get("settings")
+        if not isinstance(settings, Mapping):
+            continue
+        rows = settings.get("clients")
+        if isinstance(rows, list):
+            clients.update(
+                json.dumps(row, sort_keys=True, separators=(",", ":"))
+                for row in rows
+                if isinstance(row, Mapping)
+            )
+    return clients
+
+
+def _rule_signatures(config: Mapping[str, object]) -> set[str]:
+    return {
+        json.dumps(rule, sort_keys=True, separators=(",", ":"))
+        for rule in _rules(config)
+        if isinstance(rule, Mapping)
+    }
+
+
+def _routing_outbound_tags(config: Mapping[str, object]) -> set[str]:
+    return {
+        outbound
+        for rule in _rules(config)
+        if isinstance(rule, Mapping)
+        and isinstance((outbound := rule.get("outboundTag")), str)
     }
 
 
