@@ -11,6 +11,8 @@
 6. 任何会重载 Xray 的改动,必须经过九步安全重载,不得直连重启
 7. Alembic 历史 revision 一律不得改写。schema 与代码不一致时,只能新增
    reconciliation migration 补救,且新增迁移必须幂等
+8. main 分支的机械保护当前不可用(私有个人仓库计划限制),Agent 必须自我约束:
+   任何情况下不得直接 push 到 main,不得自行 merge PR,不得 force push。违反视为严重事故。
 
 ## 模块写权限(同一时间一个模块只有一个 Agent 可写)
 backend/app/providers/**   → Codex
