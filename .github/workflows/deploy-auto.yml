@@ -34,7 +34,7 @@ jobs:
           set -euo pipefail
           before="${{ github.event.before }}"
           after="${{ github.sha }}"
-          if [[ "$before" =~ ^0+$ ]]; then
+          if [[ -z "$before" || "$before" =~ ^0+$ ]]; then
             changed="$(git show --format= --name-only "$after")"
           else
             changed="$(git diff --name-only "$before" "$after")"
