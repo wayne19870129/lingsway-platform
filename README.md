@@ -28,6 +28,22 @@ make test-unit
 Tasks T0 through T8 are completed one at a time. Every task is submitted as a PR,
 reviewed, and merged before work starts on its successor.
 
+## Risk-based deployment
+
+Pull requests receive one risk label from `risk-classify.yml`. Higher risk wins
+when a change touches multiple classes.
+
+| Risk | Paths | Deployment mode |
+| --- | --- | --- |
+| `risk:low` | `frontend/**`, `docs/**`, `backend/app/api/**`, `backend/app/domain/**`, `backend/app/schemas/**`, `backend/tests/**` | `deploy-auto.yml` after merge; currently dry-run only |
+| `risk:medium` | gateway/forwarder/egress providers, `ops/gateway/**`, `ops/forwarder/**`, Marzban and compose infrastructure | Manual `deploy-gateway.yml`; currently dry-run only |
+| `risk:migration` | `infrastructure/alembic/versions/**` | Manual `deploy-migration.yml` with a mandatory backup gate; currently dry-run only |
+| `risk:high` | Any path outside the classes above, or destructive/credential/host actions | No automated deployment; human VPS procedure required |
+
+The deploy workflows are intentionally fail-closed with `DRY_RUN=true` until T7
+implements the remote deployment scripts and production Actions secrets are
+configured.
+
 ## Explicitly out of scope
 
 - Referral rewards, ticketing, wallet balances, and online customer-service plugins

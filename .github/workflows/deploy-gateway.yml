@@ -1,0 +1,49 @@
+name: Deploy gateway changes
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Keep true until T7 connects the deployment implementation
+        required: true
+        type: choice
+        default: 'true'
+        options: ['true', 'false']
+
+permissions:
+  contents: read
+
+env:
+  DRY_RUN: ${{ inputs.dry_run || 'true' }}
+
+jobs:
+  gateway-dry-run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enforce fail-closed dry-run mode
+        run: |
+          test "$DRY_RUN" = "true"
+          echo "DRY_RUN=true; gateway deployment has no remote side effects"
+      - name: Verify before gateway apply (dry-run)
+        run: echo "[DRY_RUN] would run the Xray-related subset of deploy/lib/70_verify.sh before apply"
+      - name: Nine-step Xray protection plan (dry-run)
+        shell: bash
+        run: |
+          set -euo pipefail
+          steps=(
+            "1 backup current xray_config.json"
+            "2 render candidate from the database"
+            "3 parse candidate JSON"
+            "4 run xray run -test"
+            "5 verify preservation invariants"
+            "6 reload only after validation"
+            "7 check Marzban, 8443, old routes, and new routes"
+            "8 restore backup, reload, reverify, disable new user, alert on failure"
+            "9 write audit log and send failure notification"
+          )
+          printf '[DRY_RUN] %s\n' "${steps[@]}"
+      - name: Apply gateway candidate (dry-run)
+        run: echo "[DRY_RUN] would apply through the nine-step protected gateway provider"
+      - name: Verify after gateway apply (dry-run)
+        run: echo "[DRY_RUN] would run the Xray-related subset of deploy/lib/70_verify.sh after apply"
