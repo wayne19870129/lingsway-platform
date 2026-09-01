@@ -50,6 +50,15 @@ jobs:
         working-directory: frontend
       - run: make lint
 
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shellcheck deployment scripts
+        run: |
+          bash -n deploy/bootstrap.sh deploy/rollback.sh deploy/lib/*.sh
+          shellcheck --severity=error deploy/bootstrap.sh deploy/rollback.sh deploy/lib/*.sh
+
   backend:
     runs-on: ubuntu-latest
     services:
