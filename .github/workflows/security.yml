@@ -12,6 +12,19 @@ permissions:
   pull-requests: read
 
 jobs:
+  policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject production secret references
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -nE 'PROD_[A-Za-z0-9_]+' .github/workflows/ci.yml .github/workflows/security.yml; then
+            echo "PROD_* references are forbidden in CI and Security workflows"
+            exit 1
+          fi
+
   gitleaks:
     runs-on: ubuntu-latest
     steps:

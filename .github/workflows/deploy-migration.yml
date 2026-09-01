@@ -1,0 +1,42 @@
+name: Deploy migration changes
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Keep true until T7 connects the deployment implementation
+        required: true
+        type: choice
+        default: 'true'
+        options: ['true', 'false']
+
+permissions:
+  contents: read
+
+env:
+  DRY_RUN: ${{ inputs.dry_run || 'true' }}
+
+jobs:
+  migration-dry-run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enforce fail-closed dry-run mode
+        run: |
+          test "$DRY_RUN" = "true"
+          echo "DRY_RUN=true; migration workflow has no remote side effects"
+      - name: Mandatory encrypted backup gate (dry-run)
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "[DRY_RUN] would call ops/backup/backup.sh before any migration"
+          echo "[DRY_RUN] would require successful encryption, R2 upload, and SHA-256 verification"
+          echo "[DRY_RUN] any backup failure would stop the workflow before migration"
+      - name: Package and verify SHA-256 (dry-run)
+        run: echo "[DRY_RUN] would package and verify the migration release"
+      - name: Apply migration (dry-run)
+        run: echo "[DRY_RUN] would run alembic upgrade head only after the backup gate"
+      - name: Verify and rollback hook (dry-run)
+        run: |
+          echo "[DRY_RUN] would run deploy/lib/70_verify.sh"
+          echo "[DRY_RUN] would invoke deploy/rollback.sh if verification failed"

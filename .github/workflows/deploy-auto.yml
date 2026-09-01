@@ -1,0 +1,69 @@
+name: Deploy low-risk changes
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  DRY_RUN: "true"
+
+jobs:
+  classify:
+    runs-on: ubuntu-latest
+    outputs:
+      low_only: ${{ steps.paths.outputs.low_only }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: paths
+        name: Confirm every changed path is low risk
+        shell: bash
+        run: |
+          set -euo pipefail
+          before="${{ github.event.before }}"
+          after="${{ github.sha }}"
+          if [[ "$before" =~ ^0+$ ]]; then
+            changed="$(git show --format= --name-only "$after")"
+          else
+            changed="$(git diff --name-only "$before" "$after")"
+          fi
+          low_only=true
+          while IFS= read -r path; do
+            [[ -z "$path" ]] && continue
+            case "$path" in
+              frontend/*|docs/*|backend/app/api/*|backend/app/domain/*|backend/app/schemas/*|backend/tests/*) ;;
+              *) low_only=false ;;
+            esac
+          done <<< "$changed"
+          echo "Changed paths:"
+          printf '%s\n' "$changed"
+          echo "low_only=$low_only" >> "$GITHUB_OUTPUT"
+
+  dry-run:
+    needs: classify
+    if: needs.classify.outputs.low_only == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enforce fail-closed dry-run mode
+        run: |
+          test "$DRY_RUN" = "true"
+          echo "DRY_RUN=true; no SSH, production secret, or remote write is permitted"
+      - name: CI gate
+        run: echo "CI must be green before this sequence is enabled for real deployment"
+      - name: Backup remote source and env (dry-run)
+        run: echo "[DRY_RUN] would back up remote source and /opt/lingsway/.env"
+      - name: Package and verify SHA-256 (dry-run)
+        run: echo "[DRY_RUN] would package the release and verify SHA-256"
+      - name: Extract package (dry-run)
+        run: echo "[DRY_RUN] would extract the verified package"
+      - name: Rebuild backend-api and frontend only (dry-run)
+        run: echo "[DRY_RUN] would rebuild backend-api and frontend; transport and MySQL remain untouched"
+      - name: Run deploy verification (dry-run)
+        run: echo "[DRY_RUN] would run deploy/lib/70_verify.sh"
+      - name: Rollback hook (dry-run)
+        run: echo "[DRY_RUN] rollback hook is deploy/rollback.sh on any failed real step"
