@@ -102,6 +102,7 @@ class GatewayRouteBinding(Base):
         unique=True,
     )
     active_gateway_principal: Mapped[str | None] = mapped_column(
+        String(128),
         Computed(
             "IF(released_at IS NULL AND enabled = 1, gateway_principal, NULL)", persisted=True
         ),

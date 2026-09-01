@@ -9,8 +9,8 @@ from typing import Any
 
 from backend.app.providers.egress.webshare import (
     UrllibTransport,
-    WebshareReadOnlyAdapter,
     WebshareProvider,
+    WebshareReadOnlyAdapter,
 )
 
 
