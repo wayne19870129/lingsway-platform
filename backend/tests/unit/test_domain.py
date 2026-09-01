@@ -244,3 +244,14 @@ def test_v2ray_and_unknown_user_agents_use_required_formats() -> None:
 
 def test_quota_conversion_is_one_to_one() -> None:
     assert quota_gb_to_bytes(Decimal("50")) == 50 * BYTES_PER_GIB
+
+
+def test_quota_conversion_boundary_values_are_exact_and_never_rounded() -> None:
+    with pytest.raises(ValueError, match="quota must be positive"):
+        quota_gb_to_bytes(Decimal("0"))
+
+    one_byte_in_gib = Decimal(1) / Decimal(BYTES_PER_GIB)
+    assert quota_gb_to_bytes(one_byte_in_gib) == 1
+
+    with pytest.raises(ValueError, match="whole number of bytes"):
+        quota_gb_to_bytes(Decimal("0.0000000005"))

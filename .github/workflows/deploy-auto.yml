@@ -3,12 +3,20 @@ name: Deploy low-risk changes
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Keep true until T7 connects the deployment implementation
+        required: true
+        type: choice
+        default: 'true'
+        options: ['true', 'false']
 
 permissions:
   contents: read
 
 env:
-  DRY_RUN: "true"
+  DRY_RUN: ${{ inputs.dry_run || 'true' }}
 
 jobs:
   classify:
