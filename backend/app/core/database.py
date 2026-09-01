@@ -27,7 +27,3 @@ def get_db() -> Generator[Session, None, None]:
         yield session
     finally:
         session.close()
-
-    return sessionmaker(  # type: ignore[return-value]
-        bind=engine, autoflush=False, expire_on_commit=False
-    )
