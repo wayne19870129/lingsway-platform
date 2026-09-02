@@ -37,6 +37,12 @@ repositories provide `docker-compose` v1 instead. The deployment now selects
 package availability, and the shared Compose helper supports both command
 layouts.
 
+The next bootstrap attempt installed Docker/Compose and created the deploy
+user, then failed with `tmp: unbound variable` in the sudoers cleanup trap.
+The trap referenced a function-local variable after the function returned.
+The cleanup now uses an explicit script-scope temporary-file variable, so
+`set -u` cannot turn normal cleanup into a deployment failure.
+
 Deployment instructions are delivered and machine-verified in T6/T7.
 
 ## GitHub settings that require manual configuration

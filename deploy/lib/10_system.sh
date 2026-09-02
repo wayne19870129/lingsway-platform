@@ -6,6 +6,14 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=common.sh
 source "$SCRIPT_DIR/common.sh"
 
+SUDOERS_TMP=''
+
+cleanup_sudoers_tmp() {
+  if [[ -n "${SUDOERS_TMP:-}" ]]; then
+    rm -f -- "$SUDOERS_TMP"
+  fi
+}
+
 main() {
   while (($# > 0)); do
     case "$1" in
@@ -55,7 +63,8 @@ main() {
   local tmp sudoers_path
   sudoers_path=/etc/sudoers.d/lingsway-deploy
   tmp="$(mktemp)"
-  trap 'rm -f "$tmp"' EXIT
+  SUDOERS_TMP="$tmp"
+  trap cleanup_sudoers_tmp EXIT
   printf '%s\n' \
     'Cmnd_Alias LINGSWAY_DEPLOY = /usr/bin/docker, /usr/bin/docker compose *, /usr/bin/systemctl restart lingsway-*' \
     'deploy ALL=(root) NOPASSWD: LINGSWAY_DEPLOY' > "$tmp"
