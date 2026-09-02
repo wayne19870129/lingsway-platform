@@ -32,6 +32,20 @@ main() {
   # Stage-two finding (2026-09-02): 70_verify must report every check even when
   # a prerequisite such as Docker is absent; its checks therefore return 1
   # instead of calling the terminating common require_cmd helper.
+  # Stage-two finding (2026-09-02): Debian 12's configured repositories exposed
+  # docker-compose (v1), not docker-compose-v2; 10_system and common compose
+  # support both package layouts without weakening the deployment checks.
+  # Stage-two finding (2026-09-02): docker-compose v1 interprets Compose v2's
+  # top-level name as a service. The project name is now supplied with -p and
+  # the base file stays valid for both Compose generations.
+  # Stage-two finding (2026-09-02): Compose v1 also needs an explicit version
+  # before it recognizes an empty services map as the top-level services key.
+  # Stage-two finding (2026-09-02): stat -c '%a' reports a 0600 file as "600";
+  # 20_secrets compares that exact representation so valid secrets are not
+  # rejected by a formatting mismatch.
+  # Stage-two finding (2026-09-02): an empty Compose skeleton made exec/up
+  # appear successful under some Compose versions; stack and verifier steps
+  # now require the expected services before claiming success.
   # 80_schedule precedes 70_verify because the verifier intentionally checks
   # the backup schedule that must exist on a completed target.
   for step in 00_preflight 10_system 20_secrets 30_dns_verify 40_stack_up 50_migrate 60_seed 80_schedule 70_verify; do

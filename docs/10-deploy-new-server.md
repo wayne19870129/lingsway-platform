@@ -22,6 +22,48 @@ the temporary host did not satisfy the resource gate, bootstrap did not reach
 database migration, stack startup, or final verification; this run must not
 be described as a successful deployment.
 
+The first full bootstrap attempt on the upgraded host then reached
+`10_system.sh` and stopped with `docker group does not exist; install Docker
+before creating deploy access`. The stage-one script had assumed Docker was
+already installed on a blank Debian host. The fix installs the Debian Docker,
+Compose, sudo, UFW, fail2ban, and GnuPG packages when Docker/Compose is absent,
+then starts Docker before configuring the deploy user. Package installation is
+still target-local; no production host is contacted.
+
+The following bootstrap attempt reached the package install step and failed
+with `E: Unable to locate package docker-compose-v2`. The configured Debian 12
+repositories provide `docker-compose` v1 instead. The deployment now selects
+`docker-compose-v2`, `docker-compose-plugin`, or `docker-compose` according to
+package availability, and the shared Compose helper supports both command
+layouts.
+
+The next run exposed a false-success hazard: an empty Compose skeleton caused
+stack startup, migration, and the Xray check to appear successful under some
+Compose versions even though no backend service existed. The deployment now
+requires declared services (including `backend-api` for migration/Xray) and
+uses a Compose-v1-compatible `ps` check before reporting PASS.
+
+After Docker installation, Compose v1 rejected the repository's top-level
+`name: lingsway` with `services 'name' must be a mapping not a string`. The
+project name is now passed explicitly with `-p lingsway`, and the base Compose
+file no longer uses the v2-only top-level key.
+
+Compose v1 then interpreted the empty `services:` map as a service and reported
+`Service services has neither an image nor a build context specified`. The
+empty Compose skeletons now carry an explicit `version: "3.8"` for v1/v2
+compatibility; no service was added by this fix.
+
+The following bootstrap attempt showed all three secret files as `600
+root:root`, but `20_secrets.sh` compared the mode to the literal `0600` and
+rejected them. Linux `stat -c '%a'` returns `600`; the mode comparison now uses
+that exact representation.
+
+The next bootstrap attempt installed Docker/Compose and created the deploy
+user, then failed with `tmp: unbound variable` in the sudoers cleanup trap.
+The trap referenced a function-local variable after the function returned.
+The cleanup now uses an explicit script-scope temporary-file variable, so
+`set -u` cannot turn normal cleanup into a deployment failure.
+
 Deployment instructions are delivered and machine-verified in T6/T7.
 
 ## GitHub settings that require manual configuration

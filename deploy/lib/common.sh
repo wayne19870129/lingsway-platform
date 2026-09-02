@@ -77,7 +77,13 @@ compose() {
     args+=(-f "${COMPOSE_PROBE_FILE:-$DEPLOY_ROOT/infrastructure/compose/compose.probe.yml}")
     args+=(--profile probe)
   fi
-  docker compose "${args[@]}" "$@"
+  if docker compose version >/dev/null 2>&1; then
+    docker compose -p "${COMPOSE_PROJECT_NAME:-lingsway}" "${args[@]}" "$@"
+  elif command -v docker-compose >/dev/null 2>&1; then
+    docker-compose -p "${COMPOSE_PROJECT_NAME:-lingsway}" "${args[@]}" "$@"
+  else
+    die 'Docker Compose v2 or the docker-compose compatibility command is required'
+  fi
 }
 
 load_inventory_defaults() {
@@ -95,7 +101,18 @@ load_inventory_defaults() {
   EMAIL_PROVIDER="${EMAIL_PROVIDER:-$(inventory_value providers email)}"
   CAPTCHA_PROVIDER="${CAPTCHA_PROVIDER:-$(inventory_value providers captcha)}"
   STORAGE_PROVIDER="${STORAGE_PROVIDER:-$(inventory_value providers storage)}"
+  ENABLE_MONITORING="${ENABLE_MONITORING:-$(inventory_value features monitoring)}"
+  ENABLE_PROBE="${ENABLE_PROBE:-$(inventory_value features probe)}"
+  ENABLE_SOCKS_1080="${ENABLE_SOCKS_1080:-$(inventory_value features socks_1080)}"
+  RESTART_TRANSPORT="${RESTART_TRANSPORT:-$(inventory_value features restart_transport)}"
+  EGRESS_COUNT_COMMAND="${EGRESS_COUNT_COMMAND:-$(inventory_value verification egress_count_command)}"
+  MIHOMO_LISTENER_COUNT_COMMAND="${MIHOMO_LISTENER_COUNT_COMMAND:-$(inventory_value verification mihomo_listener_count_command)}"
+  MIHOMO_IP_MATCH_COMMAND="${MIHOMO_IP_MATCH_COMMAND:-$(inventory_value verification mihomo_ip_match_command)}"
+  CAPACITY_VERIFY_COMMAND="${CAPACITY_VERIFY_COMMAND:-$(inventory_value verification capacity_verify_command)}"
   export TARGET_HOST SITE_DOMAIN API_DOMAIN SUBSCRIPTION_DOMAIN
   export EGRESS_PROVIDER ACCOUNTING_PROVIDER GATEWAY_PROVIDER FORWARDER_PROVIDER
   export PAYMENT_PROVIDER NOTIFY_PROVIDER EMAIL_PROVIDER CAPTCHA_PROVIDER STORAGE_PROVIDER
+  export ENABLE_MONITORING ENABLE_PROBE ENABLE_SOCKS_1080 RESTART_TRANSPORT
+  export EGRESS_COUNT_COMMAND MIHOMO_LISTENER_COUNT_COMMAND MIHOMO_IP_MATCH_COMMAND
+  export CAPACITY_VERIFY_COMMAND
 }

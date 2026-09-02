@@ -21,3 +21,10 @@ features:
   probe: false
   socks_1080: false
   restart_transport: false
+verification:
+  # Set these to read-only commands that query the target's database/API.
+  # Empty values fail closed; do not use commands that send messages or write data.
+  egress_count_command: ""
+  mihomo_listener_count_command: ""
+  mihomo_ip_match_command: ""
+  capacity_verify_command: ""
