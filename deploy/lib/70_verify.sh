@@ -9,7 +9,7 @@ source "$SCRIPT_DIR/common.sh"
 failures=0
 
 check_01_compose() {
-  require_cmd docker
+  command -v docker >/dev/null 2>&1 || return 1
   local rows service state health
   rows="$(compose ps --all --format '{{.Service}} {{.State}} {{.Health}}')"
   [[ -n "$rows" ]] || return 1
@@ -20,7 +20,7 @@ check_01_compose() {
 }
 
 check_02_backend_health() {
-  require_cmd curl
+  command -v curl >/dev/null 2>&1 || return 1
   local code
   code="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
     --max-time "${HEALTH_TIMEOUT_SECONDS:-10}" \
@@ -29,7 +29,7 @@ check_02_backend_health() {
 }
 
 check_03_alembic_head() {
-  require_cmd docker
+  command -v docker >/dev/null 2>&1 || return 1
   local current head
   current="$(compose exec --no-TTY backend-api alembic current)"
   head="$(compose exec --no-TTY backend-api alembic heads | awk 'NF { print $1; exit }')"
@@ -38,7 +38,7 @@ check_03_alembic_head() {
 }
 
 check_04_dns() {
-  require_cmd getent
+  command -v getent >/dev/null 2>&1 || return 1
   [[ -n "${TARGET_HOST:-}" ]] || return 1
   local domain resolved
   for domain in "$SITE_DOMAIN" "$API_DOMAIN" "$SUBSCRIPTION_DOMAIN"; do
@@ -49,7 +49,7 @@ check_04_dns() {
 }
 
 check_05_certificate() {
-  require_cmd openssl
+  command -v openssl >/dev/null 2>&1 || return 1
   local certificate="${CERT_FILE:-/var/lib/caddy/.local/share/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${SITE_DOMAIN}/${SITE_DOMAIN}.crt}"
   [[ -s "$certificate" ]] || return 1
   openssl x509 -in "$certificate" -noout -checkend "$((14 * 86400))"
@@ -61,7 +61,7 @@ port_is_listening() {
 }
 
 check_06_ports() {
-  require_cmd ss
+  command -v ss >/dev/null 2>&1 || return 1
   local port
   for port in 80 443 8443; do
     port_is_listening "$port" || return 1
@@ -74,14 +74,14 @@ check_06_ports() {
 }
 
 check_07_ufw() {
-  require_cmd ufw
+  command -v ufw >/dev/null 2>&1 || return 1
   ufw status | grep -Fq 'Status: active' || return 1
   ufw status verbose | grep -Eiq 'Default: deny \(incoming\)' \
     || ufw status verbose | grep -Eiq 'Default: deny \(incoming\), allow \(outgoing\)'
 }
 
 check_08_ssh_root_password() {
-  require_cmd sshd
+  command -v sshd >/dev/null 2>&1 || return 1
   local effective
   effective="$(sshd -T)"
   grep -Eiq '^permitrootlogin (no|prohibit-password)$' <<< "$effective"
@@ -92,13 +92,13 @@ check_09_xray_test() {
     bash -c "$XRAY_TEST_COMMAND"
     return
   fi
-  require_cmd docker
+  command -v docker >/dev/null 2>&1 || return 1
   compose exec --no-TTY backend-api xray run -test \
     -config "${XRAY_CONFIG_FILE:-/etc/xray/config.json}"
 }
 
 check_10_routing_invariants() {
-  require_cmd python3
+  command -v python3 >/dev/null 2>&1 || return 1
   local config="${XRAY_CONFIG_FILE:-/etc/xray/config.json}"
   [[ -s "$config" ]] || return 1
   python3 - "$config" <<'PY'
