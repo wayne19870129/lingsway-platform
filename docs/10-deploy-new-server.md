@@ -30,6 +30,13 @@ build the backend image and then run the one-shot container because Compose v1
 does not support `run --build` and can otherwise print usage without making
 the intended command run.
 
+Marzban's internal HTTPS listener is separate from the public Caddy
+certificate. On a fresh target, `40_stack_up.sh` creates a self-signed
+localhost certificate/key pair only when both files are absent and mounts them
+read-only into Marzban. A partial pair is a hard failure. This prevents the
+image's exit-code-0 restart behavior from hiding a missing internal TLS
+dependency; public certificate validation remains verifier item 5.
+
 ## T7 stage-two field findings (2026-09-02)
 
 The temporary host `45.32.74.42` (`lingsway-t7-stage2`, Debian 12) reported

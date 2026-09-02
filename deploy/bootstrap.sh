@@ -76,6 +76,10 @@ main() {
   # The renderer is run as an /app module inside the backend image so its
   # imports resolve from the image work directory; invoking the mounted file
   # by absolute path would make Python omit /app and fail closed.
+  # Stage-two finding (2026-09-02): the Marzban image exits 0 when its
+  # configured internal TLS pair is absent.  40_stack_up now generates a
+  # staging-safe self-signed localhost pair only when both files are absent;
+  # a half-existing pair is rejected instead of overwritten.
   for step in 00_preflight 10_system 20_secrets 30_dns_verify 50_migrate 40_stack_up 60_seed 80_schedule 70_verify; do
     printf '[lingsway-deploy] running %s\n' "$step"
     bash "$SCRIPT_DIR/lib/$step.sh" --inventory "$INVENTORY_FILE"

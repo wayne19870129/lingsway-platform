@@ -40,6 +40,21 @@ if any(isinstance(rule, dict) and rule.get("outboundTag") == "DIRECT" for rule i
 PY
 }
 
+ensure_marzban_internal_tls() {
+  local marzban_dir="$1" certificate="$marzban_dir/internal.crt" key="$marzban_dir/internal.key"
+  require_cmd openssl
+  if [[ ! -e "$certificate" && ! -e "$key" ]]; then
+    openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 3650 \
+      -subj '/CN=localhost' \
+      -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' \
+      -keyout "$key" -out "$certificate" >/dev/null 2>&1
+    chmod 600 "$certificate" "$key"
+    return
+  fi
+  [[ -f "$certificate" && -f "$key" ]] || \
+    die 'Marzban internal TLS files are incomplete; refusing to overwrite an existing half-pair'
+}
+
 main() {
   while (($# > 0)); do
     case "$1" in
@@ -67,6 +82,7 @@ main() {
     install -m 600 /dev/null "$sqlite_db"
   fi
   [[ -f "$sqlite_db" ]] || die "Marzban SQLite database path is not a file: $sqlite_db"
+  ensure_marzban_internal_tls "$marzban_dir"
   log 'rendering Xray runtime config from the migrated database before Marzban'
   compose build backend-api
   compose run --rm --no-deps backend-api \
