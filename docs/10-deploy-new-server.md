@@ -22,6 +22,14 @@ the temporary host did not satisfy the resource gate, bootstrap did not reach
 database migration, stack startup, or final verification; this run must not
 be described as a successful deployment.
 
+The first full bootstrap attempt on the upgraded host then reached
+`10_system.sh` and stopped with `docker group does not exist; install Docker
+before creating deploy access`. The stage-one script had assumed Docker was
+already installed on a blank Debian host. The fix installs the Debian Docker,
+Compose, sudo, UFW, fail2ban, and GnuPG packages when Docker/Compose is absent,
+then starts Docker before configuring the deploy user. Package installation is
+still target-local; no production host is contacted.
+
 Deployment instructions are delivered and machine-verified in T6/T7.
 
 ## GitHub settings that require manual configuration

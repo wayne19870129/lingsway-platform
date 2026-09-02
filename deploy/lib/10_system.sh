@@ -19,6 +19,17 @@ main() {
     return 0
   fi
   [[ "$(id -u)" -eq 0 ]] || die '10_system.sh must run as root on the target host'
+  # Stage-two finding (2026-09-02): a clean Debian 12 host did not have the
+  # docker group. Install the required local packages here so bootstrap really
+  # works from a blank host; do not silently assume Docker was preinstalled.
+  if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>&1; then
+    require_cmd apt-get
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install --yes \
+      ca-certificates docker.io docker-compose-v2 sudo ufw fail2ban gnupg
+    require_cmd systemctl
+    systemctl enable --now docker
+  fi
   require_cmd useradd
   require_cmd usermod
   require_cmd install
