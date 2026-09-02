@@ -1,4 +1,21 @@
+from types import SimpleNamespace
+
+import ops.gateway.render_xray_routes as renderer
 from ops.gateway.render_xray_routes import render_config
+
+
+def test_xray_private_key_parser_accepts_xray_cli_labels(monkeypatch) -> None:
+    monkeypatch.setattr(
+        renderer.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout="PrivateKey: generated-key\n",
+            stderr="",
+        ),
+    )
+
+    assert renderer._x25519_private_key("xray") == "generated-key"
 
 
 def test_empty_database_render_has_only_block_and_terminal_guards() -> None:

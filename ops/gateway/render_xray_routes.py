@@ -38,9 +38,10 @@ def _x25519_private_key(binary: str) -> str:
     )
     if result.returncode != 0:
         raise XrayRenderError("xray x25519 key generation failed")
-    for line in result.stdout.splitlines():
+    for line in (result.stdout + result.stderr).splitlines():
         label, separator, value = line.partition(":")
-        if separator and label.strip().lower() == "private key" and value.strip():
+        normalized_label = "".join(label.lower().split())
+        if separator and normalized_label == "privatekey" and value.strip():
             return value.strip()
     raise XrayRenderError("xray x25519 output did not contain a private key")
 
