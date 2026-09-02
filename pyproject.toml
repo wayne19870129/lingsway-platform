@@ -10,6 +10,7 @@ requires-python = ">=3.12"
 dependencies = [
   "alembic>=1.16,<2",
   "cryptography>=50,<51",
+  "httpx>=0.28,<1",
   "PyJWT>=2.10,<3",
   "pymysql[rsa]>=1.1,<2",
   "PyYAML>=6.0,<7",
