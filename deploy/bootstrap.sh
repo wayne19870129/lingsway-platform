@@ -48,6 +48,18 @@ main() {
   # now require the expected services before claiming success.
   # 80_schedule precedes 70_verify because the verifier intentionally checks
   # the backup schedule that must exist on a completed target.
+  # Stage-two finding (2026-09-02): a fresh bind-mounted SQLite/Xray path that
+  # does not exist is created by Docker as a directory, not a file. The target
+  # must create these runtime files before stack-up; the base Xray skeleton is
+  # not a runnable production configuration until database rendering supplies
+  # outbounds and routing.
+  # Stage-two finding (2026-09-02): the backend image previously copied only
+  # source files, so a container could build while missing FastAPI/SQLAlchemy
+  # and other pyproject dependencies at runtime. The Dockerfile now installs
+  # the project package during image build.
+  # Stage-two finding (2026-09-02): docker-compose exec may return success for
+  # a declared service with no running container under Compose v1. The verifier
+  # now checks the backend-api container explicitly before Alembic/Xray tests.
   for step in 00_preflight 10_system 20_secrets 30_dns_verify 40_stack_up 50_migrate 60_seed 80_schedule 70_verify; do
     printf '[lingsway-deploy] running %s\n' "$step"
     bash "$SCRIPT_DIR/lib/$step.sh" --inventory "$INVENTORY_FILE"

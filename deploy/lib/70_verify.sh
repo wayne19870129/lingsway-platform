@@ -37,11 +37,21 @@ check_02_backend_health() {
   [[ "$code" == 200 ]]
 }
 
+compose_service_running() {
+  local service="$1" project container_id
+  project="${COMPOSE_PROJECT_NAME:-lingsway}"
+  container_id="$(docker ps -q \
+    --filter "label=com.docker.compose.project=$project" \
+    --filter "label=com.docker.compose.service=$service" | head -n 1)"
+  [[ -n "$container_id" ]]
+}
+
 check_03_alembic_head() {
   command -v docker >/dev/null 2>&1 || return 1
   local services current head
   services="$(compose config --services)"
   grep -Fxq backend-api <<< "$services" || return 1
+  compose_service_running backend-api || return 1
   current="$(compose exec --no-TTY backend-api alembic current)"
   head="$(compose exec --no-TTY backend-api alembic heads | awk 'NF { print $1; exit }')"
   [[ -n "$head" ]] || return 1
@@ -107,6 +117,7 @@ check_09_xray_test() {
   local services
   services="$(compose config --services)"
   grep -Fxq backend-api <<< "$services" || return 1
+  compose_service_running backend-api || return 1
   compose exec --no-TTY backend-api xray run -test \
     -config "${XRAY_CONFIG_FILE:-/etc/xray/config.json}"
 }

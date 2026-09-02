@@ -64,6 +64,30 @@ The trap referenced a function-local variable after the function returned.
 The cleanup now uses an explicit script-scope temporary-file variable, so
 `set -u` cannot turn normal cleanup into a deployment failure.
 
+The first full stack attempt on the upgraded temporary host exposed three
+additional deployment prerequisites. The Compose file bind-mounts
+`data/marzban/xray_config.json` and `db.sqlite3`; when either host file is
+absent, Docker creates a directory at that path and the container fails before
+its process starts. A deployment must create file-typed runtime paths before
+`compose up`. The checked-in `xray_config.base.json` is intentionally only a
+skeleton: it is not runnable until the database renderer supplies valid
+outbounds, clients, Reality values, and BLOCK routing.
+
+The backend image also previously copied application source without installing
+the dependencies declared in `pyproject.toml`. That allowed image build to
+finish while runtime imports were unavailable. The image now installs the
+project package during build. Finally, Compose v1 can return zero from
+`exec` for a declared service that has no running container. The verifier now
+requires a running `backend-api` container before executing its Alembic and
+Xray checks, preventing a false PASS.
+
+On the temporary host, Marzban then reached its own process but remained
+unhealthy because the deliberately empty staging skeleton had no outbounds;
+this is a fail-closed result, not evidence that a production Xray config is
+valid. Root password SSH login remained enabled because SSH hardening requires
+an operator-approved change under the repository permission policy. R2,
+Telegram, and Webshare remained unconfigured by design.
+
 Deployment instructions are delivered and machine-verified in T6/T7.
 
 ## GitHub settings that require manual configuration
