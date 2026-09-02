@@ -1,18 +1,26 @@
 from types import SimpleNamespace
+import subprocess
+
+import pytest
 
 import ops.gateway.render_xray_routes as renderer
 from ops.gateway.render_xray_routes import render_config
 
 
-def test_xray_private_key_parser_accepts_xray_cli_labels(monkeypatch) -> None:
-    monkeypatch.setattr(
-        renderer.subprocess,
-        "run",
-        lambda *args, **kwargs: SimpleNamespace(
+def test_xray_private_key_parser_accepts_xray_cli_labels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(*args: object, **kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(
             returncode=0,
             stdout="PrivateKey: generated-key\n",
             stderr="",
-        ),
+        )
+
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        fake_run,
     )
 
     assert renderer._x25519_private_key("xray") == "generated-key"
