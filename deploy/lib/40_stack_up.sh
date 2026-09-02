@@ -68,7 +68,8 @@ main() {
   fi
   [[ -f "$sqlite_db" ]] || die "Marzban SQLite database path is not a file: $sqlite_db"
   log 'rendering Xray runtime config from the migrated database before Marzban'
-  compose run --build --rm --no-deps backend-api \
+  compose build backend-api
+  compose run --rm --no-deps backend-api \
     python /app/ops/gateway/render_xray_routes.py
   validate_runtime_files
   compose up --detach

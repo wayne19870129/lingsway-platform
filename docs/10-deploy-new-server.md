@@ -25,7 +25,10 @@ The migration/render order is intentional: starting the full Compose stack
 first would make backend-api depend on Marzban, while Marzban requires the
 rendered file. If a target's Compose implementation cannot run the disposable
 backend build, capture that failure and fix the deployment environment or
-workflow; do not mount the base skeleton directly.
+workflow; do not mount the base skeleton directly. The scripts explicitly
+build the backend image and then run the one-shot container because Compose v1
+does not support `run --build` and can otherwise print usage without making
+the intended command run.
 
 ## T7 stage-two field findings (2026-09-02)
 

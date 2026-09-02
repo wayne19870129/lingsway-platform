@@ -55,7 +55,11 @@ main() {
     sleep 2
   done
   [[ "$ready" == true ]] || die 'migration refused: MySQL did not become ready'
-  compose run --build --rm --no-deps backend-api alembic upgrade head
+  # Compose v1 has no `run --build` option and may print usage with a zero
+  # status. Build explicitly so both Compose generations fail closed, then
+  # run the disposable migration container without the unsupported option.
+  compose build backend-api
+  compose run --rm --no-deps backend-api alembic upgrade head
   log 'alembic upgrade head completed after backup gate'
 }
 
