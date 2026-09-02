@@ -24,6 +24,7 @@ features:
 verification:
   # Set these to read-only commands that query the target's database/API.
   # Empty values fail closed; do not use commands that send messages or write data.
+  xray_config_file: /opt/lingsway/data/marzban/xray_config.json
   egress_count_command: ""
   mihomo_listener_count_command: ""
   mihomo_ip_match_command: ""

@@ -44,8 +44,11 @@ services:
       MIHOMO_RUNTIME_CONFIG_PATH: /root/.config/mihomo/config.yaml
     volumes:
       - ../../data/mihomo:/app/data/mihomo
+      - ../../data/marzban:/app/data/marzban
       - ../../data/gateway-probe:/app/data/gateway-probe:ro
       - ../../data/xray-reload:/app/data/xray-reload
+      - ../../ops:/app/ops:ro
+      - ../../infrastructure/marzban:/app/infrastructure/marzban:ro
     networks:
       - backend_net
       - db_net

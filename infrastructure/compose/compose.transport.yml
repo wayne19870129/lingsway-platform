@@ -40,6 +40,8 @@ services:
       - marzban_data:/var/lib/marzban
       - ../../data/marzban/db.sqlite3:/code/db.sqlite3
       - ../../data/marzban/xray_config.json:/code/xray_config.json
+      - ../../data/marzban/internal.crt:/var/lib/marzban/internal.crt:ro
+      - ../../data/marzban/internal.key:/var/lib/marzban/internal.key:ro
     networks:
       - backend_net
       - egress_net

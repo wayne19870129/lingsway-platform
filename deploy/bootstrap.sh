@@ -65,11 +65,25 @@ main() {
   # enabled, checks command-substitution exit statuses, and separates UFW
   # active-state validation from its default-policy validation. These guards
   # prevent missing commands, files, or containers from becoming PASS values.
+  # It also samples each container's running state and restart count so a
+  # process that exits successfully and is immediately restarted cannot be
+  # reported as healthy during the sampling window.
   # Stage-two finding (2026-09-02): the checked-in Xray file is a template,
   # not a runtime config. Marzban rejects it without rendered outbounds, so
   # stack-up now refuses missing/file-typed-but-unrendered runtime config and
   # never adds an arbitrary outbound merely to make the container start.
-  for step in 00_preflight 10_system 20_secrets 30_dns_verify 40_stack_up 50_migrate 60_seed 80_schedule 70_verify; do
+  # Stage-two finding (2026-09-02): Xray rendering reads the application
+  # database. The migration step therefore runs after the pre-migration
+  # backup gate and before stack-up; 40_stack_up renders the complete runtime
+  # config from that migrated database before starting Marzban.
+  # The renderer is run as an /app module inside the backend image so its
+  # imports resolve from the image work directory; invoking the mounted file
+  # by absolute path would make Python omit /app and fail closed.
+  # Stage-two finding (2026-09-02): the Marzban image exits 0 when its
+  # configured internal TLS pair is absent.  40_stack_up now generates a
+  # staging-safe self-signed localhost pair only when both files are absent;
+  # a half-existing pair is rejected instead of overwritten.
+  for step in 00_preflight 10_system 20_secrets 30_dns_verify 50_migrate 40_stack_up 60_seed 80_schedule 70_verify; do
     printf '[lingsway-deploy] running %s\n' "$step"
     bash "$SCRIPT_DIR/lib/$step.sh" --inventory "$INVENTORY_FILE"
   done

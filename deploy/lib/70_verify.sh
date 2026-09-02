@@ -10,7 +10,7 @@ failures=0
 
 check_01_compose() {
   command -v docker >/dev/null 2>&1 || return 1
-  local services service container_id health checked=0
+  local services service container_id health state restart_before restart_after checked=0
   if ! services="$(compose config --services)"; then
     return 1
   fi
@@ -25,6 +25,13 @@ check_01_compose() {
     checked=$((checked + 1))
     container_id="$(compose_service_container_id "$service")"
     [[ -n "$container_id" ]] || return 1
+    state="$(docker inspect --format '{{.State.Status}}' "$container_id")" || return 1
+    [[ "$state" == running ]] || return 1
+    restart_before="$(docker inspect --format '{{.RestartCount}}' "$container_id")" || return 1
+    sleep 1
+    state="$(docker inspect --format '{{.State.Status}}' "$container_id")" || return 1
+    restart_after="$(docker inspect --format '{{.RestartCount}}' "$container_id")" || return 1
+    [[ "$state" == running && "$restart_before" == "$restart_after" ]] || return 1
     health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' \
       "$container_id")" || return 1
     [[ "$health" == healthy || -z "$health" ]] || return 1
@@ -148,12 +155,12 @@ check_09_xray_test() {
   grep -Fxq backend-api <<< "$services" || return 1
   compose_service_running backend-api || return 1
   compose exec --no-TTY backend-api xray run -test \
-    -config "${XRAY_CONFIG_FILE:-/etc/xray/config.json}"
+    -config "${XRAY_CONTAINER_CONFIG_FILE:-/app/data/marzban/xray_config.json}"
 }
 
 check_10_routing_invariants() {
   command -v python3 >/dev/null 2>&1 || return 1
-  local config="${XRAY_CONFIG_FILE:-/etc/xray/config.json}"
+  local config="${XRAY_RUNTIME_CONFIG_FILE:-$DEPLOY_ROOT/data/marzban/xray_config.json}"
   [[ -s "$config" ]] || return 1
   python3 - "$config" <<'PY'
 import json

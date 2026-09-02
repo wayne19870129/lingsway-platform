@@ -7,6 +7,8 @@ COPY --from=xray /usr/local/bin/xray /usr/local/bin/xray
 COPY --from=xray /usr/local/share/xray/geoip.dat /usr/local/share/xray/geoip.dat
 COPY --from=xray /usr/local/share/xray/geosite.dat /usr/local/share/xray/geosite.dat
 COPY pyproject.toml /app/pyproject.toml
+COPY alembic.ini /app/alembic.ini
+COPY infrastructure/alembic /app/infrastructure/alembic
 COPY backend/app /app/backend/app
 RUN pip install --no-cache-dir .
 RUN test -x /usr/local/bin/xray \

@@ -1,5 +1,42 @@
 # Deploy a new server
 
+## Xray runtime rendering gate
+
+The checked-in `infrastructure/marzban/xray_config.base.json` is only a
+Reality inbound skeleton. Bootstrap runs the encrypted pre-migration backup
+gate, starts MySQL, and executes `alembic upgrade head` before `40_stack_up.sh`.
+That step then invokes `ops/gateway/render_xray_routes.py` in a disposable
+backend container as the module `ops.gateway.render_xray_routes`. The renderer reads the migrated database and writes the
+complete runtime file to `/opt/lingsway/data/marzban/xray_config.json` before
+Marzban starts. An empty database produces one `BLOCK` blackhole outbound,
+zero user routes, and the private-IP/tcp-udp BLOCK sentinels; it never invents
+a gateway outbound. `XRAY_REALITY_DEST` and `XRAY_REALITY_SERVER_NAME` must be
+provided by the target `.env`; the Reality private key and short ID are
+generated during rendering.
+
+The host verifier reads that host path for the JSON and routing checks, while
+the container Xray test uses `/app/data/marzban/xray_config.json`. Keeping
+these paths explicit avoids treating the checked-in skeleton or a missing
+bind-mounted file as a runtime configuration. The verifier remains fail-closed
+if rendering, JSON validation, `xray run -test`, or either routing sentinel
+check fails.
+
+The migration/render order is intentional: starting the full Compose stack
+first would make backend-api depend on Marzban, while Marzban requires the
+rendered file. If a target's Compose implementation cannot run the disposable
+backend build, capture that failure and fix the deployment environment or
+workflow; do not mount the base skeleton directly. The scripts explicitly
+build the backend image and then run the one-shot container because Compose v1
+does not support `run --build` and can otherwise print usage without making
+the intended command run.
+
+Marzban's internal HTTPS listener is separate from the public Caddy
+certificate. On a fresh target, `40_stack_up.sh` creates a self-signed
+localhost certificate/key pair only when both files are absent and mounts them
+read-only into Marzban. A partial pair is a hard failure. This prevents the
+image's exit-code-0 restart behavior from hiding a missing internal TLS
+dependency; public certificate validation remains verifier item 5.
+
 ## T7 stage-two field findings (2026-09-02)
 
 The temporary host `45.32.74.42` (`lingsway-t7-stage2`, Debian 12) reported
@@ -94,7 +131,8 @@ UFW policy fallback could theoretically accept a default-policy line without
 first proving UFW was active. It now checks every non-profile service through
 Compose labels, skips only the explicitly disabled attribution profile, checks
 the exit status of command substitutions, and requires both `Status: active`
-and the default-deny policy. Missing files, failed `curl`, failed `grep`, and
+and the default-deny policy. It also samples each container's running state and
+restart count. Missing files, failed `curl`, failed `grep`, and
 failed `docker exec`/Compose commands therefore remain failures rather than
 being converted to PASS.
 
