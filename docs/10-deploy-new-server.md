@@ -37,6 +37,11 @@ repositories provide `docker-compose` v1 instead. The deployment now selects
 package availability, and the shared Compose helper supports both command
 layouts.
 
+The following bootstrap attempt showed all three secret files as `600
+root:root`, but `20_secrets.sh` compared the mode to the literal `0600` and
+rejected them. Linux `stat -c '%a'` returns `600`; the mode comparison now uses
+that exact representation.
+
 The next bootstrap attempt installed Docker/Compose and created the deploy
 user, then failed with `tmp: unbound variable` in the sudoers cleanup trap.
 The trap referenced a function-local variable after the function returned.

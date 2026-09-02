@@ -13,7 +13,8 @@ check_secret_file() {
   mode="$(stat -c '%a' "$path")"
   owner="$(stat -c '%U' "$path")"
   group="$(stat -c '%G' "$path")"
-  [[ "$mode" == 0600 && "$owner" == root && "$group" == root ]] || \
+  # stat(1) prints this mode as "600", not the octal-looking "0600".
+  [[ "$mode" == 600 && "$owner" == root && "$group" == root ]] || \
     die "secret file must be root:root mode 0600: $path"
 }
 
