@@ -22,11 +22,18 @@ main() {
   # Stage-two finding (2026-09-02): a clean Debian 12 host did not have the
   # docker group. Install the required local packages here so bootstrap really
   # works from a blank host; do not silently assume Docker was preinstalled.
-  if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>&1; then
+  if ! command -v docker >/dev/null 2>&1 || \
+    { ! docker compose version >/dev/null 2>&1 && ! command -v docker-compose >/dev/null 2>&1; }; then
     require_cmd apt-get
     apt-get update
+    local compose_package=docker-compose
+    if apt-cache show docker-compose-v2 >/dev/null 2>&1; then
+      compose_package=docker-compose-v2
+    elif apt-cache show docker-compose-plugin >/dev/null 2>&1; then
+      compose_package=docker-compose-plugin
+    fi
     DEBIAN_FRONTEND=noninteractive apt-get install --yes \
-      ca-certificates docker.io docker-compose-v2 sudo ufw fail2ban gnupg
+      ca-certificates docker.io "$compose_package" sudo ufw fail2ban gnupg
     require_cmd systemctl
     systemctl enable --now docker
   fi

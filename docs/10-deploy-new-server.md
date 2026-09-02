@@ -30,6 +30,13 @@ Compose, sudo, UFW, fail2ban, and GnuPG packages when Docker/Compose is absent,
 then starts Docker before configuring the deploy user. Package installation is
 still target-local; no production host is contacted.
 
+The following bootstrap attempt reached the package install step and failed
+with `E: Unable to locate package docker-compose-v2`. The configured Debian 12
+repositories provide `docker-compose` v1 instead. The deployment now selects
+`docker-compose-v2`, `docker-compose-plugin`, or `docker-compose` according to
+package availability, and the shared Compose helper supports both command
+layouts.
+
 Deployment instructions are delivered and machine-verified in T6/T7.
 
 ## GitHub settings that require manual configuration

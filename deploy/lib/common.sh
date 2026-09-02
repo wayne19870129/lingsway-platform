@@ -77,7 +77,13 @@ compose() {
     args+=(-f "${COMPOSE_PROBE_FILE:-$DEPLOY_ROOT/infrastructure/compose/compose.probe.yml}")
     args+=(--profile probe)
   fi
-  docker compose "${args[@]}" "$@"
+  if docker compose version >/dev/null 2>&1; then
+    docker compose "${args[@]}" "$@"
+  elif command -v docker-compose >/dev/null 2>&1; then
+    docker-compose "${args[@]}" "$@"
+  else
+    die 'Docker Compose v2 or the docker-compose compatibility command is required'
+  fi
 }
 
 load_inventory_defaults() {
