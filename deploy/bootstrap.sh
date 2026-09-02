@@ -35,6 +35,9 @@ main() {
   # Stage-two finding (2026-09-02): Debian 12's configured repositories exposed
   # docker-compose (v1), not docker-compose-v2; 10_system and common compose
   # support both package layouts without weakening the deployment checks.
+  # Stage-two finding (2026-09-02): docker-compose v1 interprets Compose v2's
+  # top-level name as a service. The project name is now supplied with -p and
+  # the base file stays valid for both Compose generations.
   # Stage-two finding (2026-09-02): stat -c '%a' reports a 0600 file as "600";
   # 20_secrets compares that exact representation so valid secrets are not
   # rejected by a formatting mismatch.

@@ -37,6 +37,11 @@ repositories provide `docker-compose` v1 instead. The deployment now selects
 package availability, and the shared Compose helper supports both command
 layouts.
 
+After Docker installation, Compose v1 rejected the repository's top-level
+`name: lingsway` with `services 'name' must be a mapping not a string`. The
+project name is now passed explicitly with `-p lingsway`, and the base Compose
+file no longer uses the v2-only top-level key.
+
 The following bootstrap attempt showed all three secret files as `600
 root:root`, but `20_secrets.sh` compared the mode to the literal `0600` and
 rejected them. Linux `stat -c '%a'` returns `600`; the mode comparison now uses

@@ -78,9 +78,9 @@ compose() {
     args+=(--profile probe)
   fi
   if docker compose version >/dev/null 2>&1; then
-    docker compose "${args[@]}" "$@"
+    docker compose -p "${COMPOSE_PROJECT_NAME:-lingsway}" "${args[@]}" "$@"
   elif command -v docker-compose >/dev/null 2>&1; then
-    docker-compose "${args[@]}" "$@"
+    docker-compose -p "${COMPOSE_PROJECT_NAME:-lingsway}" "${args[@]}" "$@"
   else
     die 'Docker Compose v2 or the docker-compose compatibility command is required'
   fi
