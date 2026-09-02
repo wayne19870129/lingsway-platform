@@ -25,6 +25,13 @@ main() {
   export DEPLOY_ROOT="${DEPLOY_ROOT:-/opt/lingsway}"
 
   local step
+  # Stage-two finding (2026-09-02): the supplied temporary host had 17GiB free
+  # and 679MiB available, below the conservative 20GiB/2GiB preflight defaults.
+  # Keep this fail-closed; provision a larger host or explicitly review the
+  # threshold overrides instead of silently weakening the guard.
+  # Stage-two finding (2026-09-02): 70_verify must report every check even when
+  # a prerequisite such as Docker is absent; its checks therefore return 1
+  # instead of calling the terminating common require_cmd helper.
   # 80_schedule precedes 70_verify because the verifier intentionally checks
   # the backup schedule that must exist on a completed target.
   for step in 00_preflight 10_system 20_secrets 30_dns_verify 40_stack_up 50_migrate 60_seed 80_schedule 70_verify; do

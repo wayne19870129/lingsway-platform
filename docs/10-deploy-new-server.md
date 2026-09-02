@@ -1,5 +1,27 @@
 # Deploy a new server
 
+## T7 stage-two field findings (2026-09-02)
+
+The temporary host `45.32.74.42` (`lingsway-t7-stage2`, Debian 12) reported
+about 17 GiB free on `/` and about 679 MiB available memory. The deployment
+preflight defaults require 20 GiB free disk and 2 GiB available memory, so
+`00_preflight.sh` safely stopped at 0 seconds with:
+`at least 20GiB free disk is required`. This is a failed preflight, not a
+skipped check. A real deployment must use a host that meets the guard, or an
+operator must explicitly review any threshold override.
+
+Running `70_verify.sh` separately then exposed a fail-fast defect: when Docker
+was absent, the shared command helper exited the whole verifier and prevented
+the remaining 14 checks from being reported. The verifier now returns a
+failure per missing prerequisite and continues, so the final report can
+classify every check independently.
+
+Only freshly generated staging secrets were used. R2, Telegram, and Webshare
+were not configured, and production host `45.77.9.5` was not contacted. Since
+the temporary host did not satisfy the resource gate, bootstrap did not reach
+database migration, stack startup, or final verification; this run must not
+be described as a successful deployment.
+
 Deployment instructions are delivered and machine-verified in T6/T7.
 
 ## GitHub settings that require manual configuration
