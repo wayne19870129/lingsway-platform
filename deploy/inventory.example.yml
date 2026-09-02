@@ -1,15 +1,23 @@
+# Copy this file to a local, untracked inventory.yml and replace placeholders.
+# Do not put credentials here. Production credentials belong in the target host's
+# /opt/lingsway/.env and /etc/lingsway/*.conf with mode 0600.
 host: 203.0.113.10
 domains:
   site: lingsway.com
   api: api.lingsway.com
   subscription: lingsway.com
 providers:
-  egress: mock
-  accounting: mock
-  gateway: mock
-  forwarder: mock
-  payment: mock
-  notify: noop
+  egress: webshare
+  accounting: marzban
+  gateway: xray_file
+  forwarder: mihomo
+  payment: manual
+  notify: telegram
   email: noop
   captcha: noop
-  storage: local
+  storage: r2
+features:
+  monitoring: false
+  probe: false
+  socks_1080: false
+  restart_transport: false
