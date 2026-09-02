@@ -1,5 +1,5 @@
-from types import SimpleNamespace
 import subprocess
+from types import SimpleNamespace
 
 import pytest
 
