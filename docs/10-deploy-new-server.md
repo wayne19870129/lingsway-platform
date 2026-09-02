@@ -42,6 +42,11 @@ After Docker installation, Compose v1 rejected the repository's top-level
 project name is now passed explicitly with `-p lingsway`, and the base Compose
 file no longer uses the v2-only top-level key.
 
+Compose v1 then interpreted the empty `services:` map as a service and reported
+`Service services has neither an image nor a build context specified`. The
+empty Compose skeletons now carry an explicit `version: "3.8"` for v1/v2
+compatibility; no service was added by this fix.
+
 The following bootstrap attempt showed all three secret files as `600
 root:root`, but `20_secrets.sh` compared the mode to the literal `0600` and
 rejected them. Linux `stat -c '%a'` returns `600`; the mode comparison now uses
