@@ -103,6 +103,9 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
       - run: npm run build
+      - name: Build frontend image
+        working-directory: ${{ github.workspace }}
+        run: docker build -f frontend/Dockerfile -t lingsway-frontend:t5f .
 
   backend-image:
     runs-on: ubuntu-latest

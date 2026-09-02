@@ -63,7 +63,7 @@ services:
     build:
       context: ../..
       dockerfile: backend/Dockerfile
-    command: ["python", "-m", "backend.app.worker", "--loop", "--interval", "60"]
+    command: ["python", "-m", "backend.app.workers.scheduler", "--loop", "--interval", "60"]
     restart: unless-stopped
     env_file:
       - ${LINGSWAY_ENV_FILE:-../../.env}
@@ -89,7 +89,7 @@ services:
     build:
       context: ../..
       dockerfile: backend/Dockerfile
-    command: ["python", "-m", "scripts.collect_mihomo_usage"]
+    command: ["python", "-m", "ops.forwarder.collect_mihomo_usage"]
     restart: unless-stopped
     profiles:
       - attribution
