@@ -65,6 +65,9 @@ main() {
   # enabled, checks command-substitution exit statuses, and separates UFW
   # active-state validation from its default-policy validation. These guards
   # prevent missing commands, files, or containers from becoming PASS values.
+  # It also samples each container's running state and restart count so a
+  # process that exits successfully and is immediately restarted cannot be
+  # reported as healthy during the sampling window.
   # Stage-two finding (2026-09-02): the checked-in Xray file is a template,
   # not a runtime config. Marzban rejects it without rendered outbounds, so
   # stack-up now refuses missing/file-typed-but-unrendered runtime config and

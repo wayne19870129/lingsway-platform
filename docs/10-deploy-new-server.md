@@ -131,7 +131,8 @@ UFW policy fallback could theoretically accept a default-policy line without
 first proving UFW was active. It now checks every non-profile service through
 Compose labels, skips only the explicitly disabled attribution profile, checks
 the exit status of command substitutions, and requires both `Status: active`
-and the default-deny policy. Missing files, failed `curl`, failed `grep`, and
+and the default-deny policy. It also samples each container's running state and
+restart count. Missing files, failed `curl`, failed `grep`, and
 failed `docker exec`/Compose commands therefore remain failures rather than
 being converted to PASS.
 
