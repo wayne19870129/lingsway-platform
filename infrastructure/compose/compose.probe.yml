@@ -1,2 +1,21 @@
 version: "3.8"
-services: {}
+
+services:
+  gateway-probe:
+    image: ${MARZBAN_IMAGE:-gozargah/marzban:v0.8.4}
+    restart: unless-stopped
+    profiles:
+      - probe
+    network_mode: service:marzban
+    environment:
+      PROBE_EXPECTED_EGRESS_IP: ${PROBE_EXPECTED_EGRESS_IP:-YOUR_VPS_IP}
+      PROBE_INTERVAL_SECONDS: "300"
+      PROBE_STATUS_PATH: /status/status.json
+    volumes:
+      - ../../data/marzban/db.sqlite3:/code/db.sqlite3:ro
+      - ../../data/gateway-probe:/status
+      - ../../ops/probe/egress_chain_probe.py:/egress_chain_probe.py:ro
+    command: ["python3", "/egress_chain_probe.py"]
+    depends_on:
+      marzban:
+        condition: service_healthy

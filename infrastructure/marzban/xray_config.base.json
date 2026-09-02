@@ -1,5 +1,34 @@
 {
-  "inbounds": [],
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "tag": "vless-reality",
+      "listen": "0.0.0.0",
+      "port": 8443,
+      "protocol": "vless",
+      "settings": {
+        "clients": [],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "show": false,
+          "dest": "",
+          "xver": 0,
+          "serverNames": [],
+          "privateKey": "",
+          "shortIds": []
+        }
+      }
+    }
+  ],
   "outbounds": [],
-  "routing": {"rules": []}
+  "routing": {
+    "domainStrategy": "AsIs",
+    "rules": []
+  }
 }

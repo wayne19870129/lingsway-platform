@@ -1,2 +1,48 @@
 version: "3.8"
-services: {}
+
+services:
+  mihomo:
+    image: ${MIHOMO_IMAGE:-metacubex/mihomo:v1.19.27}
+    restart: unless-stopped
+    volumes:
+      - ../../data/mihomo:/root/.config/mihomo
+    networks:
+      backend_net:
+        ipv4_address: 172.30.0.10
+      egress_net: {}
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+
+  marzban:
+    image: ${MARZBAN_IMAGE:-gozargah/marzban:v0.8.4}
+    restart: unless-stopped
+    ports:
+      - "1080:1080/tcp"
+      - "1080:1080/udp"
+      - "8443:8443/tcp"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import socket; s=socket.create_connection(('127.0.0.1',8000),3); s.close()"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    env_file:
+      - ${LINGSWAY_ENV_FILE:-../../.env}
+    environment:
+      UVICORN_HOST: 0.0.0.0
+      UVICORN_PORT: 8000
+      DOCS: "false"
+      UVICORN_SSL_CERTFILE: /var/lib/marzban/internal.crt
+      UVICORN_SSL_KEYFILE: /var/lib/marzban/internal.key
+      UVICORN_SSL_CA_TYPE: private
+    volumes:
+      - marzban_data:/var/lib/marzban
+      - ../../data/marzban/db.sqlite3:/code/db.sqlite3
+      - ../../data/marzban/xray_config.json:/code/xray_config.json
+    networks:
+      - backend_net
+      - egress_net
+
+volumes:
+  marzban_data:
