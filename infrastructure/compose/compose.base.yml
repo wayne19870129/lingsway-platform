@@ -1,2 +1,142 @@
 version: "3.8"
-services: {}
+
+services:
+  caddy:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    env_file:
+      - ${LINGSWAY_ENV_FILE:-../../.env}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ../caddy/Caddyfile.tmpl:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - public_net
+      - backend_net
+    depends_on:
+      - frontend
+      - backend-api
+
+  frontend:
+    build:
+      context: ../..
+      dockerfile: frontend/Dockerfile
+    restart: unless-stopped
+    networks:
+      - public_net
+
+  backend-api:
+    build:
+      context: ../..
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ${LINGSWAY_ENV_FILE:-../../.env}
+    environment:
+      MIHOMO_API_URL: http://mihomo:9090
+      MIHOMO_INTERNAL_LISTEN_ADDRESS: 172.30.0.10
+      MIHOMO_EGRESS_ROUTE_MODE: ${MIHOMO_EGRESS_ROUTE_MODE:-B}
+      MIHOMO_CONFIG_PATH: /app/data/mihomo/config.yaml
+      MIHOMO_PROVIDER_DIR: /app/data/mihomo/providers
+      MIHOMO_RUNTIME_CONFIG_PATH: /root/.config/mihomo/config.yaml
+    volumes:
+      - ../../data/mihomo:/app/data/mihomo
+      - ../../data/gateway-probe:/app/data/gateway-probe:ro
+      - ../../data/xray-reload:/app/data/xray-reload
+    networks:
+      - backend_net
+      - db_net
+      - egress_net
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    depends_on:
+      mysql:
+        condition: service_healthy
+      marzban:
+        condition: service_healthy
+
+  scheduler:
+    build:
+      context: ../..
+      dockerfile: backend/Dockerfile
+    command: ["python", "-m", "backend.app.worker", "--loop", "--interval", "60"]
+    restart: unless-stopped
+    env_file:
+      - ${LINGSWAY_ENV_FILE:-../../.env}
+    environment:
+      MIHOMO_PROVIDER_DIR: /app/data/mihomo/providers
+    volumes:
+      - ../../data/mihomo:/app/data/mihomo
+    networks:
+      - backend_net
+      - db_net
+      - egress_net
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  # Legacy optional service retained from deploy/compose.yml. It is not part
+  # of the default stack and is enabled only when the attribution profile is
+  # explicitly selected.
+  traffic-attribution:
+    build:
+      context: ../..
+      dockerfile: backend/Dockerfile
+    command: ["python", "-m", "scripts.collect_mihomo_usage"]
+    restart: unless-stopped
+    profiles:
+      - attribution
+    env_file:
+      - ${LINGSWAY_ENV_FILE:-../../.env}
+    environment:
+      MIHOMO_API_URL: http://mihomo:9090
+      MIHOMO_ATTRIBUTION_DB: /app/data/attribution/usage.sqlite3
+      MIHOMO_ATTRIBUTION_REPORT: /app/data/attribution/report.json
+      MIHOMO_ATTRIBUTION_INTERVAL_SECONDS: "2"
+      RESIDENTIAL_CHAIN_NAME: EGRESS_US_01
+    volumes:
+      - ../../data/attribution:/app/data/attribution
+    networks:
+      - backend_net
+    depends_on:
+      - mihomo
+
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    env_file:
+      - ${LINGSWAY_ENV_FILE:-../../.env}
+    command: ["mysqld", "--bind-address=0.0.0.0"]
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ../mysql/conf.d/99-binlog.cnf:/etc/mysql/conf.d/99-binlog.cnf:ro
+    networks:
+      - db_net
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+networks:
+  public_net:
+  backend_net:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+  db_net:
+    internal: true
+  egress_net:
+
+volumes:
+  mysql_data:
+  caddy_data:
+  caddy_config:

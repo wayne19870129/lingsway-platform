@@ -1,1 +1,37 @@
-# Rendered from SITE_DOMAIN, API_DOMAIN, and SUBSCRIPTION_DOMAIN in T6.
+# Rendered by Caddy from SITE_DOMAIN, API_DOMAIN, and SUBSCRIPTION_DOMAIN.
+# Keep these as independent settings so the subscription host can migrate
+# without changing application code.
+
+{
+  email admin@{$SITE_DOMAIN}
+}
+
+{$SITE_DOMAIN}, {$SUBSCRIPTION_DOMAIN} {
+  log
+  log_skip /s/*
+  encode zstd gzip
+  header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+  handle /api/* {
+    reverse_proxy backend-api:8000
+  }
+  handle /s/* {
+    reverse_proxy backend-api:8000
+  }
+  handle {
+    reverse_proxy frontend:3000
+  }
+}
+
+{$API_DOMAIN} {
+  log
+  log_skip /s/*
+  encode zstd gzip
+  header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+  reverse_proxy backend-api:8000
+}
+
+status.{$SITE_DOMAIN} {
+  encode zstd gzip
+  header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+  reverse_proxy uptime-kuma:3001
+}
