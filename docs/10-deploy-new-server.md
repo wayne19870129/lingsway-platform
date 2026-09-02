@@ -6,7 +6,7 @@ The checked-in `infrastructure/marzban/xray_config.base.json` is only a
 Reality inbound skeleton. Bootstrap runs the encrypted pre-migration backup
 gate, starts MySQL, and executes `alembic upgrade head` before `40_stack_up.sh`.
 That step then invokes `ops/gateway/render_xray_routes.py` in a disposable
-backend container. The renderer reads the migrated database and writes the
+backend container as the module `ops.gateway.render_xray_routes`. The renderer reads the migrated database and writes the
 complete runtime file to `/opt/lingsway/data/marzban/xray_config.json` before
 Marzban starts. An empty database produces one `BLOCK` blackhole outbound,
 zero user routes, and the private-IP/tcp-udp BLOCK sentinels; it never invents

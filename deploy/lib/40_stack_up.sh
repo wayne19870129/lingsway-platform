@@ -70,7 +70,7 @@ main() {
   log 'rendering Xray runtime config from the migrated database before Marzban'
   compose build backend-api
   compose run --rm --no-deps backend-api \
-    python /app/ops/gateway/render_xray_routes.py
+    python -m ops.gateway.render_xray_routes
   validate_runtime_files
   compose up --detach
   if is_true "${RESTART_TRANSPORT:-false}"; then
