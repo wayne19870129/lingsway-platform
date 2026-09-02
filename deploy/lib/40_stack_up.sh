@@ -19,6 +19,9 @@ main() {
     return 0
   fi
   require_cmd docker
+  local services
+  services="$(compose config --services)"
+  [[ -n "$services" ]] || die 'Compose stack has no services; deployment cannot start an empty skeleton'
   compose config --quiet
   compose up --detach
   if is_true "${RESTART_TRANSPORT:-false}"; then

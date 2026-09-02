@@ -19,6 +19,9 @@ main() {
     return 0
   fi
   require_cmd docker
+  local services
+  services="$(compose config --services)"
+  grep -Fxq backend-api <<< "$services" || die 'migration refused: backend-api service is absent'
   local marker="${PRE_MIGRATION_BACKUP_MARKER:-/run/lingsway/pre-migration-backup.ok}"
   if [[ ! -f "$marker" ]]; then
     [[ -n "${PRE_MIGRATION_BACKUP_COMMAND:-}" ]] || \

@@ -37,6 +37,12 @@ repositories provide `docker-compose` v1 instead. The deployment now selects
 package availability, and the shared Compose helper supports both command
 layouts.
 
+The next run exposed a false-success hazard: an empty Compose skeleton caused
+stack startup, migration, and the Xray check to appear successful under some
+Compose versions even though no backend service existed. The deployment now
+requires declared services (including `backend-api` for migration/Xray) and
+uses a Compose-v1-compatible `ps` check before reporting PASS.
+
 After Docker installation, Compose v1 rejected the repository's top-level
 `name: lingsway` with `services 'name' must be a mapping not a string`. The
 project name is now passed explicitly with `-p lingsway`, and the base Compose

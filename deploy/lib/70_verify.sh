@@ -10,13 +10,22 @@ failures=0
 
 check_01_compose() {
   command -v docker >/dev/null 2>&1 || return 1
-  local rows service state health
-  rows="$(compose ps --all --format '{{.Service}} {{.State}} {{.Health}}')"
-  [[ -n "$rows" ]] || return 1
-  while read -r service state health; do
-    [[ -n "$service" && "$state" == running ]] || return 1
-    [[ -z "$health" || "$health" == healthy ]] || return 1
-  done <<< "$rows"
+  local services rows service state health
+  services="$(compose config --services)"
+  [[ -n "$services" ]] || return 1
+  if docker compose version >/dev/null 2>&1; then
+    rows="$(compose ps --all --format '{{.Service}} {{.State}} {{.Health}}')"
+    [[ -n "$rows" ]] || return 1
+    while read -r service state health; do
+      [[ -n "$service" && "$state" == running ]] || return 1
+      [[ -z "$health" || "$health" == healthy ]] || return 1
+    done <<< "$rows"
+  else
+    rows="$(compose ps --all)"
+    grep -q 'State' <<< "$rows" || return 1
+    grep -Eq ' Up([[:space:]]|$)' <<< "$rows" || return 1
+    ! grep -Eq ' Exit|Restarting|Dead' <<< "$rows"
+  fi
 }
 
 check_02_backend_health() {
@@ -30,7 +39,9 @@ check_02_backend_health() {
 
 check_03_alembic_head() {
   command -v docker >/dev/null 2>&1 || return 1
-  local current head
+  local services current head
+  services="$(compose config --services)"
+  grep -Fxq backend-api <<< "$services" || return 1
   current="$(compose exec --no-TTY backend-api alembic current)"
   head="$(compose exec --no-TTY backend-api alembic heads | awk 'NF { print $1; exit }')"
   [[ -n "$head" ]] || return 1
@@ -93,6 +104,9 @@ check_09_xray_test() {
     return
   fi
   command -v docker >/dev/null 2>&1 || return 1
+  local services
+  services="$(compose config --services)"
+  grep -Fxq backend-api <<< "$services" || return 1
   compose exec --no-TTY backend-api xray run -test \
     -config "${XRAY_CONFIG_FILE:-/etc/xray/config.json}"
 }
