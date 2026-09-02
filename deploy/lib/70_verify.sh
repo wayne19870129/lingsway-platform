@@ -148,12 +148,12 @@ check_09_xray_test() {
   grep -Fxq backend-api <<< "$services" || return 1
   compose_service_running backend-api || return 1
   compose exec --no-TTY backend-api xray run -test \
-    -config "${XRAY_CONFIG_FILE:-/etc/xray/config.json}"
+    -config "${XRAY_CONTAINER_CONFIG_FILE:-/app/data/marzban/xray_config.json}"
 }
 
 check_10_routing_invariants() {
   command -v python3 >/dev/null 2>&1 || return 1
-  local config="${XRAY_CONFIG_FILE:-/etc/xray/config.json}"
+  local config="${XRAY_RUNTIME_CONFIG_FILE:-$DEPLOY_ROOT/data/marzban/xray_config.json}"
   [[ -s "$config" ]] || return 1
   python3 - "$config" <<'PY'
 import json

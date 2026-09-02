@@ -1,5 +1,32 @@
 # Deploy a new server
 
+## Xray runtime rendering gate
+
+The checked-in `infrastructure/marzban/xray_config.base.json` is only a
+Reality inbound skeleton. Bootstrap runs the encrypted pre-migration backup
+gate, starts MySQL, and executes `alembic upgrade head` before `40_stack_up.sh`.
+That step then invokes `ops/gateway/render_xray_routes.py` in a disposable
+backend container. The renderer reads the migrated database and writes the
+complete runtime file to `/opt/lingsway/data/marzban/xray_config.json` before
+Marzban starts. An empty database produces one `BLOCK` blackhole outbound,
+zero user routes, and the private-IP/tcp-udp BLOCK sentinels; it never invents
+a gateway outbound. `XRAY_REALITY_DEST` and `XRAY_REALITY_SERVER_NAME` must be
+provided by the target `.env`; the Reality private key and short ID are
+generated during rendering.
+
+The host verifier reads that host path for the JSON and routing checks, while
+the container Xray test uses `/app/data/marzban/xray_config.json`. Keeping
+these paths explicit avoids treating the checked-in skeleton or a missing
+bind-mounted file as a runtime configuration. The verifier remains fail-closed
+if rendering, JSON validation, `xray run -test`, or either routing sentinel
+check fails.
+
+The migration/render order is intentional: starting the full Compose stack
+first would make backend-api depend on Marzban, while Marzban requires the
+rendered file. If a target's Compose implementation cannot run the disposable
+backend build, capture that failure and fix the deployment environment or
+workflow; do not mount the base skeleton directly.
+
 ## T7 stage-two field findings (2026-09-02)
 
 The temporary host `45.32.74.42` (`lingsway-t7-stage2`, Debian 12) reported

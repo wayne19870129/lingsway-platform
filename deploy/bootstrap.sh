@@ -69,7 +69,11 @@ main() {
   # not a runtime config. Marzban rejects it without rendered outbounds, so
   # stack-up now refuses missing/file-typed-but-unrendered runtime config and
   # never adds an arbitrary outbound merely to make the container start.
-  for step in 00_preflight 10_system 20_secrets 30_dns_verify 40_stack_up 50_migrate 60_seed 80_schedule 70_verify; do
+  # Stage-two finding (2026-09-02): Xray rendering reads the application
+  # database. The migration step therefore runs after the pre-migration
+  # backup gate and before stack-up; 40_stack_up renders the complete runtime
+  # config from that migrated database before starting Marzban.
+  for step in 00_preflight 10_system 20_secrets 30_dns_verify 50_migrate 40_stack_up 60_seed 80_schedule 70_verify; do
     printf '[lingsway-deploy] running %s\n' "$step"
     bash "$SCRIPT_DIR/lib/$step.sh" --inventory "$INVENTORY_FILE"
   done
