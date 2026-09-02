@@ -60,6 +60,15 @@ main() {
   # Stage-two finding (2026-09-02): docker-compose exec may return success for
   # a declared service with no running container under Compose v1. The verifier
   # now checks the backend-api container explicitly before Alembic/Xray tests.
+  # Stage-two audit (2026-09-02): the verifier also validates every Compose
+  # service container by label, keeps optional profile services excluded unless
+  # enabled, checks command-substitution exit statuses, and separates UFW
+  # active-state validation from its default-policy validation. These guards
+  # prevent missing commands, files, or containers from becoming PASS values.
+  # Stage-two finding (2026-09-02): the checked-in Xray file is a template,
+  # not a runtime config. Marzban rejects it without rendered outbounds, so
+  # stack-up now refuses missing/file-typed-but-unrendered runtime config and
+  # never adds an arbitrary outbound merely to make the container start.
   for step in 00_preflight 10_system 20_secrets 30_dns_verify 40_stack_up 50_migrate 60_seed 80_schedule 70_verify; do
     printf '[lingsway-deploy] running %s\n' "$step"
     bash "$SCRIPT_DIR/lib/$step.sh" --inventory "$INVENTORY_FILE"

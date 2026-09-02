@@ -10,50 +10,67 @@ failures=0
 
 check_01_compose() {
   command -v docker >/dev/null 2>&1 || return 1
-  local services rows service state health
-  services="$(compose config --services)"
-  [[ -n "$services" ]] || return 1
-  if docker compose version >/dev/null 2>&1; then
-    rows="$(compose ps --all --format '{{.Service}} {{.State}} {{.Health}}')"
-    [[ -n "$rows" ]] || return 1
-    while read -r service state health; do
-      [[ -n "$service" && "$state" == running ]] || return 1
-      [[ -z "$health" || "$health" == healthy ]] || return 1
-    done <<< "$rows"
-  else
-    rows="$(compose ps --all)"
-    grep -q 'State' <<< "$rows" || return 1
-    grep -Eq ' Up([[:space:]]|$)' <<< "$rows" || return 1
-    ! grep -Eq ' Exit|Restarting|Dead' <<< "$rows"
+  local services service container_id health checked=0
+  if ! services="$(compose config --services)"; then
+    return 1
   fi
+  [[ -n "$services" ]] || return 1
+  while read -r service; do
+    [[ -n "$service" ]] || continue
+    # traffic-attribution is a profile-only service in the base file. It is
+    # expected only when that profile is explicitly enabled.
+    if [[ "$service" == traffic-attribution ]] && ! is_true "${ENABLE_ATTRIBUTION:-false}"; then
+      continue
+    fi
+    checked=$((checked + 1))
+    container_id="$(compose_service_container_id "$service")"
+    [[ -n "$container_id" ]] || return 1
+    health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' \
+      "$container_id")" || return 1
+    [[ "$health" == healthy || -z "$health" ]] || return 1
+  done <<< "$services"
+  (( checked > 0 ))
 }
 
 check_02_backend_health() {
   command -v curl >/dev/null 2>&1 || return 1
   local code
-  code="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+  if ! code="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
     --max-time "${HEALTH_TIMEOUT_SECONDS:-10}" \
-    "${BACKEND_HEALTH_URL:-http://127.0.0.1:8000/health}")"
+    "${BACKEND_HEALTH_URL:-http://127.0.0.1:8000/health}")"; then
+    return 1
+  fi
   [[ "$code" == 200 ]]
 }
 
-compose_service_running() {
-  local service="$1" project container_id
+compose_service_container_id() {
+  local service="$1" project
   project="${COMPOSE_PROJECT_NAME:-lingsway}"
-  container_id="$(docker ps -q \
+  docker ps -q \
     --filter "label=com.docker.compose.project=$project" \
-    --filter "label=com.docker.compose.service=$service" | head -n 1)"
+    --filter "label=com.docker.compose.service=$service" | head -n 1
+}
+
+compose_service_running() {
+  local service="$1" container_id
+  container_id="$(compose_service_container_id "$service")"
   [[ -n "$container_id" ]]
 }
 
 check_03_alembic_head() {
   command -v docker >/dev/null 2>&1 || return 1
   local services current head
-  services="$(compose config --services)"
+  if ! services="$(compose config --services)"; then
+    return 1
+  fi
   grep -Fxq backend-api <<< "$services" || return 1
   compose_service_running backend-api || return 1
-  current="$(compose exec --no-TTY backend-api alembic current)"
-  head="$(compose exec --no-TTY backend-api alembic heads | awk 'NF { print $1; exit }')"
+  if ! current="$(compose exec --no-TTY backend-api alembic current)"; then
+    return 1
+  fi
+  if ! head="$(compose exec --no-TTY backend-api alembic heads | awk 'NF { print $1; exit }')"; then
+    return 1
+  fi
   [[ -n "$head" ]] || return 1
   grep -Fq "$head" <<< "$current" && grep -Fq '(head)' <<< "$current"
 }
@@ -64,7 +81,9 @@ check_04_dns() {
   local domain resolved
   for domain in "$SITE_DOMAIN" "$API_DOMAIN" "$SUBSCRIPTION_DOMAIN"; do
     [[ -n "$domain" ]] || return 1
-    resolved="$(getent ahostsv4 "$domain" | awk '{ print $1 }' | sort -u)"
+    if ! resolved="$(getent ahostsv4 "$domain" | awk '{ print $1 }' | sort -u)"; then
+      return 1
+    fi
     printf '%s\n' "$resolved" | grep -Fxq "$TARGET_HOST" || return 1
   done
 }
@@ -96,15 +115,23 @@ check_06_ports() {
 
 check_07_ufw() {
   command -v ufw >/dev/null 2>&1 || return 1
-  ufw status | grep -Fq 'Status: active' || return 1
-  ufw status verbose | grep -Eiq 'Default: deny \(incoming\)' \
-    || ufw status verbose | grep -Eiq 'Default: deny \(incoming\), allow \(outgoing\)'
+  local status verbose
+  if ! status="$(ufw status)"; then
+    return 1
+  fi
+  grep -Fq 'Status: active' <<< "$status" || return 1
+  if ! verbose="$(ufw status verbose)"; then
+    return 1
+  fi
+  grep -Eiq 'Default: deny \(incoming\)' <<< "$verbose"
 }
 
 check_08_ssh_root_password() {
   command -v sshd >/dev/null 2>&1 || return 1
   local effective
-  effective="$(sshd -T)"
+  if ! effective="$(sshd -T)"; then
+    return 1
+  fi
   grep -Eiq '^permitrootlogin (no|prohibit-password)$' <<< "$effective"
 }
 
@@ -115,7 +142,9 @@ check_09_xray_test() {
   fi
   command -v docker >/dev/null 2>&1 || return 1
   local services
-  services="$(compose config --services)"
+  if ! services="$(compose config --services)"; then
+    return 1
+  fi
   grep -Fxq backend-api <<< "$services" || return 1
   compose_service_running backend-api || return 1
   compose exec --no-TTY backend-api xray run -test \
@@ -145,8 +174,12 @@ PY
 check_11_listener_count() {
   [[ -n "${EGRESS_COUNT_COMMAND:-}" && -n "${MIHOMO_LISTENER_COUNT_COMMAND:-}" ]] || return 1
   local expected actual
-  expected="$(bash -c "$EGRESS_COUNT_COMMAND")"
-  actual="$(bash -c "$MIHOMO_LISTENER_COUNT_COMMAND")"
+  if ! expected="$(bash -c "$EGRESS_COUNT_COMMAND")"; then
+    return 1
+  fi
+  if ! actual="$(bash -c "$MIHOMO_LISTENER_COUNT_COMMAND")"; then
+    return 1
+  fi
   [[ "$expected" =~ ^[0-9]+$ && "$actual" =~ ^[0-9]+$ && "$expected" == "$actual" ]]
 }
 
