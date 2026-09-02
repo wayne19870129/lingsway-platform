@@ -88,6 +88,27 @@ valid. Root password SSH login remained enabled because SSH hardening requires
 an operator-approved change under the repository permission policy. R2,
 Telegram, and Webshare remained unconfigured by design.
 
+The verifier self-audit also found that Compose-v1 status parsing could accept
+one running container while another declared service was absent, and that the
+UFW policy fallback could theoretically accept a default-policy line without
+first proving UFW was active. It now checks every non-profile service through
+Compose labels, skips only the explicitly disabled attribution profile, checks
+the exit status of command substitutions, and requires both `Status: active`
+and the default-deny policy. Missing files, failed `curl`, failed `grep`, and
+failed `docker exec`/Compose commands therefore remain failures rather than
+being converted to PASS.
+
+The Xray skeleton finding was reviewed separately. Adding a guessed outbound
+to `infrastructure/marzban/xray_config.base.json` would hide the fact that
+user routes, existing clients, Reality values, and BLOCK routing must come
+from the database renderer. The correct rule is therefore to render the full
+runtime config before stack-up. `40_stack_up.sh` now requires file-typed
+`xray_config.json` and `db.sqlite3`, parses the Xray JSON, and rejects an
+unrendered config with no outbounds or routing rules. It never injects a
+synthetic outbound. A fresh deployment must complete the database-backed
+renderer step before Compose startup; the checked-in base file remains a
+template only.
+
 Deployment instructions are delivered and machine-verified in T6/T7.
 
 ## GitHub settings that require manual configuration
