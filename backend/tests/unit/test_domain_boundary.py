@@ -2,6 +2,7 @@ import ast
 from pathlib import Path
 
 DOMAIN_DIRECTORY = Path(__file__).parents[2] / "app" / "domain"
+WORKERS_DIRECTORY = Path(__file__).parents[2] / "app" / "workers"
 IMPLEMENTATION_FILES = {
     "capacity.py",
     "ordering.py",
@@ -57,4 +58,14 @@ def test_domain_has_no_external_sdk_file_or_shell_access() -> None:
                 ):
                     violations.append(f"{path.name}:{node.lineno}: call {node.func.attr}")
 
+    assert violations == []
+
+
+def test_domain_and_workers_do_not_import_transport_implementation() -> None:
+    files = sorted(DOMAIN_DIRECTORY.glob("*.py")) + sorted(WORKERS_DIRECTORY.glob("*.py"))
+    violations: list[str] = []
+    for path in files:
+        text = path.read_text(encoding="utf-8")
+        if "providers.transport.subscription" in text:
+            violations.append(str(path))
     assert violations == []
