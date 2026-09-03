@@ -98,8 +98,22 @@ check_04_dns() {
 check_05_certificate() {
   command -v openssl >/dev/null 2>&1 || return 1
   local certificate="${CERT_FILE:-/var/lib/caddy/.local/share/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${SITE_DOMAIN}/${SITE_DOMAIN}.crt}"
-  [[ -s "$certificate" ]] || return 1
-  openssl x509 -in "$certificate" -noout -checkend "$((14 * 86400))"
+  if [[ -s "$certificate" ]]; then
+    openssl x509 -in "$certificate" -noout -checkend "$((14 * 86400))"
+    return
+  fi
+  # Caddy's certificate store is normally a named Docker volume, so the
+  # host's historical /var/lib/caddy path may not exist. Inspect the running
+  # Caddy container without weakening the certificate or expiry checks.
+  command -v docker >/dev/null 2>&1 || return 1
+  local container cert_path
+  container="$(compose_service_container_id caddy)"
+  [[ -n "$container" ]] || return 1
+  cert_path="$(docker exec "$container" find /data/caddy/certificates -type f \
+    -path "*/${SITE_DOMAIN}/${SITE_DOMAIN}.crt" -print -quit)" || return 1
+  [[ -n "$cert_path" ]] || return 1
+  docker exec "$container" cat "$cert_path" | \
+    openssl x509 -noout -checkend "$((14 * 86400))"
 }
 
 port_is_listening() {

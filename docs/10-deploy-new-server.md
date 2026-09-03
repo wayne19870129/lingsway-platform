@@ -152,6 +152,11 @@ template emitted two overlapping site blocks. The template now uses one site
 block containing all three variables, with an API host matcher when the API
 domain is distinct, so equal staging values cannot make Caddy crash-loop.
 
+The verifier accepts the Caddy certificate from its named Docker volume when
+the legacy host certificate path is absent. It still requires a real
+certificate and an expiry beyond 14 days; this only corrects the storage-path
+lookup for the Compose deployment.
+
 The Xray skeleton finding was reviewed separately. Adding a guessed outbound
 to `infrastructure/marzban/xray_config.base.json` would hide the fact that
 user routes, existing clients, Reality values, and BLOCK routing must come
