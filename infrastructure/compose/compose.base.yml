@@ -68,7 +68,7 @@ services:
     build:
       context: ../..
       dockerfile: backend/Dockerfile
-    command: ["python", "-m", "backend.app.workers.scheduler", "--loop", "--interval", "60"]
+    command: ["python", "-m", "backend.app.workers.scheduler", "--loop", "--interval", "300"]
     restart: unless-stopped
     env_file:
       - ${LINGSWAY_ENV_FILE:-../../.env}
