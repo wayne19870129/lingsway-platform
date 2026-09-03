@@ -44,6 +44,30 @@ class UsageDTO:
     tenant_id: str
     used_gb: Decimal
     measured_at: datetime
+    used_bytes: int = 0
+    status: str = "unknown"
+
+
+@dataclass(frozen=True, slots=True)
+class TransportEndpointDTO:
+    external_id: str
+    name: str
+    region: str
+    protocol: str
+    host: str
+    port: int
+    transport: str | None = None
+    tls_mode: str | None = None
+    auth_secret_ref: str | None = None
+    raw_metadata: Mapping[str, object] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TransportCapacityDTO:
+    quota_bytes: int
+    used_bytes: int
+    measured_at: datetime
+    expire_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,9 +194,29 @@ class AccountingProvider(Protocol):
 
     def disable_user(self, username: str) -> None: ...
 
+    def set_quota(self, username: str, quota_bytes: int) -> None: ...
+
+    def set_expire(self, username: str, expire_at: datetime) -> None: ...
+
     def get_connection_links(self, username: str) -> list[str]: ...
 
-    def get_usage(self, username: str) -> int: ...
+    def get_usage(self, username: str) -> UsageDTO: ...
+
+
+class TransportProvider(Protocol):
+    def health_check(self) -> bool: ...
+
+    def sync_nodes(self) -> None: ...
+
+    def list_endpoints(self) -> list[TransportEndpointDTO]: ...
+
+    def get_endpoint(self, external_id: str) -> TransportEndpointDTO | None: ...
+
+    def enable(self) -> None: ...
+
+    def disable(self) -> None: ...
+
+    def get_capacity(self) -> TransportCapacityDTO | None: ...
 
 
 class GatewayProvider(Protocol):

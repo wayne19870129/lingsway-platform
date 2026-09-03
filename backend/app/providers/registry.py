@@ -14,6 +14,7 @@ from backend.app.providers.base import (
     GatewayProvider,
     NotifyProvider,
     PaymentProvider,
+    TransportProvider,
 )
 from backend.app.providers.captcha.noop import NoopCaptchaProvider
 from backend.app.providers.egress.mock import MockEgressProvider
@@ -23,6 +24,7 @@ from backend.app.providers.gateway.mock import MockGatewayProvider
 from backend.app.providers.notify.noop import NoopNotifyProvider
 from backend.app.providers.payment.mock import MockPaymentProvider
 from backend.app.providers.storage.mock import MockBlobStorage
+from backend.app.providers.transport.mock import MockTransportProvider
 
 
 class ProviderConfigurationError(ValueError):
@@ -40,6 +42,7 @@ class ProviderRegistry:
     email: EmailProvider
     captcha: CaptchaProvider
     storage: BlobStorage
+    transport: TransportProvider
 
 
 def build_registry(settings: Settings) -> ProviderRegistry:
@@ -62,6 +65,8 @@ def build_registry(settings: Settings) -> ProviderRegistry:
         raise _unsupported("CAPTCHA_PROVIDER", settings.captcha_provider)
     if settings.storage_provider != "mock":
         raise _unsupported("STORAGE_PROVIDER", settings.storage_provider)
+    if settings.transport_provider_mode != "mock":
+        raise _unsupported("TRANSPORT_PROVIDER_MODE", settings.transport_provider_mode)
 
     return ProviderRegistry(
         egress=MockEgressProvider(),
@@ -73,6 +78,7 @@ def build_registry(settings: Settings) -> ProviderRegistry:
         email=NoopEmailProvider(),
         captcha=NoopCaptchaProvider(),
         storage=MockBlobStorage(),
+        transport=MockTransportProvider(),
     )
 
 

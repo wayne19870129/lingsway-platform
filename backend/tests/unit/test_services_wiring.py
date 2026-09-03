@@ -35,6 +35,7 @@ from backend.app.providers.notify.noop import NoopNotifyProvider
 from backend.app.providers.payment.mock import MockPaymentProvider
 from backend.app.providers.registry import ProviderRegistry
 from backend.app.providers.storage.mock import MockBlobStorage
+from backend.app.providers.transport.mock import MockTransportProvider
 from backend.app.services import (
     build_services,
     confirm_manual_payment,
@@ -163,6 +164,7 @@ def registry(payment: PaymentProvider | None = None) -> ProviderRegistry:
         email=NoopEmailProvider(),
         captcha=NoopCaptchaProvider(),
         storage=MockBlobStorage(),
+        transport=MockTransportProvider(),
     )
 
 
@@ -202,6 +204,7 @@ def test_external_failure_keeps_paid_order_marks_subscription_failed_and_disable
         email=providers.email,
         captcha=providers.captcha,
         storage=providers.storage,
+        transport=providers.transport,
     )
     workflow = WorkflowState()
     runs = Runs()

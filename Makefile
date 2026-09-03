@@ -21,6 +21,7 @@ test-unit:
 	EMAIL_PROVIDER=noop \
 	CAPTCHA_PROVIDER=noop \
 	STORAGE_PROVIDER=mock \
+	TRANSPORT_PROVIDER_MODE=mock \
 	$(PYTHON) -m pytest backend/tests/unit
 
 lint: lint-python lint-frontend

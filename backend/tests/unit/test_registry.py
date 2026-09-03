@@ -13,6 +13,7 @@ from backend.app.providers.notify.noop import NoopNotifyProvider
 from backend.app.providers.payment.mock import MockPaymentProvider
 from backend.app.providers.registry import ProviderConfigurationError, build_registry
 from backend.app.providers.storage.mock import MockBlobStorage
+from backend.app.providers.transport.mock import MockTransportProvider
 
 
 def test_all_mock_registry_assembles_without_network_or_docker(
@@ -33,6 +34,7 @@ def test_all_mock_registry_assembles_without_network_or_docker(
             "EMAIL_PROVIDER": "noop",
             "CAPTCHA_PROVIDER": "noop",
             "STORAGE_PROVIDER": "mock",
+            "TRANSPORT_PROVIDER_MODE": "mock",
         }
     )
 
@@ -47,8 +49,14 @@ def test_all_mock_registry_assembles_without_network_or_docker(
     assert isinstance(registry.email, NoopEmailProvider)
     assert isinstance(registry.captcha, NoopCaptchaProvider)
     assert isinstance(registry.storage, MockBlobStorage)
+    assert isinstance(registry.transport, MockTransportProvider)
 
 
 def test_registry_rejects_unimplemented_selection() -> None:
     with pytest.raises(ProviderConfigurationError, match="EGRESS_PROVIDER"):
         build_registry(Settings(egress_provider="webshare"))
+
+
+def test_registry_rejects_unimplemented_transport_selection() -> None:
+    with pytest.raises(ProviderConfigurationError, match="TRANSPORT_PROVIDER_MODE"):
+        build_registry(Settings(transport_provider_mode="subscription"))
