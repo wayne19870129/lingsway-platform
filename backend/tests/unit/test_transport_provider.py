@@ -1,0 +1,110 @@
+import base64
+from pathlib import Path
+
+import httpx
+import pytest
+
+from backend.app.providers.transport.subscription import (
+    SubscriptionTransportProvider,
+    parse_subscription,
+    parse_subscription_userinfo,
+)
+
+
+def test_parse_clash_subscription_sanitizes_credentials() -> None:
+    content = """
+proxies:
+  - name: JP-01
+    type: vless
+    server: jp.example.invalid
+    port: 443
+    uuid: secret-uuid
+    tls: true
+    network: ws
+"""
+    endpoints = parse_subscription("PROVIDER_A", content)
+    assert len(endpoints) == 1
+    assert endpoints[0].protocol == "vless"
+    assert endpoints[0].tls_mode == "tls"
+    metadata = endpoints[0].raw_metadata
+    auth_secret_ref = endpoints[0].auth_secret_ref
+    assert metadata is not None
+    assert auth_secret_ref is not None
+    assert "secret-uuid" not in str(metadata)
+    assert auth_secret_ref.startswith("transport/PROVIDER_A/")
+
+
+def test_parse_base64_uri_subscription() -> None:
+    plain = "vless://uuid@jp.example.invalid:443?security=tls&type=ws#JP-01\n"
+    encoded = base64.urlsafe_b64encode(plain.encode()).decode().rstrip("=")
+    endpoints = parse_subscription("PROVIDER_B", encoded)
+    assert len(endpoints) == 1
+    assert endpoints[0].name == "JP-01"
+
+
+def test_subscription_adapter_refreshes_without_exposing_url() -> None:
+    transport = httpx.MockTransport(
+        lambda _: httpx.Response(
+            200,
+            text="proxies:\n  - {name: US-01, type: trojan, server: us.invalid, port: 443}\n",
+            headers={
+                "subscription-userinfo": "upload=100; download=200; total=1000; expire=1893456000"
+            },
+        )
+    )
+    adapter = SubscriptionTransportProvider(
+        "PROVIDER_A",
+        "https://provider.invalid/private-token",
+        client=httpx.Client(transport=transport),
+    )
+    adapter.sync_nodes()
+    assert adapter.health_check() is True
+    assert adapter.list_endpoints()[0].host == "us.invalid"
+    capacity = adapter.get_capacity()
+    assert capacity is not None
+    assert capacity.quota_bytes == 1000
+    assert capacity.used_bytes == 300
+
+
+def test_subscription_userinfo_missing_or_malformed_is_unknown() -> None:
+    assert parse_subscription_userinfo(None) is None
+    assert parse_subscription_userinfo("upload=x; download=2; total=10") is None
+    assert parse_subscription_userinfo("upload=1; download=2") is None
+
+
+def test_successful_sync_atomically_updates_mihomo_provider_file(tmp_path: Path) -> None:
+    content = "proxies:\n  - {name: US, type: trojan, server: us.invalid, port: 443}\n"
+    target = tmp_path / "provider.yaml"
+    adapter = SubscriptionTransportProvider(
+        "CAP",
+        "https://provider.invalid/private",
+        client=httpx.Client(
+            transport=httpx.MockTransport(
+                lambda _: httpx.Response(200, content=content.encode())
+            )
+        ),
+        cache_path=target,
+    )
+    adapter.sync_nodes()
+    assert target.read_text() == content
+    assert not target.with_suffix(".yaml.tmp").exists()
+
+
+def test_failed_sync_preserves_last_known_good_provider_file(tmp_path: Path) -> None:
+    target = tmp_path / "provider.yaml"
+    target.write_text(
+        "proxies:\n  - {name: OLD, type: trojan, server: old.invalid, port: 443}\n"
+    )
+    adapter = SubscriptionTransportProvider(
+        "CAP",
+        "https://provider.invalid/private",
+        client=httpx.Client(
+            transport=httpx.MockTransport(
+                lambda _: httpx.Response(200, text="proxies: []\n")
+            )
+        ),
+        cache_path=target,
+    )
+    with pytest.raises(ValueError):
+        adapter.sync_nodes()
+    assert "OLD" in target.read_text()
