@@ -72,10 +72,10 @@ check_03_alembic_head() {
   fi
   grep -Fxq backend-api <<< "$services" || return 1
   compose_service_running backend-api || return 1
-  if ! current="$(compose exec --no-TTY backend-api alembic current)"; then
+  if ! current="$(compose exec -T backend-api alembic current)"; then
     return 1
   fi
-  if ! head="$(compose exec --no-TTY backend-api alembic heads | awk 'NF { print $1; exit }')"; then
+  if ! head="$(compose exec -T backend-api alembic heads | awk 'NF { print $1; exit }')"; then
     return 1
   fi
   [[ -n "$head" ]] || return 1
@@ -168,7 +168,7 @@ check_09_xray_test() {
   fi
   grep -Fxq backend-api <<< "$services" || return 1
   compose_service_running backend-api || return 1
-  compose exec --no-TTY backend-api xray run -test \
+  compose exec -T backend-api xray run -test \
     -config "${XRAY_CONTAINER_CONFIG_FILE:-/app/data/marzban/xray_config.json}"
 }
 

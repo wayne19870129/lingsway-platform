@@ -157,6 +157,12 @@ the legacy host certificate path is absent. It still requires a real
 certificate and an expiry beyond 14 days; this only corrects the storage-path
 lookup for the Compose deployment.
 
+Compose v1 on Debian 12 uses `-T` for non-interactive `exec`; the verifier
+uses that portable spelling so a successful Alembic or Xray command is not
+silently captured as an empty result. The Marzban 1080 listener is defined in
+an explicit `compose.socks.yml` override and is included only when
+`ENABLE_SOCKS_1080=true`; the default transport file publishes only 8443.
+
 The Xray skeleton finding was reviewed separately. Adding a guessed outbound
 to `infrastructure/marzban/xray_config.base.json` would hide the fact that
 user routes, existing clients, Reality values, and BLOCK routing must come
