@@ -136,6 +136,33 @@ restart count. Missing files, failed `curl`, failed `grep`, and
 failed `docker exec`/Compose commands therefore remain failures rather than
 being converted to PASS.
 
+The backend API must expose a running process, not just an importable module.
+On 2026-09-02, `docker logs --tail 100` for `backend-api` was empty and
+`docker inspect` showed exit code 0 with repeated restarts. Running the image
+entry point in the foreground also exited 0 because the migrated
+`backend/app/main.py` was still a placeholder. The entry point now starts
+Uvicorn and exposes `/health`; any restart loop must be diagnosed from actual
+logs, inspect output, and a foreground run before being attributed to the
+target environment.
+
+The same run showed Caddy's actual error:
+`ambiguous site definition: 45.32.74.42.sslip.io`. The staging inventory used
+one temporary hostname for all three independent domain settings, while the
+template emitted two overlapping site blocks. The template now uses one site
+block containing all three variables, with an API host matcher when the API
+domain is distinct, so equal staging values cannot make Caddy crash-loop.
+
+The verifier accepts the Caddy certificate from its named Docker volume when
+the legacy host certificate path is absent. It still requires a real
+certificate and an expiry beyond 14 days; this only corrects the storage-path
+lookup for the Compose deployment.
+
+Compose v1 on Debian 12 uses `-T` for non-interactive `exec`; the verifier
+uses that portable spelling so a successful Alembic or Xray command is not
+silently captured as an empty result. The Marzban 1080 listener is defined in
+an explicit `compose.socks.yml` override and is included only when
+`ENABLE_SOCKS_1080=true`; the default transport file publishes only 8443.
+
 The Xray skeleton finding was reviewed separately. Adding a guessed outbound
 to `infrastructure/marzban/xray_config.base.json` would hide the fact that
 user routes, existing clients, Reality values, and BLOCK routing must come

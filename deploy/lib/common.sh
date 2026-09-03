@@ -77,6 +77,9 @@ compose() {
     args+=(-f "${COMPOSE_PROBE_FILE:-$DEPLOY_ROOT/infrastructure/compose/compose.probe.yml}")
     args+=(--profile probe)
   fi
+  if is_true "${ENABLE_SOCKS_1080:-false}"; then
+    args+=(-f "${COMPOSE_SOCKS_FILE:-$DEPLOY_ROOT/infrastructure/compose/compose.socks.yml}")
+  fi
   if docker compose version >/dev/null 2>&1; then
     docker compose -p "${COMPOSE_PROJECT_NAME:-lingsway}" "${args[@]}" "$@"
   elif command -v docker-compose >/dev/null 2>&1; then

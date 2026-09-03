@@ -18,8 +18,6 @@ services:
     image: ${MARZBAN_IMAGE:-gozargah/marzban:v0.8.4}
     restart: unless-stopped
     ports:
-      - "1080:1080/tcp"
-      - "1080:1080/udp"
       - "8443:8443/tcp"
     healthcheck:
       test: ["CMD", "python3", "-c", "import socket; s=socket.create_connection(('127.0.0.1',8000),3); s.close()"]

@@ -1,0 +1,7 @@
+version: "3.8"
+
+services:
+  marzban:
+    ports:
+      - "1080:1080/tcp"
+      - "1080:1080/udp"
