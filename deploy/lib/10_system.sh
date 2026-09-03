@@ -61,22 +61,14 @@ harden_ssh() {
   install -m 600 /etc/ssh/sshd_config "$backup"
   tmp="$(mktemp /etc/ssh/sshd_config.lingsway.XXXXXX)"
   awk '
-    BEGIN { inserted = 0 }
-    /^[[:space:]]*Match([[:space:]]|$)/ && !inserted {
+    BEGIN {
       print "PermitRootLogin prohibit-password"
       print "PasswordAuthentication no"
-      inserted = 1
     }
     /^[[:space:]]*#/ { print; next }
     /^[[:space:]]*PermitRootLogin([[:space:]]|$)/ { next }
     /^[[:space:]]*PasswordAuthentication([[:space:]]|$)/ { next }
     { print }
-    END {
-      if (!inserted) {
-        print "PermitRootLogin prohibit-password"
-        print "PasswordAuthentication no"
-      }
-    }
   ' /etc/ssh/sshd_config > "$tmp"
   chmod 600 "$tmp"
   if ! sshd -t -f "$tmp"; then
