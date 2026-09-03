@@ -19,7 +19,9 @@ PasswordAuthentication no
 ```
 
 It runs `sshd -t` before installation, reloads `ssh` rather than restarting
-it, and verifies the effective `sshd -T` values. A failed validation or reload
+it, and verifies the effective `sshd -T` values. OpenSSH may canonicalize
+`prohibit-password` as `without-password`; both outputs mean password login is
+disabled. A failed validation or reload
 restores the timestamped backup and reloads the previous configuration.
 
 After deployment, keep the existing key session open. From a second terminal,

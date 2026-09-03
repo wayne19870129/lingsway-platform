@@ -156,7 +156,7 @@ check_08_ssh_root_password() {
   if ! effective="$(sshd -T)"; then
     return 1
   fi
-  grep -Eiq '^permitrootlogin (no|prohibit-password)$' <<< "$effective"
+  grep -Eiq '^permitrootlogin (no|prohibit-password|without-password)$' <<< "$effective"
 }
 
 check_09_xray_test() {

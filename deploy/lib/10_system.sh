@@ -85,7 +85,7 @@ harden_ssh() {
     restore_sshd_config "$backup"
     die "sshd -T failed after reload; configuration restored from $backup"
   }
-  if ! printf '%s\n' "$effective" | grep -Fxq 'permitrootlogin prohibit-password' || \
+  if ! printf '%s\n' "$effective" | grep -Eq '^permitrootlogin (prohibit-password|without-password)$' || \
     ! printf '%s\n' "$effective" | grep -Fxq 'passwordauthentication no'; then
     restore_sshd_config "$backup"
     die "sshd effective settings are not hardened; configuration restored from $backup"
