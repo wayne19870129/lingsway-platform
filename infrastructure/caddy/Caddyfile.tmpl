@@ -6,11 +6,18 @@
   email admin@{$SITE_DOMAIN}
 }
 
-{$SITE_DOMAIN}, {$SUBSCRIPTION_DOMAIN} {
+{$SITE_DOMAIN}, {$API_DOMAIN}, {$SUBSCRIPTION_DOMAIN} {
   log
   log_skip /s/*
   encode zstd gzip
   header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+  # Keep one site block so staging is valid even when the three configured
+  # domains intentionally share one temporary hostname. The API host matcher
+  # still preserves the separate API-domain behavior when it is distinct.
+  @api host {$API_DOMAIN}
+  handle @api {
+    reverse_proxy backend-api:8000
+  }
   handle /api/* {
     reverse_proxy backend-api:8000
   }
@@ -20,14 +27,6 @@
   handle {
     reverse_proxy frontend:3000
   }
-}
-
-{$API_DOMAIN} {
-  log
-  log_skip /s/*
-  encode zstd gzip
-  header Strict-Transport-Security "max-age=31536000; includeSubDomains"
-  reverse_proxy backend-api:8000
 }
 
 status.{$SITE_DOMAIN} {
