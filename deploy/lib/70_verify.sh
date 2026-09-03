@@ -148,12 +148,15 @@ check_07_ufw() {
 }
 
 check_08_ssh_root_password() {
+  if ! is_true "${HARDEN_SSH:-true}"; then
+    return 2
+  fi
   command -v sshd >/dev/null 2>&1 || return 1
   local effective
   if ! effective="$(sshd -T)"; then
     return 1
   fi
-  grep -Eiq '^permitrootlogin (no|prohibit-password)$' <<< "$effective"
+  grep -Eiq '^permitrootlogin (no|prohibit-password|without-password)$' <<< "$effective"
 }
 
 check_09_xray_test() {
@@ -233,10 +236,15 @@ check_15_capacity() {
 }
 
 run_check() {
-  local number="$1" description="$2" function_name="$3"
+  local number="$1" description="$2" function_name="$3" result
   if "$function_name"; then
     printf '[PASS] %02d %s\n' "$number" "$description"
   else
+    result=$?
+    if [[ "$result" -eq 2 ]]; then
+      printf '[SKIPPED] %02d %s\n' "$number" "$description"
+      return 0
+    fi
     printf '[FAIL] %02d %s\n' "$number" "$description" >&2
     failures=$((failures + 1))
   fi

@@ -9,7 +9,7 @@
 ## 迁移步骤
 
 1. 以 root 登录目标机，先完成 `deploy/lib/00_preflight.sh`、备份和当前服务健康检查。不要先删除 root 的 SSH key。
-2. 将源码和非敏感部署文件放到 `/opt/lingsway`，执行 `deploy/lib/10_system.sh -i /path/to/inventory.yml`。脚本会创建 deploy 用户、加入 docker 组、安装最小 sudoers；不会修改 `sshd_config`、root 账户或 `authorized_keys`。
+2. 将源码和非敏感部署文件放到 `/opt/lingsway`，执行 `deploy/lib/10_system.sh -i /path/to/inventory.yml`。脚本会创建 deploy 用户、加入 docker 组、安装最小 sudoers；默认还会在公钥前置检查通过后按 `ssh-lockout.md` 加固 SSH。它不会修改 `authorized_keys`。
 3. 将应用配置放在 `/opt/lingsway/.env`，将备份和应用密钥分别放在 `/etc/lingsway/backup.conf`、`/etc/lingsway/app-secrets.conf`。逐个执行 `deploy/lib/20_secrets.sh`，确认所有文件为 `root:root` 和 `0600`。脚本只检查变量名，不打印值。
 4. 以 deploy 用户运行一次只读检查：`id`、`docker compose ps`、`/opt/lingsway/current/deploy/lib/70_verify.sh`。若 Docker 组尚未在当前会话生效，重新登录 deploy 用户后再检查。
 5. 在 root 仍可用的窗口内完成一次加密备份、一次迁移演练和一次回滚演练。确认备份、Xray 九步保护和通知链路均有审计记录。

@@ -2,6 +2,7 @@
 # Do not put credentials here. Production credentials belong in the target host's
 # /opt/lingsway/.env and /etc/lingsway/*.conf with mode 0600.
 host: 203.0.113.10
+harden_ssh: true
 domains:
   site: lingsway.com
   api: api.lingsway.com

@@ -14,6 +14,85 @@ cleanup_sudoers_tmp() {
   fi
 }
 
+ssh_authentication_preflight() {
+  local user home authorized_keys source_ip auth_log
+  user="${SUDO_USER:-${USER:-root}}"
+  [[ "$user" != root ]] || home=/root
+  if [[ "$user" != root ]]; then
+    home="$(getent passwd "$user" | cut -d: -f6)"
+  fi
+  authorized_keys="$home/.ssh/authorized_keys"
+  [[ -s "$authorized_keys" ]] || die "public-key preflight failed: no authorized_keys for $user"
+  ssh-keygen -lf "$authorized_keys" >/dev/null 2>&1 || \
+    die "public-key preflight failed: authorized_keys is not parseable for $user"
+  [[ -n "${SSH_CONNECTION:-}" ]] || \
+    die 'public-key preflight failed: current session is not an SSH session'
+  source_ip="${SSH_CONNECTION%% *}"
+  auth_log="$(journalctl -u ssh -u sshd --since '10 minutes ago' --no-pager 2>/dev/null || true)"
+  if [[ -z "$auth_log" && -r /var/log/auth.log ]]; then
+    auth_log="$(tail -n 200 /var/log/auth.log)"
+  fi
+  printf '%s\n' "$auth_log" | awk -v user="$user" -v source_ip="$source_ip" '
+    /Accepted publickey/ && index($0, "for " user " from " source_ip " ") { found = 1 }
+    END { exit !found }
+  ' || die "public-key preflight failed: current SSH session was not accepted with a public key"
+}
+
+restore_sshd_config() {
+  local backup="$1"
+  cp -a -- "$backup" /etc/ssh/sshd_config
+  systemctl reload ssh
+}
+
+harden_ssh() {
+  if ! is_true "${HARDEN_SSH:-true}"; then
+    log 'harden_ssh=false; SSH hardening skipped by explicit inventory setting'
+    return 0
+  fi
+  require_cmd sshd
+  require_cmd ssh-keygen
+  require_cmd journalctl
+  require_cmd systemctl
+  ssh_authentication_preflight
+
+  local backup timestamp tmp effective
+  timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  backup="/etc/ssh/sshd_config.lingsway.${timestamp}.bak"
+  install -m 600 /etc/ssh/sshd_config "$backup"
+  tmp="$(mktemp /etc/ssh/sshd_config.lingsway.XXXXXX)"
+  awk '
+    BEGIN {
+      print "PermitRootLogin prohibit-password"
+      print "PasswordAuthentication no"
+    }
+    /^[[:space:]]*#/ { print; next }
+    /^[[:space:]]*PermitRootLogin([[:space:]]|$)/ { next }
+    /^[[:space:]]*PasswordAuthentication([[:space:]]|$)/ { next }
+    { print }
+  ' /etc/ssh/sshd_config > "$tmp"
+  chmod 600 "$tmp"
+  if ! sshd -t -f "$tmp"; then
+    rm -f -- "$tmp"
+    die "sshd configuration validation failed; original retained at $backup"
+  fi
+  install -m 600 "$tmp" /etc/ssh/sshd_config
+  rm -f -- "$tmp"
+  if ! systemctl reload ssh; then
+    restore_sshd_config "$backup"
+    die "sshd reload failed; configuration restored from $backup"
+  fi
+  effective="$(sshd -T)" || {
+    restore_sshd_config "$backup"
+    die "sshd -T failed after reload; configuration restored from $backup"
+  }
+  if ! printf '%s\n' "$effective" | grep -Eq '^permitrootlogin (prohibit-password|without-password)$' || \
+    ! printf '%s\n' "$effective" | grep -Fxq 'passwordauthentication no'; then
+    restore_sshd_config "$backup"
+    die "sshd effective settings are not hardened; configuration restored from $backup"
+  fi
+  log "SSH hardened with reload; previous configuration backed up at $backup"
+}
+
 main() {
   while (($# > 0)); do
     case "$1" in
@@ -70,7 +149,8 @@ main() {
     'deploy ALL=(root) NOPASSWD: LINGSWAY_DEPLOY' > "$tmp"
   visudo --check --file "$tmp"
   install --owner root --group root --mode 0440 "$tmp" "$sudoers_path"
-  log 'deploy user and minimal sudoers installed; sshd and root access were not modified'
+  harden_ssh
+  log 'deploy user, minimal sudoers, and configured SSH hardening completed'
 }
 
 main "$@"

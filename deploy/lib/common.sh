@@ -108,6 +108,8 @@ load_inventory_defaults() {
   ENABLE_PROBE="${ENABLE_PROBE:-$(inventory_value features probe)}"
   ENABLE_SOCKS_1080="${ENABLE_SOCKS_1080:-$(inventory_value features socks_1080)}"
   RESTART_TRANSPORT="${RESTART_TRANSPORT:-$(inventory_value features restart_transport)}"
+  HARDEN_SSH="${HARDEN_SSH:-$(inventory_top_level harden_ssh)}"
+  HARDEN_SSH="${HARDEN_SSH:-true}"
   EGRESS_COUNT_COMMAND="${EGRESS_COUNT_COMMAND:-$(inventory_value verification egress_count_command)}"
   MIHOMO_LISTENER_COUNT_COMMAND="${MIHOMO_LISTENER_COUNT_COMMAND:-$(inventory_value verification mihomo_listener_count_command)}"
   MIHOMO_IP_MATCH_COMMAND="${MIHOMO_IP_MATCH_COMMAND:-$(inventory_value verification mihomo_ip_match_command)}"
@@ -118,6 +120,7 @@ load_inventory_defaults() {
   export EGRESS_PROVIDER ACCOUNTING_PROVIDER GATEWAY_PROVIDER FORWARDER_PROVIDER
   export PAYMENT_PROVIDER NOTIFY_PROVIDER EMAIL_PROVIDER CAPTCHA_PROVIDER STORAGE_PROVIDER
   export ENABLE_MONITORING ENABLE_PROBE ENABLE_SOCKS_1080 RESTART_TRANSPORT
+  export HARDEN_SSH
   export EGRESS_COUNT_COMMAND MIHOMO_LISTENER_COUNT_COMMAND MIHOMO_IP_MATCH_COMMAND
   export CAPACITY_VERIFY_COMMAND
   export XRAY_RUNTIME_CONFIG_FILE XRAY_CONTAINER_CONFIG_FILE
