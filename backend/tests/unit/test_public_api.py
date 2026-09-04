@@ -3,14 +3,13 @@ from collections.abc import Iterator
 import pytest
 from fastapi import HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
-from sqlalchemy import create_engine
+from sqlalchemy import Table, create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from backend.app.api.public import login, me, register
 from backend.app.core.database import Base
 from backend.app.dependencies import get_auth_context, require_admin
-from backend.app.models import Customer, JwtSession
 from backend.app.schemas.public import CustomerCreate, LoginRequest
 
 
@@ -21,7 +20,10 @@ def db_session() -> Iterator[Session]:
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
-    tables = [Customer.__table__, JwtSession.__table__]
+    tables: list[Table] = [
+        Base.metadata.tables["customers"],
+        Base.metadata.tables["jwt_sessions"],
+    ]
     Base.metadata.create_all(engine, tables=tables)
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     with factory() as session:
