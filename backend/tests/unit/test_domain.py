@@ -1,9 +1,11 @@
 import base64
+import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
+import yaml
 
 from backend.app.domain.capacity import CapacityExceededError
 from backend.app.domain.provisioning import (
@@ -220,26 +222,95 @@ def test_routing_invariants_block_private_first_and_catch_all_last() -> None:
     assert "DIRECT" not in str(rules).upper()
 
 
-def test_mihomo_has_13_rules_with_foreign_domains_before_cn() -> None:
-    rendered = render_subscription(
-        ["vless://uuid@example.invalid:443?security=tls#Tokyo"], "mihomo/1.0"
-    )
-    text = rendered.content.decode()
-    rendered_rules = text.split("rules:\n", 1)[1]
+@pytest.mark.parametrize(
+    ("user_agent", "expected_format"),
+    [
+        ("clash.meta/1.0", "CLASH"),
+        ("clash meta/1.0", "CLASH"),
+        ("clashmeta/1.0", "CLASH"),
+        ("mihomo/1.0", "CLASH"),
+        ("stash/1.0", "CLASH"),
+        ("v2ray/1.0", "URI_BASE64"),
+        ("v2rayN/7.0", "URI_BASE64"),
+        ("v2rayng/1.0", "URI_BASE64"),
+        ("sing-box/1.0", "URI_BASE64"),
+        ("singbox/1.0", "URI_BASE64"),
+        ("Clash_Meta/1.0", "CLASH"),
+        ("curl/8.0", "CLASH"),
+    ],
+)
+def test_production_user_agent_branches_keep_one_rule(
+    user_agent: str, expected_format: str
+) -> None:
+    link = "vless://uuid@example.invalid:443#Tokyo"
+    rendered = render_subscription([link], user_agent)
+
+    assert rendered.client_format == expected_format
+    assert rendered.rules == ("MATCH,SUBSCRIPTION",)
+    if expected_format == "URI_BASE64":
+        assert base64.b64decode(rendered.content).decode() == link
+    else:
+        document = yaml.safe_load(rendered.content)
+        assert document["rules"] == ["MATCH,SUBSCRIPTION"]
+
+
+def test_target_core_rules_remain_reserved_for_task_t13() -> None:
     assert len(CORE_RULES) == 13
-    assert rendered_rules.index("DOMAIN-SUFFIX,openai.com") < rendered_rules.index("GEOSITE,CN")
-    assert rendered_rules.index("DOMAIN-SUFFIX,openai.com") < rendered_rules.index("GEOIP,CN")
-    assert "MATCH,DIRECT" not in rendered_rules
 
 
-def test_v2ray_and_unknown_user_agents_use_required_formats() -> None:
-    links = ["vless://uuid@example.invalid:443#Tokyo"]
-    encoded = render_subscription(links, "v2rayN/7.0")
-    unknown = render_subscription(links, "curl/8.0")
-    assert base64.b64decode(encoded.content).decode() == links[0]
-    assert encoded.client_format == "URI_BASE64"
-    assert unknown.client_format == "CLASH"
-    assert unknown.content.decode().split("rules:\n", 1)[1].strip() == '- "MATCH,SUBSCRIPTION"'
+def test_subscription_headers_are_carried_without_domain_side_effects() -> None:
+    rendered = render_subscription(
+        ["vless://uuid@example.invalid:443#Tokyo"],
+        "clash.meta/1.0",
+        subscription_userinfo="upload=0; download=12; total=100; expire=123",
+        etag='"config-hash"',
+    )
+
+    assert rendered.headers == {
+        "Subscription-Userinfo": "upload=0; download=12; total=100; expire=123",
+        "ETag": '"config-hash"',
+    }
+
+
+def test_protocol_fields_and_duplicate_proxy_names_match_production() -> None:
+    vmess_body = {
+        "ps": "Node",
+        "add": "vmess.invalid",
+        "port": 443,
+        "id": "vmess-uuid",
+        "aid": 0,
+        "scy": "auto",
+        "net": "ws",
+        "tls": "tls",
+        "sni": "vmess.invalid",
+    }
+    vmess_payload = base64.urlsafe_b64encode(json.dumps(vmess_body).encode()).decode().rstrip("=")
+    vless_link = (
+        "vless://vless-uuid@example.invalid:443?type=ws&security=reality"
+        "&sni=edge.invalid&fp=chrome&pbk=public-key&sid=short-id"
+        "&flow=xtls-rprx-vision#Node"
+    )
+
+    document = yaml.safe_load(
+        render_subscription(
+            [vless_link, f"vmess://{vmess_payload}"], "stash/2.0"
+        ).content
+    )
+    vless_proxy, vmess_proxy = document["proxies"]
+
+    assert [proxy["name"] for proxy in document["proxies"]] == ["Node", "Node-2"]
+    assert vless_proxy["network"] == "ws"
+    assert vless_proxy["tls"] is True
+    assert vless_proxy["servername"] == "edge.invalid"
+    assert vless_proxy["client-fingerprint"] == "chrome"
+    assert vless_proxy["flow"] == "xtls-rprx-vision"
+    assert vless_proxy["reality-opts"] == {
+        "public-key": "public-key",
+        "short-id": "short-id",
+    }
+    assert vmess_proxy["network"] == "ws"
+    assert vmess_proxy["tls"] is True
+    assert vmess_proxy["servername"] == "vmess.invalid"
 
 
 def test_quota_conversion_is_one_to_one() -> None:
