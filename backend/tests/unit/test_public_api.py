@@ -10,6 +10,7 @@ from sqlalchemy.pool import StaticPool
 from backend.app.api.public import login, me, register
 from backend.app.core.database import Base
 from backend.app.dependencies import get_auth_context, require_admin
+from backend.app.models import Customer, JwtSession
 from backend.app.schemas.public import CustomerCreate, LoginRequest
 
 
@@ -20,11 +21,12 @@ def db_session() -> Iterator[Session]:
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
-    Base.metadata.create_all(engine)
+    tables = [Customer.__table__, JwtSession.__table__]
+    Base.metadata.create_all(engine, tables=tables)
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     with factory() as session:
         yield session
-    Base.metadata.drop_all(engine)
+    Base.metadata.drop_all(engine, tables=tables)
 
 
 def test_register_login_and_current_customer(db_session: Session) -> None:
