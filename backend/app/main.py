@@ -4,11 +4,15 @@ from fastapi import FastAPI
 
 from backend.app.api.health import router as health_router
 from backend.app.api.public import router as public_router
+from backend.app.api.subscription import router as subscription_router
+from backend.app.api.subscription import subscription_feed_router
 
 app = FastAPI(title="Lingsway Platform")
 
 app.include_router(health_router, prefix="/api/v1")
 app.include_router(public_router, prefix="/api/v1")
+app.include_router(subscription_router, prefix="/api/v1")
+app.include_router(subscription_feed_router)
 
 
 @app.get("/health")

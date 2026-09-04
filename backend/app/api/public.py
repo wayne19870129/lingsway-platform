@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import secrets
 from datetime import UTC, datetime
+from decimal import Decimal
 
 from fastapi import APIRouter, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
+from backend.app.core.config import get_settings
 from backend.app.core.security import hash_password, verify_password
 from backend.app.dependencies import (
     CurrentAuth,
@@ -18,11 +20,26 @@ from backend.app.dependencies import (
     revoke_customer_sessions,
     revoke_session,
 )
-from backend.app.models import Customer, CustomerStatus, Plan, PlanStatus
+from backend.app.domain.capacity import CapacityExceededError, ensure_capacity
+from backend.app.domain.ordering import BillingOrderType
+from backend.app.models import (
+    AuditLog,
+    Customer,
+    CustomerStatus,
+    Order,
+    OrderStatus,
+    PaymentStatus,
+    Plan,
+    PlanStatus,
+)
+from backend.app.providers.base import NotifyEvent
+from backend.app.providers.registry import build_registry
 from backend.app.schemas.public import (
     CustomerCreate,
     CustomerRead,
     LoginRequest,
+    OrderCreate,
+    OrderRead,
     PasswordChange,
     PlanRead,
     TokenResponse,
@@ -96,3 +113,141 @@ def list_plans(db: DbSession) -> list[Plan]:
     return list(
         db.scalars(select(Plan).where(Plan.status == PlanStatus.ACTIVE).order_by(Plan.price))
     )
+
+
+@router.post("/orders", response_model=OrderRead, status_code=status.HTTP_201_CREATED)
+def place_order(data: OrderCreate, db: DbSession, customer: CurrentCustomer) -> Order:
+    existing = db.scalar(
+        select(Order).where(
+            Order.customer_id == customer.id,
+            Order.client_request_id == data.client_request_id,
+        )
+    )
+    if existing is not None:
+        return existing
+
+    plan = db.get(Plan, data.plan_id)
+    if plan is None or plan.status != PlanStatus.ACTIVE:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Plan is not available")
+
+    # The domain capacity guard is evaluated while creating the order.  The
+    # customer-facing flow never marks payment as paid; any future payment
+    # confirmation must repeat this guard immediately before that transition.
+    try:
+        capacity = build_registry(get_settings()).egress.capacity()
+        ensure_capacity(capacity, Decimal(plan.traffic_limit_bytes) / Decimal(1024**3))
+    except CapacityExceededError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from None
+
+    order = Order(
+        order_no=public_number("ORD"),
+        customer_id=customer.id,
+        plan_id=plan.id,
+        client_request_id=data.client_request_id,
+        order_type=BillingOrderType.PURCHASE.value,
+        amount=plan.price,
+        currency=plan.currency,
+        status=OrderStatus.PENDING,
+        payment_status=PaymentStatus.UNPAID,
+    )
+    db.add(order)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        recovered = db.scalar(
+            select(Order).where(
+                Order.customer_id == customer.id,
+                Order.client_request_id == data.client_request_id,
+            )
+        )
+        if recovered is None:
+            raise
+        return recovered
+    db.refresh(order)
+    return order
+
+
+@router.get("/orders", response_model=list[OrderRead])
+def my_orders(db: DbSession, customer: CurrentCustomer) -> list[Order]:
+    return list(
+        db.scalars(select(Order).where(Order.customer_id == customer.id).order_by(Order.id.desc()))
+    )
+
+
+@router.post("/orders/{order_id}/payment-notice")
+def payment_notice(
+    order_id: int,
+    db: DbSession,
+    customer: CurrentCustomer,
+) -> dict[str, object]:
+    order = db.scalar(
+        select(Order).where(Order.id == order_id, Order.customer_id == customer.id)
+    )
+    if order is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Order not found")
+    if order.status != OrderStatus.PENDING or order.payment_status != PaymentStatus.UNPAID:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Order is not awaiting payment",
+        )
+
+    previous = db.scalar(
+        select(AuditLog)
+        .where(
+            AuditLog.action == "ORDER_PAYMENT_NOTICE",
+            AuditLog.entity_type == "ORDER",
+            AuditLog.entity_id == str(order.id),
+            AuditLog.result == "SUCCESS",
+        )
+        .order_by(AuditLog.id.desc())
+    )
+    if previous is not None:
+        return {"status": "already_notified", "notified_at": previous.created_at.isoformat()}
+
+    plan = db.get(Plan, order.plan_id)
+    if plan is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Order plan not found")
+    event = NotifyEvent(
+        "ORDER_PAYMENT_NOTICE",
+        {
+            "order_no": order.order_no,
+            "plan": plan.name,
+            "amount": str(order.amount),
+            "currency": order.currency,
+            "customer_email": customer.email,
+        },
+    )
+    try:
+        delivery = build_registry(get_settings()).notify.send(event)
+        if not delivery.delivered:
+            raise RuntimeError(delivery.error or "notification delivery failed")
+    except Exception as exc:
+        db.add(
+            AuditLog(
+                actor_customer_id=customer.id,
+                action="ORDER_PAYMENT_NOTICE",
+                entity_type="ORDER",
+                entity_id=str(order.id),
+                result="FAILED",
+                detail=type(exc).__name__,
+            )
+        )
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Payment notice notification failed",
+        ) from None
+
+    db.add(
+        AuditLog(
+            actor_customer_id=customer.id,
+            action="ORDER_PAYMENT_NOTICE",
+            entity_type="ORDER",
+            entity_id=str(order.id),
+            result="SUCCESS",
+            detail="notification_sent",
+        )
+    )
+    db.commit()
+    return {"status": "notified"}
