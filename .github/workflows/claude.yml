@@ -1,0 +1,39 @@
+name: Claude Code
+
+# Lets a repository collaborator with write access trigger a Claude Code
+# session by mentioning @claude in an issue comment or a PR review comment.
+# See docs/82-tasks/TASK-T17-claude-code-github-action.md for the design
+# constraints (minimal permissions, no self-merge/close/deploy, auth choice).
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+
+concurrency:
+  group: claude-${{ github.event.issue.number || github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  claude:
+    if: contains(github.event.comment.body, '@claude')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: |
+            --max-turns 30
+            --append-system-prompt "This repository's AGENTS.md and CLAUDE.md govern how you work here and take precedence over convenience. In particular: never merge a pull request, never close or reopen a pull request or issue you did not open yourself unless explicitly asked to close the one you did open, and never trigger, approve, or perform a production deployment (the deploy-*.yml workflows in this repo are manual workflow_dispatch only -- do not attempt to invoke them). Implement the request as a normal commit on a new branch and open a pull request for a human to review and merge."
