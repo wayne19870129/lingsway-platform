@@ -28,6 +28,7 @@ from backend.app.workers.accounting_sync import (
     run_next_usage_job,
     run_pending_reconcile,
 )
+from backend.app.workers.drift_check import check_egress_drift
 from backend.app.workers.transport_sync import refresh_provider_inventory
 
 NORMAL_USAGE_INTERVAL_SECONDS = 300
@@ -40,6 +41,8 @@ class SchedulerBatchResult:
     reconciled_subscriptions: int
     usage_jobs: int
     fast_usage_poll: bool
+    egress_endpoints_checked: int
+    egress_drift_findings: int
 
     @property
     def processed_jobs(self) -> int:
@@ -125,11 +128,14 @@ def run_batch(
                 break
             usage_jobs += 1
         fast_usage_poll = usage_requires_fast_poll(db, registry.accounting)
+        drift_result = check_egress_drift(db, registry.egress)
     return SchedulerBatchResult(
         transport_records=transport_records,
         reconciled_subscriptions=reconciled,
         usage_jobs=usage_jobs,
         fast_usage_poll=fast_usage_poll,
+        egress_endpoints_checked=drift_result.checked,
+        egress_drift_findings=len(drift_result.findings),
     )
 
 

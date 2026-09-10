@@ -51,6 +51,8 @@ def test_scheduler_runs_one_mock_round_without_external_services() -> None:
     assert result.reconciled_subscriptions == 0
     assert result.usage_jobs == 0
     assert result.fast_usage_poll is False
+    assert result.egress_endpoints_checked == 0
+    assert result.egress_drift_findings == 0
 
 
 def test_usage_poll_interval_switches_between_five_and_one_minutes() -> None:
