@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { AdminShell, formatBytes, formatDate, statusClass, useAdmin } from "../components";
+import { AdminShell, extractErrorMessage, formatBytes, formatDate, statusClass, useAdmin } from "../components";
 
 type AdminOrder = {
   id: number;
@@ -47,7 +47,7 @@ function Orders() {
       });
       const body = await response.json().catch(() => ({})) as { detail?: string; subscription_url?: string };
       if (!response.ok) {
-        setError(body.detail ?? "确认收款或自动开通失败");
+        setError(extractErrorMessage(body, "确认收款或自动开通失败"));
         return;
       }
       setMessage(`订单 ${order.order_no} 已开通${body.subscription_url ? `，订阅链接：${body.subscription_url}` : ""}`);
