@@ -41,6 +41,10 @@ AGENTS.md                  → 需人工确认才可修改
 ## 流程
 - Claude Code 从 `docs/82-tasks/TASK-xxx.md`(如任务已有 TASK 文件)或
   User 的直接需求出发,实现代码、跑测试/lint/build、建 branch、提 PR。
+  User 直接在对话里提出的需求,如果不是可以立刻完成的小改动,应该先
+  同步成 GitHub Issue 或 `docs/82-tasks/TASK-*.md`,再据此实现——聊天记录
+  本身不构成「GitHub Issue / TASK」这一节要求的"记录",跳过这一步直接
+  实现,等同于让需求和验收标准处于未记录状态。
 - Claude Code 独占撰写 TASK(`docs/82-tasks/`)、REVIEW(`docs/81-reviews/`)
   与 ADR(`docs/80-decisions/`),这些文档产出和上面的代码实现是同一个
   执行者做的两类工作,不是两个角色分工。
@@ -98,16 +102,26 @@ Work 和 Claude 都可能以 **User 本人的 GitHub 身份**发表评论/审查
 
 ## 凭据持有范围
 
-过渡期(T1~T5)Codex 可自主使用:
+本节约束的对象现在是 **Claude Code**(见上方「协作角色与职责」——
+Claude Code 是当前唯一执行者,实现 providers/infrastructure/deploy
+并推动上线,因此凭据边界必须明确覆盖它,不能停留在"Codex"这个已经不
+存在的执行者名下)。以下边界不论 Claude Code 运行在本地 CLI 还是云端
+session,同样适用——运行位置不改变凭据能不能碰。
+
+过渡期(T1~T5)Claude Code 可自主使用:
 本机测试库凭据、VPS SSH key、Webshare API Key(轮换后的新 Key)、
 R2 / Telegram / Resend 凭据
 
-Codex 始终不得持有:
+Claude Code 始终不得持有:
 GPG 私钥、Vultr 账号、GitHub 主账号、域名注册商账号
 
 T6 完成后:
 PROD_* 全部迁入 GitHub Actions Secrets,本机只保留 STAGING_*;
-Codex 通过触发 workflow 完成部署,不再持有生产凭据明文
+Claude Code 通过触发 workflow 完成部署,不再持有生产凭据明文
+
+以上限制是既有安全边界的原样延续,不因为执行者从 Codex 改叫
+Claude Code 而放宽或删除任何一条;引入新执行者时必须重新逐条确认
+边界是否仍然成立,不能默认继承。
 
 ## 禁止自主执行(必须人工确认)
 
