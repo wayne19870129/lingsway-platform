@@ -1,15 +1,24 @@
 # CLAUDE.md
 
 This file is the day-to-day operating procedure for Claude Code sessions
-working in this repository. It does not replace `AGENTS.md` — that file
-holds the repository's iron rules and the module write-boundary table, and
-wins on conflict, followed by any applicable ADR under `docs/80-decisions/`.
-This file adds the concrete Pull Request and independent AI review workflow
-that every change must follow, and consolidates guidance that was previously
-only implicit across `README.md`, `AGENTS.md`, `docs/82-tasks/`, and
-`.github/pull_request_template.md`.
+working in this repository. It does not replace `AGENTS.md` or any ADR.
+`AGENTS.md` itself sets the authority order for conflicts: **ADR >
+AGENTS.md > REVIEW** — an accepted ADR under `docs/80-decisions/` can
+intentionally override `AGENTS.md`, and `AGENTS.md` overrides review
+feedback. This file adds the concrete Pull Request and independent AI
+review workflow that every change must follow on top of that order, and
+consolidates guidance that was previously only implicit across
+`README.md`, `AGENTS.md`, `docs/82-tasks/`, and
+`.github/pull_request_template.md`. Nothing here overrides that ADR >
+AGENTS.md > REVIEW order; if any instruction below ever reads as though
+it does, `AGENTS.md`'s stated order wins.
 
-Read in this order at the start of any task:
+The list below is a **reading order for gathering context** at the start
+of a task, not a restatement of authority: read `AGENTS.md` before
+individual ADRs simply because it's one short file with the rules that
+apply everywhere, while ADRs are numerous and scoped to specific areas.
+Authority still runs ADR > AGENTS.md > REVIEW regardless of what's read
+first.
 
 1. This file.
 2. `AGENTS.md` (iron rules, module write-boundaries, credential-handling
@@ -23,12 +32,17 @@ Read in this order at the start of any task:
 
 ### General
 
-- `main` is protected: no direct commits carrying business changes.
-  `README.md` documents the manual GitHub branch-protection setup
-  (required PR, required approvals, required status checks, no force
-  push, no bypass); `AGENTS.md` rule 8 requires the same discipline even
-  before that GitHub-side protection is confirmed enabled on a given
-  repo instance.
+- `main` must never receive direct commits carrying business changes.
+  This is a policy every agent self-enforces regardless of GitHub
+  configuration: `AGENTS.md` rule 8 states plainly that mechanical
+  branch protection on `main` is **currently unavailable** here (private
+  personal-repository plan limits), so there is no GitHub-side guardrail
+  to fall back on — an agent that skips this discipline because "GitHub
+  would have blocked it anyway" is wrong. `docs/10-deploy-new-server.md`
+  ("GitHub settings that require manual configuration" → "Protect main")
+  documents the manual steps to configure that protection when it
+  becomes available; do not assume those steps have been applied to any
+  given instance of this repository without checking.
 - Every feature, bug fix, or refactor goes through its own branch and its
   own Pull Request — one task, one PR, matching the existing "Tasks T0
   through T8 ... every task is submitted as a PR" convention in
