@@ -5,6 +5,15 @@ import { useRouter } from "next/navigation";
 import { FormEvent, useState } from "react";
 import { api, AuthCard, saveCustomerToken } from "../../customer";
 
+type ValidationDetail = { msg?: string }[];
+
+function extractErrorMessage(body: { detail?: string | ValidationDetail }, fallback: string): string {
+  const { detail } = body;
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) return detail.map((item) => item.msg).filter(Boolean).join("; ") || fallback;
+  return fallback;
+}
+
 export default function RegisterPage() {
   const router = useRouter();
   const [email, setEmail] = useState("");
@@ -15,10 +24,10 @@ export default function RegisterPage() {
   async function submit(event: FormEvent) {
     event.preventDefault(); setError(""); setMessage("");
     const response = await fetch(`${api}/auth/register`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email, nickname: nickname || null, password }) });
-    if (!response.ok) { const body = await response.json().catch(() => ({})); setError(body.detail ?? "注册失败"); return; }
+    if (!response.ok) { const body = await response.json().catch(() => ({})); setError(extractErrorMessage(body, "注册失败")); return; }
     const login = await fetch(`${api}/auth/login`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email, password }) });
     if (!login.ok) { setMessage("注册成功，请登录"); return; }
     const body = await login.json() as { access_token: string }; saveCustomerToken(body.access_token); router.push("/portal");
   }
-  return <AuthCard><h1>注册</h1><p className="muted">先完成基础注册，邮箱验证稍后接入。</p><form className="panel form-panel" onSubmit={submit}><label>邮箱<input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required /></label><label>昵称（可选）<input value={nickname} onChange={(e) => setNickname(e.target.value)} /></label><label>密码（至少 10 位）<input type="password" minLength={10} value={password} onChange={(e) => setPassword(e.target.value)} required /></label><button type="submit">注册并登录</button>{error && <p className="notice error">{error}</p>}{message && <p className="notice">{message}</p>}</form><p>已有账号？<Link href="/login">登录</Link></p></AuthCard>;
+  return <AuthCard><h1>注册</h1><p className="muted">先完成基础注册，邮箱验证稍后接入。</p><form className="panel form-panel" onSubmit={submit}><label>邮箱<input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required /></label><label>昵称（可选）<input maxLength={80} value={nickname} onChange={(e) => setNickname(e.target.value)} /></label><label>密码（至少 10 位）<input type="password" minLength={10} value={password} onChange={(e) => setPassword(e.target.value)} required /></label><button type="submit">注册并登录</button>{error && <p className="notice error">{error}</p>}{message && <p className="notice">{message}</p>}</form><p>已有账号？<Link href="/login">登录</Link></p></AuthCard>;
 }
