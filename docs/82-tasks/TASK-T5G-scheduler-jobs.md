@@ -25,3 +25,25 @@
 - 全 mock/noop 环境下 `make test-unit` 通过且无网络副作用。
 - 真实 MySQL 集成测试覆盖用量同步、漂移检测的数据库状态变化。
 - 全仓边界审计确认 workers 不直接 import 具体 provider 实现。
+
+## 完成情况（2026-09-10）
+
+`backend/app/workers/drift_check.py` 已落地：只读比对 `EgressEndpoint`
+的 host/port 与 `EgressProvider.list_endpoints()` 返回的 DTO（按
+`EgressEndpoint.code == EgressEndpointDTO.endpoint_id` 匹配），发现不一致
+只写 `AuditLog`，不做任何自动纠正或调用 `replace_endpoint`。已接入
+`scheduler.run_batch()`，`SchedulerBatchResult` 新增
+`egress_endpoints_checked` / `egress_drift_findings` 两个字段。单测见
+`backend/tests/unit/test_drift_check.py`（含 provider 返回空列表时只记一条
+"无法核验" 而不是给每个端点各报一次假阳性的场景）。另外补了
+`backend/tests/unit/test_scheduler_transport_failure.py`，覆盖
+`accounting.sync`/`transport.sync` 之前缺失的失败转 DEGRADED 分支。
+
+**接入时发现一个更大的前置问题**：`backend/app/providers/registry.py` 的
+`build_registry()` 目前无论环境变量填什么，`EGRESS_PROVIDER` 等九个
+provider 变量都只接受 mock/noop 取值，其余一律
+`raise ProviderConfigurationError`。也就是说本任务接的
+`registry.egress.list_endpoints()` 在任何部署环境下实际都还是
+`MockEgressProvider`，`providers/egress/webshare.py` 的真实实现完全没有
+被接入的路径，出口漂移检测暂时无法在真实环境里发挥作用。这个问题超出
+T5G 范围，已经单独开了 `TASK-T16-real-provider-registry-wiring.md`。
