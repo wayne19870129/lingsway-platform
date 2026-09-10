@@ -3,16 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { FormEvent, useState } from "react";
-import { api, AuthCard, saveCustomerToken } from "../../customer";
-
-type ValidationDetail = { msg?: string }[];
-
-function extractErrorMessage(body: { detail?: string | ValidationDetail }, fallback: string): string {
-  const { detail } = body;
-  if (typeof detail === "string") return detail;
-  if (Array.isArray(detail)) return detail.map((item) => item.msg).filter(Boolean).join("; ") || fallback;
-  return fallback;
-}
+import { api, AuthCard, extractErrorMessage, saveCustomerToken } from "../../customer";
 
 export default function RegisterPage() {
   const router = useRouter();
