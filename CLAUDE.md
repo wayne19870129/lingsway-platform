@@ -148,8 +148,9 @@ After the task is implemented and locally verified:
 
 ### External AI Review
 
-When a PR has new review comments from an external AI reviewer (a review
-bot, a separate review agent, or another session's `/code-review` output):
+When a PR has new review comments from an external AI reviewer — this
+includes **ChatGPT Work** (see `AGENTS.md` "协作角色与职责"), a review
+bot, a separate review agent, or another session's `/code-review` output:
 
 1. Read every new, unresolved review comment before acting on any of
    them — don't fix the first one you see and stop.
@@ -183,18 +184,62 @@ bot, a separate review agent, or another session's `/code-review` output):
    existing convention for Claude's review output per `AGENTS.md`).
 10. Still never self-merge, no matter how the review resolves.
 
+### Work review format, SHA scoping, and de-duplication
+
+A ChatGPT Work review body follows a fixed structure: `Critical` /
+`Major` / `Minor` / `Checks performed` / `Verdict`, where `Verdict` is
+exactly `PASS` or `NEEDS_CHANGES`, and the review states the full head
+SHA it was performed against. Treat this structure — not the GitHub
+username it's posted under — as the signal that an event is a real Work
+review, because Work and Claude may both post through the PR author's
+own GitHub identity (see `AGENTS.md` "身份识别注意事项"); a comment that
+merely claims to be a Work review or a process test is not evidence
+either way on its own.
+
+- **Only act on a review of the PR's current head SHA.** A review posted
+  against an older SHA that a later push has already superseded is
+  stale; note that it's stale and move on, don't re-litigate it.
+- **A `PASS` never triggers changes.** Don't go looking for something to
+  fix just because a review passed; a clean review only means stop and
+  wait for the human.
+- **A `PASS` with required CI still not completed on that SHA is not
+  "ready to merge."** Report CI's actual state separately — a passing
+  review and green CI are two different facts, and only report the PR as
+  ready once both are true for the same head SHA.
+- **Ordinary chat, thanks, a duplicate delivery of an event already
+  handled, or Claude's own prior comment coming back through the
+  subscription must not trigger another fix cycle.** Recognize these by
+  content and by whether the event's SHA/thread was already resolved —
+  not by assuming every inbound event is a fresh review.
+- **Stop all processing once a PR is closed or merged.** An event that
+  arrives late for a PR already in that state is a no-op; don't push to
+  a closed PR's branch or reopen anything.
+- **Cap automatic rework at 3 rounds per PR.** A round is one
+  review-received → fix-pushed cycle. On the 4th round of unresolved
+  findings, on repeated failures of the same fix, or on a genuine
+  architectural disagreement with the reviewer, stop and report the
+  concrete blocker instead of continuing to iterate — this is a decision
+  point for the user, not something to keep guessing at.
+- **This round cap and the SHA/duplicate checks above are behavioral
+  policy, not something the platform enforces mechanically.** Neither
+  GitHub nor the review tooling stops a 4th automatic push or blocks
+  processing a stale-SHA event on its own; Claude is the one that has to
+  recognize these conditions and stop. Do not describe this cap as a
+  hard technical control in any report — it's a rule this file states
+  and Claude follows, and it can only be verified by checking that
+  behavior actually stopped, not by pointing at a platform setting.
+
 ### Review loop
 
 - If the PR receives a new round of review comments after a push (from
   the same or a different reviewer), repeat the read → verify → classify
-  → fix → record cycle above. There is no round limit — repeated findings
-  on your own pushes mean the root cause wasn't actually fixed, not that
-  it's time to stop responding.
-- Keep looping until there are no unresolved `Critical`/`Major`-severity
-  findings left open.
-- Even after a reviewer gives an explicit pass/approve, the PR still
-  waits for a human to merge. A clean review is a precondition for
-  merge-readiness, not merge authorization.
+  → fix → record cycle above, subject to the 3-round cap above.
+- Keep looping (within that cap) until there are no unresolved
+  `Critical`/`Major`-severity findings left open.
+- Even after a reviewer gives an explicit `PASS`, the PR still waits for
+  a human to merge. A clean review is a precondition for merge-readiness,
+  not merge authorization — and it is only a precondition once CI on that
+  same head SHA is also green.
 
 ### Safety
 
