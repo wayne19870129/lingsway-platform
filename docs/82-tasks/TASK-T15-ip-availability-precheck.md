@@ -31,3 +31,50 @@ IP 可用性检查仅存在于旧 `confirm_payment_and_provision` 中，且受 `
 - 预检使用只读查询，不改变 `EgressEndpoint`、`EgressBinding` 或库存预留状态。
 - 确认付款阶段的二次 IP 可用性校验仍然存在。
 - 不引入自动清理或历史 `PAID` / `PROVISION_FAILED` 对账逻辑。
+
+## 现状复核（2026-09-10）与实现建议
+
+`backend/app/api/public.py` 的 `place_order`（约第 118-168 行）目前只调用
+`ensure_capacity()` 校验 Webshare 侧的 GB 额度，完全没有查询
+`EgressEndpoint` 表，确认本任务尚未开始。
+
+真正的“确认付款时二次校验”已经存在，位于
+`backend/app/infra/provisioning_state.py` 的
+`SqlAlchemyProvisioningState.allocate_endpoint`（约第 59-77 行），条件是：
+
+```python
+EgressEndpoint.status == "AVAILABLE",
+EgressEndpoint.purpose == "PRODUCTION",
+EgressEndpoint.capacity == 1,
+EgressEndpoint.current_count == 0,
+```
+
+且用 `with_for_update()` 加锁后原子分配。**这段代码不用改，也不要重复
+加锁**——本任务只是在下单这一步补一个更早的只读提示，让用户在真正没有
+IP 的时候不用走完下单流程才发现失败。
+
+建议的新增只读预检，条件应与上面完全一致（不要引入按 `route_group_code`
+/ `EgressGroup` 分组的新过滤逻辑——当前 `allocate_endpoint` 本身就是全局
+分配，不分组，预检若加上分组过滤反而会造成“预检通过、确认付款却分配到
+别的池子”的不一致）：
+
+```python
+has_ip = db.scalar(
+    select(func.count()).select_from(EgressEndpoint).where(
+        EgressEndpoint.status == "AVAILABLE",
+        EgressEndpoint.purpose == "PRODUCTION",
+        EgressEndpoint.capacity == 1,
+        EgressEndpoint.current_count == 0,
+    )
+) > 0
+```
+
+放在 `ensure_capacity` 校验之后、`db.add(order)` 之前；没有可用 IP 时返回
+`409`（跟容量不足复用同一状态码更一致），`detail` 说明是 IP 库存不足而
+非流量额度不足，方便前端/客服区分。
+
+测试可以直接复用 `backend/tests/integration/test_db_adapters.py` 里已有
+的 `EgressEndpoint` fixture 写法（约第 101-116 行，`status="AVAILABLE"`,
+`capacity=1`, `current_count=0`），以及 `backend/tests/unit/test_domain.py`
+里现有的 mock provisioning state 写法，构造“预检通过但确认付款时已被占用”
+的并发场景。

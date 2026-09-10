@@ -129,6 +129,15 @@ export function formatDate(value: string | null | undefined): string {
   return value ? new Date(value).toLocaleString("zh-CN") : "—";
 }
 
+type ValidationDetail = { msg?: string }[];
+
+export function extractErrorMessage(body: { detail?: string | ValidationDetail }, fallback: string): string {
+  const { detail } = body;
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) return detail.map((item) => item.msg).filter(Boolean).join("; ") || fallback;
+  return fallback;
+}
+
 export function statusClass(value: string | null | undefined): string {
   const normalized = (value ?? "").toLowerCase();
   if (["active", "activated", "available", "ok", "paid"].includes(normalized)) return "status-good";
