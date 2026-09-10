@@ -15,7 +15,10 @@ from sqlalchemy.orm import Session
 import backend.app.models  # noqa: F401
 from backend.app.core.database import Base, build_engine
 from backend.app.core.secrets import reveal_secret
-from backend.app.infra.provisioning_state import SqlAlchemyProvisioningState
+from backend.app.infra.provisioning_state import (
+    ProvisioningStateError,
+    SqlAlchemyProvisioningState,
+)
 from backend.app.models import (
     BindingRole,
     Customer,
@@ -24,6 +27,8 @@ from backend.app.models import (
     EgressGroup,
     GatewayRouteBinding,
     Order,
+    OrderStatus,
+    PaymentStatus,
     Plan,
     RouteBinding,
     RouteGroup,
@@ -192,6 +197,114 @@ def test_gateway_route_binding_is_idempotent_and_active_unique(
     with pytest.raises(IntegrityError):
         db.flush()
     db.rollback()
+
+
+def test_ip_precheck_pass_does_not_prevent_authoritative_recheck_from_rejecting(
+    db: Session,
+) -> None:
+    """TASK-T15: the order-time IP precheck is a plain read-only COUNT and
+    cannot reserve the endpoint it saw available. Two subscriptions race for
+    the single available EgressEndpoint: the precheck reports it as
+    available to both, but only the locking, authoritative allocation in
+    SqlAlchemyProvisioningState.allocate_endpoint (invoked from
+    confirm-payment) can actually hand it out, and it must reject the second
+    caller instead of double-assigning the same IP.
+    """
+    customer = Customer(
+        customer_no="CUS-RACE-001",
+        email="race@example.invalid",
+        password_hash="hash",
+    )
+    plan = Plan(
+        plan_code="RACE-PLAN",
+        name="Race Plan",
+        traffic_limit_bytes=50 * 1024**3,
+        duration_days=30,
+        price="30.00",
+        currency="USD",
+        route_group_code="RG_RACE",
+    )
+    group = EgressGroup(code="EG-RACE", region="US")
+    db.add_all([customer, plan, group])
+    db.flush()
+    order_a = Order(
+        order_no="ORD-RACE-A",
+        customer_id=customer.id,
+        plan_id=plan.id,
+        client_request_id="race-request-a",
+        order_type="PURCHASE",
+        amount="30.00",
+        currency="USD",
+    )
+    order_b = Order(
+        order_no="ORD-RACE-B",
+        customer_id=customer.id,
+        plan_id=plan.id,
+        client_request_id="race-request-b",
+        order_type="PURCHASE",
+        amount="30.00",
+        currency="USD",
+    )
+    db.add_all([order_a, order_b])
+    db.flush()
+    subscription_a = Subscription(
+        subscription_no="SUB-RACE-A",
+        customer_id=customer.id,
+        plan_id=plan.id,
+        order_id=order_a.id,
+        status=SubscriptionStatus.PROVISIONING,
+        route_group_code="RG_RACE",
+        service_expire_at=datetime(2027, 1, 1, tzinfo=UTC),
+    )
+    subscription_b = Subscription(
+        subscription_no="SUB-RACE-B",
+        customer_id=customer.id,
+        plan_id=plan.id,
+        order_id=order_b.id,
+        status=SubscriptionStatus.PROVISIONING,
+        route_group_code="RG_RACE",
+        service_expire_at=datetime(2027, 1, 1, tzinfo=UTC),
+    )
+    endpoint = EgressEndpoint(
+        group_id=group.id,
+        code="EGRESS_RACE_01",
+        provider_name="webshare",
+        host="proxy.example.invalid",
+        port=1080,
+        protocol="socks5",
+        credential_secret_ref="egress/race/base",
+        status="AVAILABLE",
+        capacity=1,
+        current_count=0,
+        mihomo_listen_port=11090,
+    )
+    db.add_all([subscription_a, subscription_b, endpoint])
+    db.flush()
+
+    # Both orders pass the order-time precheck: exactly one IP is available.
+    available_ip_count = db.scalar(
+        select(func.count())
+        .select_from(EgressEndpoint)
+        .where(
+            EgressEndpoint.status == "AVAILABLE",
+            EgressEndpoint.purpose == "PRODUCTION",
+            EgressEndpoint.capacity == 1,
+            EgressEndpoint.current_count == 0,
+        )
+    )
+    assert (available_ip_count or 0) > 0
+
+    state_a = SqlAlchemyProvisioningState(db, subscription_a.id)
+    state_a.allocate_endpoint(str(customer.id))  # takes the only endpoint
+    db.flush()
+
+    state_b = SqlAlchemyProvisioningState(db, subscription_b.id)
+    with pytest.raises(ProvisioningStateError):
+        state_b.allocate_endpoint(str(customer.id))
+
+    # Order B must never be marked PAID off the back of a failed allocation.
+    assert order_b.payment_status is PaymentStatus.UNPAID
+    assert order_b.status is OrderStatus.PENDING
 
 
 @dataclass

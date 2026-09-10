@@ -37,7 +37,13 @@
 `backend/tests/unit/test_drift_check.py`（含 provider 返回空列表时只记一条
 "无法核验" 而不是给每个端点各报一次假阳性的场景）。另外补了
 `backend/tests/unit/test_scheduler_transport_failure.py`，覆盖
-`accounting.sync`/`transport.sync` 之前缺失的失败转 DEGRADED 分支。
+`accounting.sync`/`transport.sync` 之前缺失的失败转 DEGRADED 分支
+（此前一版"现状复核"提议新建 `test_accounting_sync.py`/
+`test_transport_sync.py` 两个文件,实际以这一个测试文件覆盖了同样的
+缺口,不需要再拆两个文件)。
+
+四类任务(accounting.sync / transport.sync / 用量同步 / 出口漂移检测)
+现已全部有可调度入口和独立单元测试,验收标准第一条达成。
 
 **接入时发现一个更大的前置问题**：`backend/app/providers/registry.py` 的
 `build_registry()` 目前无论环境变量填什么，`EGRESS_PROVIDER` 等九个

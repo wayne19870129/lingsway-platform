@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from fastapi import APIRouter, HTTPException, Request, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from backend.app.core.config import get_settings
@@ -26,6 +26,7 @@ from backend.app.models import (
     AuditLog,
     Customer,
     CustomerStatus,
+    EgressEndpoint,
     Order,
     OrderStatus,
     PaymentStatus,
@@ -138,6 +139,30 @@ def place_order(data: OrderCreate, db: DbSession, customer: CurrentCustomer) -> 
         ensure_capacity(capacity, Decimal(plan.traffic_limit_bytes) / Decimal(1024**3))
     except CapacityExceededError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from None
+
+    # Read-only precheck: each customer needs one dedicated IP, and GB quota
+    # is not the real bottleneck (see TASK-T15). This mirrors the exact
+    # filter used by the authoritative, lock-holding allocation at
+    # confirm-payment time (SqlAlchemyProvisioningState.allocate_endpoint) so
+    # a pass here can't diverge from what that step will actually allocate.
+    # It does not reserve or lock a row -- the endpoint can still be taken by
+    # another order before this one is paid, which confirm-payment re-checks.
+    available_ip_count = db.scalar(
+        select(func.count())
+        .select_from(EgressEndpoint)
+        .where(
+            EgressEndpoint.status == "AVAILABLE",
+            EgressEndpoint.purpose == "PRODUCTION",
+            EgressEndpoint.capacity == 1,
+            EgressEndpoint.current_count == 0,
+        )
+    )
+    has_available_ip = (available_ip_count or 0) > 0
+    if not has_available_ip:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="No dedicated egress IP is currently available",
+        )
 
     order = Order(
         order_no=public_number("ORD"),

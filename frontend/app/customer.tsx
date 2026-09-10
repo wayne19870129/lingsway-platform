@@ -23,6 +23,15 @@ export function saveCustomerToken(token: string): void {
   window.localStorage.setItem(CUSTOMER_TOKEN_KEY, token);
 }
 
+type ValidationDetail = { msg?: string }[];
+
+export function extractErrorMessage(body: { detail?: string | ValidationDetail }, fallback: string): string {
+  const { detail } = body;
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) return detail.map((item) => item.msg).filter(Boolean).join("; ") || fallback;
+  return fallback;
+}
+
 export function CustomerShell({ title, children }: { title: string; children: ReactNode }) {
   const [token, setToken] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
