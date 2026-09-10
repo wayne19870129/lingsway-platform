@@ -59,4 +59,44 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
-      - run: npm audit --audit-level=high
+      - name: npm audit (retry only on transient registry/network failures)
+        shell: bash
+        run: |
+          set -uo pipefail
+          max_attempts=3
+          delays=(2 6 18)
+          # Signatures of registry/network flakiness, not real audit findings.
+          transient_pattern='ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|ECONNREFUSED|E5[0-9]{2}|Service Unavailable|network timeout|socket hang up'
+          attempt=1
+          while true; do
+            npm audit --audit-level=high --json > audit.json 2> audit.err
+            code=$?
+
+            if [ "$code" -eq 0 ]; then
+              exit 0
+            fi
+
+            if jq -e '.vulnerabilities' audit.json >/dev/null 2>&1; then
+              echo "npm audit reached the registry and reported real findings; not retrying." >&2
+              npm audit --audit-level=high || true
+              exit "$code"
+            fi
+
+            if grep -Eq "$transient_pattern" audit.err audit.json 2>/dev/null; then
+              if [ "$attempt" -ge "$max_attempts" ]; then
+                echo "npm audit failed $max_attempts times due to transient network/registry errors; giving up." >&2
+                cat audit.err >&2
+                exit "$code"
+              fi
+              delay="${delays[$((attempt - 1))]}"
+              echo "npm audit attempt $attempt/$max_attempts hit a transient error, retrying in ${delay}s..." >&2
+              cat audit.err >&2
+              sleep "$delay"
+              attempt=$((attempt + 1))
+              continue
+            fi
+
+            echo "npm audit failed with an error that doesn't match known transient patterns; failing without retry." >&2
+            cat audit.err >&2
+            exit "$code"
+          done
