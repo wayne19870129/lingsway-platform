@@ -27,13 +27,18 @@ jobs:
       id-token: write
       actions: read
     steps:
-      - uses: actions/checkout@v6
+      # Pinned to a reviewed commit SHA, not a mutable tag: both actions get
+      # repo-write permissions and, for claude-code-action, the
+      # CLAUDE_CODE_OAUTH_TOKEN secret, so a retargeted tag would run with
+      # that authority. Bump the SHA (and this comment) via a reviewed PR,
+      # e.g. from Dependabot's github-actions ecosystem updates.
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
         with:
           fetch-depth: 1
 
-      - uses: anthropics/claude-code-action@v1
+      - uses: anthropics/claude-code-action@0a8d3c9443bbff909ab973b6a17a340b913f229f # v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           claude_args: |
             --max-turns 30
-            --append-system-prompt "This repository's AGENTS.md and CLAUDE.md govern how you work here and take precedence over convenience. In particular: never merge a pull request, never close or reopen a pull request or issue you did not open yourself unless explicitly asked to close the one you did open, and never trigger, approve, or perform a production deployment (the deploy-*.yml workflows in this repo are manual workflow_dispatch only -- do not attempt to invoke them). Implement the request as a normal commit on a new branch and open a pull request for a human to review and merge."
+            --append-system-prompt "This repository's AGENTS.md and CLAUDE.md govern how you work here and take precedence over convenience. Never merge, approve, or close a pull request. Never trigger, approve, or perform a production deployment (this repository's deploy-*.yml workflows are manual workflow_dispatch only -- do not attempt to invoke them). ${{ (github.event.pull_request != null || github.event.issue.pull_request != null) && 'This trigger is a comment on an existing pull request: push any fix directly to that pull request''s current branch (already checked out). Never open a second pull request for the same task -- this repository requires one task, one PR.' || 'This trigger is a comment on a GitHub Issue, not a pull request: implement the request on a new branch. This action does not auto-create a pull request by default -- it pushes the branch and surfaces its own link to a pre-filled PR-creation page. Do not attempt to force-create a pull request through a separate API call; let that normal flow produce the link for a human to click.' }}"

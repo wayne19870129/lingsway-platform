@@ -8,7 +8,23 @@
 在 `wayne19870129/lingsway-platform` 里接入官方
 `anthropics/claude-code-action@v1`,让**拥有仓库写权限**的用户在
 GitHub Issue 评论或 PR 评论里 `@claude` 时,能触发一次 Claude Code 会话
-去处理该请求(读代码、按需改代码、推送分支、开 PR)。
+去处理该请求(读代码、按需改代码、推送分支)。
+
+**关于"开 PR"这一步,需要如实说明官方 Action 的默认行为**(来自其官方
+FAQ:"Claude doesn't create PRs by default. Instead, it pushes commits to
+a branch and provides a link to a pre-filled PR submission page."):
+在 Issue 场景下,Claude **不会自动创建 PR**,而是推送一个分支,并在评论里
+给出一个预填好的"创建 PR"链接,由人点击才会真正生成 PR。这不是本任务
+的缺陷,而是官方 Action 的默认设计(为了尊重分支保护规则、让 PR 创建这个
+动作始终由人确认),和这个仓库"关键动作需要人工确认"的一贯风格是一致的,
+不需要额外实现一个自动开 PR 的步骤去"补上"它。
+
+如果触发源是 PR 上的评论(`pull_request_review_comment`,或者
+`issue_comment` 但那个 issue 实际是个 PR),行为不同:Claude 已经在这个
+PR 的分支上,应该直接推送修复到**当前 PR 的分支**,而不是新建分支/新建
+PR——这是 `CLAUDE.md`"一个任务一个 PR"规则的直接要求,提示词必须按
+事件类型区分这两种场景,不能用同一段无条件文字覆盖两种完全不同的期望
+行为。
 
 这是"交互模式"的官方 Action,和这个仓库里已经在跑的、由本会话通过
 `subscribe_pr_activity` 驱动的人工 PR 陪跑流程是两回事——本任务只负责
@@ -24,7 +40,18 @@ GitHub Issue 评论或 PR 评论里 `@claude` 时,能触发一次 Claude Code �
 - 权限声明为完成任务所需的最小集合:`contents: write`、
   `pull-requests: write`、`issues: write`、`id-token: write`、
   `actions: read`。不加 `deployments`、`packages`、`administration` 等
-  本任务用不到的权限。
+  本任务用不到的权限。其中 `id-token: write` 的准确理由是官方文档写明的
+  "required for the Claude Code GitHub Action's default GitHub App
+  authentication"——是 Action 默认走 GitHub App 身份认证这条路径本身
+  需要 OIDC token,不是 `CLAUDE_CODE_OAUTH_TOKEN` 这个订阅 token 本身
+  需要 OIDC。
+- **第三方 Action 必须锁定到具体 commit SHA,不用可变的版本 tag**
+  (`actions/checkout@v6`、`anthropics/claude-code-action@v1` 这类 tag
+  可以被上游重新指向,而这两个 Action 都会拿到仓库写权限,后者还能读到
+  `CLAUDE_CODE_OAUTH_TOKEN`)。用 `owner/repo@<40位 commit sha> # vX.Y`
+  的写法,注释里保留版本号方便人读;后续升级走人工审查过的 PR(可以用
+  Dependabot 的 `github-actions` 生态自动开升级 PR,但升级本身仍要过
+  一次审查,不能自动合并)。
 - 必须有并发控制(同一个 Issue/PR 上新的 `@claude` 事件应取消或排队,
   不允许同一 Issue/PR 上多个 Action run 并行改同一个分支)、合理的
   `timeout-minutes`、以及通过 `--max-turns` 限制单次会话的最大轮数。
@@ -57,6 +84,8 @@ GitHub Issue 评论或 PR 评论里 `@claude` 时,能触发一次 Claude Code �
 
 - `.github/workflows/claude.yml`(新建)
 - `docs/82-tasks/TASK-T17-claude-code-github-action.md`(本文件)
+- `.github/dependabot.yml`(新建,仅用于 `github-actions` 生态的锁定
+  SHA 升级提醒;不新增其他生态的自动升级)
 
 ## 验收标准
 
@@ -70,9 +99,14 @@ GitHub Issue 评论或 PR 评论里 `@claude` 时,能触发一次 Claude Code �
 - PR 描述/验收报告里,给用户的指令包含:精确的 Secret 添加页面路径、
   Secret 名称、如何在本地生成 token(命令)、以及"不要把值发给我"的
   明确提醒。
-- 提供一个可直接照做的、无风险的测试 Issue 文案(仅要求 Claude 创建一个
-  不改业务逻辑的测试 PR),但由于需要 Secret 已配置、Action 已合并到
-  `main` 才能真正触发,端到端验证必须由用户在这两步完成后自行确认,
-  报告里不得声称"已验证 @claude 能创建 PR"这种在本任务 PR 阶段不可能
-  完成的结论。
+- 提供一个可直接照做的、无风险的测试 Issue 文案,准确描述预期行为是
+  "Claude 推送一个分支 + 给出创建 PR 的链接",不得写成"会自动出现一个
+  PR"。由于需要 Secret 已配置、Action 已合并到 `main` 才能真正触发,
+  端到端验证必须由用户在这两步完成后自行确认,报告里不得声称"已验证
+  @claude 能工作"这种在本任务 PR 阶段不可能完成的结论。
+- `--append-system-prompt` 必须按事件类型区分:PR 场景下的指令是"推到
+  当前 PR 分支、不要新开 PR";Issue 场景下的指令是"新建分支,让 Action
+  默认流程给出创建 PR 的链接,不要试图绕过去强行调用 API 创建 PR"。
+- `actions/checkout` 与 `anthropics/claude-code-action` 都锁定到具体
+  commit SHA,注释保留对应版本号。
 - 不自行合并本任务的 PR。
