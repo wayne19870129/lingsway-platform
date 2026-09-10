@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import Table, create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -23,6 +24,8 @@ from backend.app.models import (
     Customer,
     CustomerRole,
     CustomerStatus,
+    EgressEndpoint,
+    EgressGroup,
     Order,
     OrderStatus,
     PaymentStatus,
@@ -36,6 +39,30 @@ from backend.app.providers.base import CapacityDTO
 from backend.app.schemas.public import OrderCreate
 
 
+def add_available_egress_endpoint(
+    db: Session, code: str = "EGRESS_API_01", *, port: int = 21080
+) -> EgressEndpoint:
+    group = EgressGroup(code=f"GROUP_{code}", region="US")
+    db.add(group)
+    db.flush()
+    endpoint = EgressEndpoint(
+        group_id=group.id,
+        code=code,
+        provider_name="webshare",
+        host="proxy.example.invalid",
+        port=1080,
+        protocol="socks5",
+        credential_secret_ref=f"egress/{code}/base",
+        status="AVAILABLE",
+        capacity=1,
+        current_count=0,
+        mihomo_listen_port=port,
+    )
+    db.add(endpoint)
+    db.flush()
+    return endpoint
+
+
 @pytest.fixture
 def db_session() -> Iterator[Session]:
     engine = create_engine(
@@ -46,6 +73,8 @@ def db_session() -> Iterator[Session]:
     table_names = {
         "audit_logs",
         "customers",
+        "egress_endpoints",
+        "egress_groups",
         "jwt_sessions",
         "orders",
         "plans",
@@ -101,6 +130,7 @@ def test_order_to_payment_notice_state_flow(db_session: Session) -> None:
     )
     db_session.add_all([actor, plan])
     db_session.flush()
+    add_available_egress_endpoint(db_session)
 
     order = place_order(
         OrderCreate(plan_id=plan.id, client_request_id="request-001"),
@@ -147,6 +177,34 @@ def test_capacity_is_rejected_before_payment_mark() -> None:
         )
     assert state.rejected is True
     assert state.paid is False
+
+
+def test_place_order_rejects_when_no_dedicated_ip_available(db_session: Session) -> None:
+    actor = customer()
+    plan = Plan(
+        plan_code="NO_IP_PLAN",
+        name="No IP Plan",
+        traffic_limit_bytes=50 * 1024**3,
+        duration_days=30,
+        price=Decimal("30.00"),
+        currency="USD",
+        route_group_code="DEFAULT",
+    )
+    db_session.add_all([actor, plan])
+    db_session.flush()
+    # No EgressEndpoint row at all: the read-only IP precheck must reject
+    # the order before it ever reaches the database, regardless of GB quota.
+
+    with pytest.raises(HTTPException) as excinfo:
+        place_order(
+            OrderCreate(plan_id=plan.id, client_request_id="no-ip-request-001"),
+            db_session,
+            actor,
+        )
+    assert excinfo.value.status_code == 409
+    assert db_session.scalar(
+        select(Order).where(Order.client_request_id == "no-ip-request-001")
+    ) is None
 
 
 def test_subscription_feed_has_complete_private_headers_and_ua_formats(
