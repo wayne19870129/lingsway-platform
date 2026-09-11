@@ -3,17 +3,27 @@
 - 状态：已接受
 - 日期：2026-09-04
 - **部分表述已被 `ADR-015-marzban-ownership-and-route-identity.md`
-  supersede（2026-09-11）**：下方"决定"一节里"Marzban 在新架构中的
-  定位是 transport 层，健康检查归属该层一致"这一句判断，经
-  TASK-T16 Phase 2B0 只读研究（Marzban v0.8.4 公开源码 + `config.py`
-  `marzban_*` 字段形状 + `AccountingProvider`/`TransportProvider`
-  Protocol 对比）核实为不准确，已在 ADR-015 里纠正为"Marzban 的定位是
-  accounting 层"。`/admin/accounting/health` 复用
-  `TransportProvider.health_check()` 这一具体代码接线本身**不受影响、
-  不需要修改**——ADR-015 明确这只是为单个健康检查端点避免修改
-  `providers/base.py` 的成本考虑（本段紧随其后的理由仍然成立），和
-  Marzban 该归为哪个 provider 分类无关。本段以下原文保持不动，仅在此
-  加注更正指向。
+  supersede（2026-09-11，2026-09-11 第二次修订同步更新本注记）**：
+  下方"决定"一节里"Marzban 在新架构中的定位是 transport 层，健康检查
+  归属该层一致"这一句判断，经 TASK-T16 Phase 2B0 只读研究（Marzban
+  v0.8.4 公开源码 + `config.py` `marzban_*` 字段形状 +
+  `AccountingProvider`/`TransportProvider` Protocol 对比 + Marzban
+  节点管理能力与 `TransportProvider` 契约的 bounded-context 差异分析）
+  核实为不准确，已在 ADR-015 里纠正为"Marzban 的定位是 accounting
+  层"。**`/admin/accounting/health` 的具体代码接线这次确实需要修改**
+  ——第一版这里曾写"不受影响、不需要修改"，ADR-015 第二次修订核实
+  这个说法站不住脚：当前接线在 `ACCOUNTING_PROVIDER=marzban` 且
+  `TRANSPORT_PROVIDER_MODE=subscription` 时，实际检查的是和 Marzban
+  毫无关系的 `SubscriptionTransportProvider`，是一个真实的语义错误，
+  不是可以无限期保留的"实现捷径"。ADR-015 选定的修复方向（Option
+  H1）是给 `AccountingProvider` 新增 `health_check()`，
+  `admin_accounting_health()` 改为调用
+  `build_registry(...).accounting.health_check()`——现在有 ADR-015
+  本身作为满足 `AGENTS.md` 铁律第 5 条"先有 ADR 再改
+  `providers/base.py`"的前提，此前"为单个健康检查端点修改核心契约
+  不合比例"这条阻止修改的理由不再阻塞。这项修改属于 Phase 2B 的
+  实现范围，本 ADR-013 文件和 ADR-015 均不在这里实现代码。本段以下
+  原文保持不动，仅在此加注更正指向。
 
 ## 背景
 

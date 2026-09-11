@@ -580,7 +580,11 @@ registry wiring**。2A/2B/2C 不合并成一个阶段。
   部署拓扑/Marzban 行为），再决定具体的 DTO/schema 改动范围。
 
 ## 阶段二 B0：关闭 Phase 2B 前置决策（2026-09-11，只读研究 +
-ADR/TASK 决策，未改动业务代码）
+ADR/TASK 决策，未改动业务代码；同日第二次修订：独立审查指出并核实了
+四处事实错误——Marzban 会在特定管理 API 路径下写回共享文件、普通用户
+CRUD 走增量 Handler API 而非"每次都整体重建+重启"、Marzban 确实有
+真实的远端节点管理能力、候选 A 缺少既有数据收敛方案——已全部修正，
+完整证据见 ADR-015 第二次修订）
 
 Phase 2A（ADR-014）结尾留下三个前置问题，明确不能跳过直接进
 `DesiredRoutingState`/schema/renderer 代码改动。本阶段（2B0）只读研究
@@ -591,80 +595,107 @@ Phase 2A（ADR-014）结尾留下三个前置问题，明确不能跳过直接�
 
 ### Decision 1：Marzban v0.8.4 是否管理 Xray inbound clients
 
-**`YES`**。通过只读检索 `github.com/Gozargah/Marzban` 的 `v0.8.4` tag
-公开源码确认：Marzban 自己的数据库（`db_models.User`/`db_models.Proxy`，
-本仓库部署拓扑里对应挂载的 `db.sqlite3`）是 client 认证材料的
-authoritative source；`app/xray/config.py::include_db_users()` 在
-Marzban 内部每次重建配置时从这个库查询并把 client 追加进内存里的
-`XRayConfig` 对象；最终配置通过 `xray/core.py` 的 `-config stdin:`
-直接喂给 Marzban 自己管理的 Xray 子进程，**从不写回**本仓库挂载的
-`xray_config.json` 文件本身（该文件只在 Marzban 自己进程启动时被读取
-一次，作为 `inbounds`/`outbounds`/`routing` 的初始骨架）。因此：本仓库
-的 renderer 全量替换这个文件是安全的，不会破坏 Marzban 管理的 client
-数据；唯一需要保留的约束是 renderer 产出的 `inbounds` tag 不能破坏
-Marzban `include_db_users()` 依赖的协议匹配（已记入 Phase 2B 验收
-标准）。详细的 8 项逐条证据（含 `CONFIRMED`/`INFERENCE` 标注）见
-ADR-015 Part A。
+**`YES`（已更正，第一版把"确实管理"和"从不写回文件"错误地等同成
+同一件事）**——精确写法：Marzban DB 拥有持久化的用户/proxy 状态；
+**普通用户 CRUD（创建/修改/禁用）通过 Xray gRPC Handler API
+（`add_inbound_user`/`remove_inbound_user`）增量修改运行中的进程，
+不重写共享文件**；Marzban 应用/core 自己启动或整体重建时，会从数据库
+用 `include_db_users()` 重新生成内存里的完整配置，通过 stdin 灌给
+Xray 子进程。**但 Marzban 确实有一个会写这个共享文件的管理 API**：
+`PUT /api/core/config`（`app/routers/core.py::modify_core_config()`）
+会执行 `with open(XRAY_JSON, "w") as f: f.write(json.dumps(payload,
+...))`，随后重启 core 和已连接的远端节点——第一版"Marzban 从不写回
+`XRAY_JSON`"的结论是错的，已更正。
+
+**因此本仓库必须明确一个共享文件 ownership policy（本轮新增决定）**：
+本仓库的 renderer 是这份共享骨架文件**唯一合法的 writer**；本应用
+不得调用 Marzban 的 `PUT /api/core/config`；运维不得通过 Marzban
+UI/API 手动改 core config；如果权限层面暂时无法完全阻止这条管理
+API，Phase 2B 必须实现 **drift detection**——renderer 运行前比对磁盘
+当前内容是否被非 renderer 的写入者改动过，检测到漂移应 **fail closed
+并告警**，不静默覆盖；不允许"DB renderer + Marzban core-config API"
+两个并列、互不知情的 source of truth 同时存在。完整的三条运行时路径
+（Path A 应用启动/管理 API、Path B 普通建用户、Path C 普通改/删用户）
+和 8 项逐条 `CONFIRMED`/`INFERENCE` 证据见 ADR-015 Part A。
 
 ### Decision 2：Marzban 的 provider classification
 
-**`ACCOUNTING`**。`Settings` 里全部 `marzban_*` 字段（`base_url`、
-`admin_username`、`admin_password`、`default_protocol`、
-`default_inbounds_json`、`verify_tls`）逐一对应"调用 Marzban admin API
-创建/管理用户"所需信息，精确匹配 `AccountingProvider` Protocol
-（`create_user`/`disable_user`/`set_quota`/`set_expire`/
-`get_connection_links`/`get_usage`），和 `TransportProvider`（节点同步/
-容量/健康）契约没有交集；Decision 1 的证据也证实 Marzban 核心职责就是
-用户/账务管理，不是节点库存管理。**`ADR-013`"Marzban 在新架构中的定位
-是 transport 层"这一句表述被证明不准确，已被新增的
-`ADR-015-marzban-ownership-and-route-identity.md` supersede**——
-`/admin/accounting/health` 复用 `TransportProvider.health_check()` 这
-一具体代码接线本身不受影响、不需要修改（这是避免为单个健康检查端点
-碰 `providers/base.py` 的成本考虑，和 Marzban 该归哪一类无关）。方案 3
-（拆成两个 adapter）不成立：没有证据显示 Marzban 有任何节点库存/容量
-能力需要单独的 transport adapter 承接。详见 ADR-015 Part B。
+**`ACCOUNTING`（分类结论不变，理由已更正）**。`Settings` 里全部
+`marzban_*` 字段逐一对应"调用 Marzban admin API 创建/管理用户"所需
+信息，精确匹配 `AccountingProvider` Protocol。**Marzban 确实有真实的
+远端节点管理 API**（`app/routers/node.py`：add/list/get/modify/
+reconnect/remove/usage）——第一版"Marzban 完全没有节点库存能力"这句
+话是事实错误，已删除。更正后的理由是：这些节点管理能力针对的是
+**Marzban 自己的 Xray 执行拓扑**（横向扩展 Marzban 自己的入站处理
+能力），和 Lingsway `TransportProvider` 描述的"从外部机场/订阅供应商
+同步一份上游代理节点库存"是**两个不同的 bounded context**，逐项能力
+映射表（见 ADR-015 Part B）显示所有维度都是 No match/表面相似但语义
+不同的 Partial——**不是"能力不存在"，而是"能力存在但不符合这个
+contract"**，因此不实现 `TransportProvider`，SPLIT 仍然否决，但否决
+理由已更正。
+
+`ADR-013`"Marzban 在新架构中的定位是 transport 层"这一句表述仍然被
+`ADR-015-marzban-ownership-and-route-identity.md` supersede。
+**`/admin/accounting/health` 的代码接线本轮新增决定，不再是"不需要
+修改"**：`ACCOUNTING_PROVIDER=marzban` 且
+`TRANSPORT_PROVIDER_MODE=subscription` 时，这个端点实际检查的是和
+Marzban 无关的 `SubscriptionTransportProvider`，是真实语义错误。
+选定修复方向 **Option H1**：给 `AccountingProvider` 新增
+`health_check()`，端点改为调用 `accounting.health_check()`——现在有
+ADR-015 满足铁律第 5 条的前置条件，此前"不合比例"的阻塞理由不再成立。
+详见 ADR-015 Part B。
 
 ### Decision 3：Xray route identity 收敛方案
 
-**`A`**——恢复 `GatewayRouteBinding.gateway_principal` 的 accounting-
-principal 语义：`SqlAlchemyProvisioningState.desired_routing_state()`
-调用 `ensure_gateway_route_binding()` 时改传 `request.username`（而不是
-当前的 `tenant.tenant_id`）。理由（完整对比见 ADR-015 Part C 的十二维
-评估表）：候选 A 同时解决"字段写入值和模型/测试契约不一致"和"持久化
-时机晚于渲染发生"两个问题，因为 `gateway_principal` 本身就在
-`APPLY_GATEWAY`（第 7 步）当场写入，不依赖后续步骤；改动范围是全部
-候选里最小的（`desired_routing_state()` 的一行调用参数）；`Subscription
-.accounting_user_id` 不受影响，继续服务 `admin_sync_usage()` 的独立
-读取路径，两个字段的值理应相同（都来自同一个 `request.username`），
-不需要额外同步机制。候选 B（提前 `accounting_user_id` 持久化时机）
-和候选 C（`sub-{order.id}` 正式契约化）均被否决——B 引入不必要的跨
-编排步骤事务/补偿复杂度，C 把路由正确性长期绑定在一个字符串推导公式
-永不改变的假设上，两者都不如 A 简洁、风险更低。
+**`A`（选择不变，新增既有数据收敛这一必要组成部分）**——恢复
+`GatewayRouteBinding.gateway_principal` 的 accounting-principal
+语义：`desired_routing_state()` 调用 `ensure_gateway_route_binding()`
+时改传 `request.username`。**第一版遗漏了一个真实问题，本轮补上**：
+`ensure_gateway_route_binding()` 只在某个 `subscription_id` 再次进入
+provisioning 时才会更新已存在的行；已经存在的 active 历史行不会因为
+改了 writer 代码就自动变正确，而 `render_xray_routes.py::
+_active_routes()` 会读取**所有**活跃行的 `gateway_principal` 当 Xray
+`"user"` 匹配值——**候选 A 必须搭配一次 Alembic data-only
+reconciliation migration**（`AGENTS.md` 铁律第 7 条已确立的模式），
+按 `subscription_id` JOIN `Subscription.accounting_user_id`，只更新
+不一致的活跃行，并对 `active_gateway_principal` 唯一约束的潜在冲突
+fail closed（中止、报告冲突行，不做部分更新）。**Decision 3 = 候选 A
+的 writer 改动 + 这次数据 reconciliation，两者缺一不可**，不是只改
+一行代码就算完成。候选 B/C 仍被否决，理由不变；既有数据方案里的
+B（一次性脚本）、C（renderer 改读 `Subscription` 放弃修复
+`gateway_principal`）、D（部署前置检查）均被否决，理由见 ADR-015
+Part C。
 
 ### Reality ownership：无 NEW EVIDENCE
 
 本阶段研究过程中没有发现任何推翻 ADR-014 已 Accepted 的 Reality
 ownership 结论的证据，维持原结论不变，不重新讨论。
 
-### Decision 4：Phase 2B implementation matrix
+### Decision 4：Phase 2B implementation matrix（已按本轮修正拆分为
+更细的条目）
 
 | 改动类型 | 需要？ |
 |---|---|
 | `DesiredRoutingState` DTO change | **YES**（扩展 outbound 连接细节；route identity 部分不需要新增字段） |
 | Settings change | **YES**（`XRAY_REALITY_DEST`/`XRAY_REALITY_SERVER_NAME` 读取路径，ADR-014 已定方向） |
 | Secret persistence change | **YES**（Reality `privateKey`/`shortIds`，ADR-014 已定方向） |
-| DB schema/migration | **NO**（Part A/B/C 均复用现有字段/机制，未发现需要新表/新列） |
-| provisioning orchestration change | **YES，但范围很小**（只改 `desired_routing_state()` 一处调用参数） |
+| DB schema change | **NO**（`gateway_principal`/`accounting_user_id` 都是已有列） |
+| **既有数据 reconciliation**（本轮新增独立条目，不再和 schema change 混为一谈） | **YES**（Alembic data-only migration，含 unique-constraint fail-closed 处理，见 ADR-015 Part C） |
+| provisioning writer change | **YES，范围很小**（`desired_routing_state()` 一行调用参数） |
+| **accounting health contract/API**（本轮新增独立条目） | **YES**（`AccountingProvider` 新增 `health_check()`，Option H1，见 ADR-015 Part B） |
 | query/adapter change | **YES**（参照 `render_xray_routes.py::_active_routes()` 的 JOIN 逻辑） |
 | Xray renderer change | **YES**（产出完整 outbound；Reality `dest`/`serverNames` 改为只读 env） |
 | preservation/validation change | **YES**（按 ADR-014"合法删除语义"重写，且保留 Marzban 协议匹配约束） |
+| **共享 `XRAY_JSON` writer guard / drift policy**（本轮新增独立条目） | **YES**（renderer 是唯一合法 writer；不得调用 Marzban core-config API；需要 drift detection，检测到漂移 fail closed） |
+| tests | **YES**（route identity 契约、reconciliation migration 幂等性/冲突场景、`accounting.health_check()` 契约、drift-detection 行为） |
 
 ### Phase 2B implementation handoff（严格收窄）
 
-只实现本 ADR-015/本节已经决定的 DB → desired-state contract + Xray
-renderer/测试护栏，具体范围就是上面 Decision 4 表格里标 `YES` 的八项，
-不包括：`registry.py` 的真实 opt-in wiring、生产环境启用、真实生产
-凭据、真实 Xray reload、部署。这些仍然属于 Phase 2C。
+只实现 ADR-015/本节已经决定的 DB → desired-state contract + Xray
+renderer/测试护栏 + 既有数据 reconciliation + accounting health 契约
++ 共享文件 writer guard，具体范围就是上面 Decision 4 表格里标 `YES`
+的全部条目，不包括：`registry.py` 的真实 opt-in wiring、生产环境
+启用、真实生产凭据、真实 Xray reload、部署。这些仍然属于 Phase 2C。
 
 ### 本阶段（2B0）验收
 
@@ -672,12 +703,13 @@ renderer/测试护栏，具体范围就是上面 Decision 4 表格里标 `YES` �
   修改本文档，`ADR-013` 补一段 supersede 说明（不重写原文），
   `backend/**`/`ops/**`/`infrastructure/**`/`deploy/**`/`frontend/**`
   等代码目录零改动。
-- 只读检索了 Marzban 官方公开仓库 `v0.8.4` tag 的源码/文档，未连接
-  任何真实 Marzban 实例，未使用任何真实凭据。
+- 只读检索了 Marzban 官方公开仓库精确 `v0.8.4` tag 的源码/文档，未
+  连接任何真实 Marzban 实例，未使用任何真实凭据。
 - 没有调用任何真实 provider 的网络请求，没有读取生产配置/`.env`/
   `/etc/lingsway/*.conf`。
 - 没有 reload 或调用 Xray/Mihomo，没有修改生产数据库。
 - 三个前置决策全部关闭（Decision 1/2/3 均给出唯一结论），不再是
-  `UNVERIFIED / DECISION REQUIRED`。
+  `UNVERIFIED / DECISION REQUIRED`；本轮修正的四处事实错误均已更正
+  并在 ADR-015 里标注"第一版错误"。
 - 下一步是真正的 Phase 2B 实现 PR，按上面 Decision 4/handoff 的范围
   实施代码改动。
