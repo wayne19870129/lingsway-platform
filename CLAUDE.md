@@ -47,22 +47,15 @@ first.
   own Pull Request — one task, one PR, matching the existing "Tasks T0
   through T8 ... every task is submitted as a PR" convention in
   `README.md` and the `docs/82-tasks/TASK-*.md` per-task structure.
-- No agent merges a PR automatically by its own judgment. Final merge is a
-  human action, with exactly one narrow, explicitly user-authorized
-  exception: `.github/workflows/claude-automerge.yml`, which squash-merges
-  a PR only when every one of the nine conditions in
-  `docs/82-tasks/TASK-T18-conditional-auto-merge.md` is met (a genuine
-  Work `PASS` on the PR's current head SHA, all checks green on that SHA,
-  no unresolved review threads, no blocking labels, not a draft, cleanly
-  mergeable, the 3-round rework cap not exceeded, and — regardless of any
-  of the above — never on a PR touching `.github/workflows/**`,
-  `AGENTS.md`, `CLAUDE.md`, `.github/dependabot.yml`, `CODEOWNERS`,
-  a migration under `infrastructure/alembic/versions/**`, `deploy/**`, or
-  secret/auth config). This restates `AGENTS.md` rule 8 in PR-workflow
-  terms; it is not a looser rule than rule 8 states, and it does not
-  license an agent to merge anything itself outside that one workflow —
-  Claude Code must never call `gh pr merge` or the merge API directly, in
-  any session, no matter how confident it is.
+- No agent merges a PR automatically. Final merge is always a human
+  action. This restates `AGENTS.md` rule 8 ("不得自行 merge PR") in PR-
+  workflow terms; it is not a new or looser rule. (A conditional
+  auto-merge exception, `.github/workflows/claude-automerge.yml` /
+  `TASK-T18-conditional-auto-merge.md`, existed briefly and was reverted
+  by the user — in practice, PRs kept receiving new valid `NEEDS_CHANGES`
+  findings round after round and never actually reached auto-merge, just
+  burning review/fix cycles. Do not reintroduce any form of automatic
+  merge without the user explicitly asking for it again.)
 - No force-pushing `main`, no bypassing CI, no closing/reopening a PR to
   dodge a check.
 
@@ -256,45 +249,9 @@ below; matching the format is never a reason to skip verification.
 - Keep looping (within that cap) until there are no unresolved
   `Critical`/`Major`-severity findings left open.
 - Even after a reviewer gives an explicit `PASS`, the PR still waits for
-  a human to merge, unless it qualifies for the `claude-automerge.yml`
-  exception below — and even then, a clean review is a precondition for
-  merge-readiness, not merge authorization on its own: it is only a
-  precondition once CI on that same head SHA is also green, along with
-  every other condition that gate checks.
-
-### Conditional auto-merge (`claude-automerge.yml`)
-
-This repository has exactly one automated path from an AI review `PASS`
-to a real merge, added at the user's explicit request and documented in
-full — including the design trade-offs the user chose and the residual
-risks they accepted — in `docs/82-tasks/TASK-T18-conditional-auto-merge.md`.
-Anyone reading this file should treat that TASK file as the source of
-truth for exactly what the gate checks and why; the summary here is not a
-substitute for it.
-
-- The gate is a separate GitHub Actions workflow, not a judgment call
-  made by an agent in a chat session. Claude Code must never call
-  `gh pr merge` or the merge API directly in any interactive session —
-  the only thing that ever executes a merge is that workflow's own job,
-  and only when all nine of its conditions hold simultaneously.
-- The verdict check is **text and head-SHA matching, not cryptographic
-  identity verification** — a deliberate, user-accepted trade-off,
-  because Work and any human here post under the same GitHub account and
-  GitHub's API cannot distinguish them. This does not stop someone from
-  manually forging a comment in the right format; it does stop stale,
-  out-of-order, or plainly-not-Work-shaped comments from triggering a
-  merge. Do not describe this gate as verifying who posted a review — it
-  verifies what the comment says and which commit it says it about.
-- Certain paths are excluded from this gate entirely, regardless of
-  verdict: `.github/workflows/**`, `.github/actions/**`, `AGENTS.md`,
-  `CLAUDE.md`, `.github/dependabot.yml`, `CODEOWNERS`, any migration
-  under `infrastructure/alembic/versions/**`, `deploy/**`, and
-  `backend/app/core/secrets.py` / `security.py` / `dependencies.py`. A PR
-  touching any of these always waits for a human, no matter what any
-  review says.
-- The 3-round rework cap from the Review loop section above is also a
-  hard stop for this gate: past round 3, the gate refuses to merge and
-  posts once explaining why, instead of merging on a technicality.
+  a human to merge. A clean review is a precondition for merge-readiness,
+  not merge authorization — and it is only a precondition once CI on that
+  same head SHA is also green.
 
 ### Safety
 
@@ -315,11 +272,7 @@ on infrastructure, VPS, and provider actions):
 - Force-pushing `main`.
 - Bypassing CI (skipping checks, disabling a failing test to get green,
   `continue-on-error` on something that should fail loudly).
-- Auto-merging into `main` outside the one narrow, explicitly authorized
-  `claude-automerge.yml` gate described above — and even that gate never
-  merges a PR touching the excluded paths listed there, no matter what
-  any review says. An agent in an interactive session (this includes
-  Claude Code itself) never calls the merge API or `gh pr merge` directly.
+- Auto-merging into `main`.
 
 ## After making changes here
 

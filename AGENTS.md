@@ -12,26 +12,15 @@
 7. Alembic 历史 revision 一律不得改写。schema 与代码不一致时,只能新增
    reconciliation migration 补救,且新增迁移必须幂等
 8. main 分支的机械保护当前不可用(私有个人仓库计划限制),Agent 必须自我约束:
-   任何情况下不得直接 push 到 main,不得 force push。违反视为严重事故。
-   **合并 PR 默认也不得自行执行**,唯一例外是
-   `.github/workflows/claude-automerge.yml` 这个工作流本身,在
-   `docs/82-tasks/TASK-T18-conditional-auto-merge.md` 列出的九个条件
-   **全部满足**时执行的 squash merge——这是用户明确要求并确认过设计权衡
-   后授权的一次性例外,不是"Agent 可以自行判断要不要合并"的许可。这个例外
-   有严格边界:
-   - 只有那个工作流(以 GitHub Actions 的 job 身份、用 `GITHUB_TOKEN`)
-     可以执行合并动作;Claude Code 在交互会话里(不论是这个仓库的
-     `claude.yml` 触发的会话,还是这次对话本身)**永远不得**自己调用
-     `gh pr merge` / merge API,不论审查怎么说、CI 多绿、多有把握。
-   - `.github/workflows/**`、`AGENTS.md`、`CLAUDE.md`、
-     `.github/dependabot.yml`、`CODEOWNERS`、数据库迁移
-     (`infrastructure/alembic/versions/**`)、`deploy/**`、密钥/认证/权限
-     配置(`backend/app/core/secrets.py`、`backend/app/core/security.py`、
-     `backend/app/dependencies.py`)这些路径的 PR,不论审查结果如何,
-     **永远只能人工合并**,`claude-automerge.yml` 自己的门禁逻辑里也把
-     这些路径排除在外。
-   - 这个例外能不能继续存在、要不要收紧或撤销,是 User 的决定,不是
-     Agent 可以自行"觉得工作得不错就继续扩大范围"的空间。
+   任何情况下不得直接 push 到 main,不得自行 merge PR,不得 force push。
+   违反视为严重事故。**曾经短暂存在过一个有条件自动合并的例外
+   (`.github/workflows/claude-automerge.yml`,`TASK-T18-conditional-
+   auto-merge.md`),已经被 User 撤销**:实践中 Work 的审查连续多轮给出
+   新的、有效的 `NEEDS_CHANGES`(包括"自动返工没有真正接通"
+   "合并后不关联关闭 Issue"这类和"能不能自动合并"本身无关的功能缺口),
+   PR 长期卡在返工循环里,从未真正走到过自动合并那一步,只是持续消耗
+   审查/修复轮次——用户认定这个机制不成立,要求退回"合并永远人工"。
+   不得在没有 User 重新明确要求的情况下,重新引入任何形式的自动合并。
 
 ## 模块写权限(同一时间一个模块只有一个 Agent 可写)
 
@@ -79,15 +68,11 @@ AGENTS.md                  → 需人工确认才可修改
 规则——如果两处出现矛盾,以本节和上面已更新的表述为准,发现矛盾应视为
 文档错误并修正,而不是"两个轴各管各的"。
 
-- **User(人)**:提出业务需求,验收实际效果,是否上线永远由这个角色决定,
-  任何自动化都不得替代。是否合并 PR 默认也是这个角色决定;唯一例外是
-  User 自己明确授权、写死在
-  `.github/workflows/claude-automerge.yml`(见「铁律」第 8 条)、条件固定
-  且范围受限的自动合并——那不是"自动化被允许自行判断要不要合并",而是
-  User 提前把一条**具体、可审计、排除了自动化信任边界路径**的合并策略
-  授权给一个工作流去机械执行。这个策略本身要不要存在、范围要不要收紧,
-  仍然只有 User 能决定。本文件其余条款里所有"人工确认",在排除路径或
-  该工作流条件不满足时,指的都是这个角色。
+- **User(人)**:提出业务需求,验收实际效果,决定是否合并 PR、是否上线。
+  这三件事任何自动化都不得替代——本文件其余条款里所有"人工确认"都是
+  指这个角色。(曾经存在过一个有条件自动合并的例外,User 在实践中发现
+  它从未真正走到过自动合并、只是持续消耗审查/修复轮次后,已经明确撤销,
+  见「铁律」第 8 条。)
 - **ChatGPT Work**:整理需求与验收标准、对 PR 具体某个 commit SHA 做独立
   审查、汇总验收结果。Work 目前是**按事件触发的审查者**,不是持续运行的
   总控进程——它在收到 PR 事件时被调用、产出一次审查,不代表它在后台
@@ -95,10 +80,8 @@ AGENTS.md                  → 需人工确认才可修改
   "Work 拥有持续后台执行/调度能力"**,这一点没有平台证据支持前,不能
   当作既成事实记录。
 - **Claude Code**:实现代码、跑测试/lint/build、提交 PR、读取并核实审查
-  意见、修复后推送新 commit。不自行 merge(唯一的、严格受限的例外见
-  「铁律」第 8 条里 `claude-automerge.yml` 的说明,那是一个独立工作流按
-  固定条件执行,不是 Claude Code 会话自己决定合并)、不自行关闭他人的
-  PR。
+  意见、修复后推送新 commit。不自行 merge、不自行关闭他人的 PR(见「铁律」
+  第 8 条)。
 - **GitHub Issue / `docs/82-tasks/TASK-*.md`**:需求和验收标准的唯一记录
   载体。业务需求和验收标准不应该只存在于聊天记录里,必须落到 Issue 或
   TASK 文件,否则视为未记录。

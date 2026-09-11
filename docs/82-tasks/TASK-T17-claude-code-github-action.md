@@ -40,6 +40,28 @@ PR——这是 `CLAUDE.md`"一个任务一个 PR"规则的直接要求,提示词
 `subscribe_pr_activity` 驱动的人工 PR 陪跑流程是两回事——本任务只负责
 把官方 Action 接进 CI,不改变、不依赖本会话现有的 PR 审查/返工流程。
 
+**为什么 `claude.yml` 需要 `actions: write` 并在推送后手动调用
+`gh workflow run`**:这个 job 用的是内置 `GITHUB_TOKEN`,而 GitHub 有个
+反递归规则——用 `GITHUB_TOKEN` 创建的 PR 或推送的 commit,不会触发
+`pull_request`/`push` 类型的事件。`ci.yml`/`security.yml`/
+`risk-classify.yml` 只监听这些事件,所以如果什么都不做,Claude 自己开的
+PR、自己推的返工 commit 完全不会跑 CI。缓解方式是给这三个工作流各加一个
+`workflow_dispatch` 触发入口(`workflow_dispatch`/`repository_dispatch`
+明确被排除在这条反递归限制之外),让 `claude.yml` 的提示词在每次 push 后
+自己调用 `gh workflow run ci.yml --ref <branch>` 之类命令手动触发——这是
+当前实现方式,依赖 Claude 每次记得执行这一步,不如原生事件触发可靠,但是
+在不引入独立 GitHub App/PAT 的前提下能做到的最简方案。
+
+**"自动返工"目前是什么、不是什么**:`claude.yml` 的触发条件是
+`contains(github.event.comment.body, '@claude')`。ChatGPT Work 的审查
+评论本身不包含这个字符串,所以 Work 给出 `NEEDS_CHANGES` **不会**自动
+唤醒任何工作流去修复——这仍然需要有人(或者未来某个专门做"评论内容中继"
+的工作流)在该评论下手动 `@claude` 一下才会触发返工。目前存在的"自动"
+指的是:一旦 `@claude` 被提及,Claude 会自动完成"读取上下文 → 修复 →
+推送 → 重新触发 CI"这一段,而不是"从 Work 给出结论到 Claude 开始修复"
+这一段全自动。不要把这个仍然存在的人工触发步骤,读成一个完整的
+审查→修复闭环。
+
 ## 约束
 
 - 只监听 `issue_comment`(`created`)和 `pull_request_review_comment`
