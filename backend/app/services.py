@@ -124,26 +124,41 @@ def confirm_payment_and_provision(
             order_state.activate_subscription(command)
             return None
 
+    # ADR-016: desired_routing_state() (invoked from provision()'s
+    # APPLY_GATEWAY step) mutates GatewayRouteBinding but only flushes --
+    # the actual commit (activate_paid_purchase, below) or rollback
+    # (state.rollback_database(), in the except branch) happens later, in
+    # this same function. The named lock must therefore be held across this
+    # entire span, not just around the mutation itself: releasing it any
+    # earlier would let a concurrent writer observe this transaction's
+    # uncommitted GatewayRouteBinding state as if it were free to proceed.
     try:
-        outcome = build_services(
-            state, runs, settings=settings, providers=registry
-        ).provisioning.provision(request)
-        if outcome.status is ProvisionStatus.PENDING_MANUAL:
+        with state.gateway_route_binding_lock():
+            try:
+                outcome = build_services(
+                    state, runs, settings=settings, providers=registry
+                ).provisioning.provision(request)
+                if outcome.status is ProvisionStatus.PENDING_MANUAL:
+                    with order_state.transaction():
+                        order_state.mark_provision_pending(
+                            command, "external tenant creation requires review"
+                        )
+                    return outcome
+            except Exception:
+                # The provider-specific saga performs its external
+                # compensation. The DB terminal state is written only after
+                # that compensation returns. This rollback must complete
+                # before the lock (held since just above) is released, so
+                # it stays inside this `with` block.
+                state.rollback_database()
+                raise
+
             with order_state.transaction():
-                order_state.mark_provision_pending(
-                    command, "external tenant creation requires review"
-                )
-            return outcome
+                activate_paid_purchase(command, order_state)
     except Exception as exc:
-        # The provider-specific saga performs its external compensation.  The
-        # DB terminal state is written only after that compensation returns.
-        state.rollback_database()
         with order_state.transaction():
             fail_paid_purchase(command, type(exc).__name__, order_state)
         raise
-
-    with order_state.transaction():
-        activate_paid_purchase(command, order_state)
     return outcome
 
 

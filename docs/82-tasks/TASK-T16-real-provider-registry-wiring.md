@@ -885,3 +885,47 @@ adapter、DTO/编排改动、独立的 reconciliation 工具/作业、
 - Decision 3 已从 `BLOCKED` 推进为 `SELECTED`（Candidate B），Phase
   2B 的门槛条件已满足，但 Phase 2B 实现本身仍未开始，是下一步的
   独立任务。
+
+### Phase 2B 实现进度（本轮新增，最小状态同步，不重写以上历史记录）
+
+- **Phase 2B2（PR #59，已合并）**：`XrayFileProvider.apply()` 异常
+  兜底加固已完成——`install()`、首次 `reload()`、首次post-reload
+  `health()` 三者中任一抛出异常，现在都会被同一个
+  `try/except` 捕获并进入既有的 `_rollback()` 完整回滚路径（restore
+  → reload → health 复核），不再绕过回滚裸抛异常；回滚成功也不会让
+  `apply()` 返回成功；rollback 自身的 `restore()`/第二次 `reload()`/
+  `health()` 失败或返回 unhealthy，均按 fail-closed 处理（不虚报
+  `rollback_reverified`，disable `new_username`，alert，审计）。新增
+  7 个失败注入测试覆盖上述全部场景，详见 PR #59 描述。上文"第三次
+  修订第三轮"一节描述的 gap 到此已关闭，仅作历史记录保留。
+- **Phase 2B3（本 PR，named lock concurrency contract）**：落实上文
+  "更正后的强制机制"一节定义的 MySQL named advisory lock——新增
+  `backend/app/infra/gateway_route_lock.py`
+  （`gateway_route_binding_write()`），`SqlAlchemyProvisioningState.
+  ensure_gateway_route_binding()`（经由
+  `SqlAlchemyProvisioningState.gateway_route_binding_lock()` 与
+  `backend/app/services.py::confirm_payment_and_provision()` 的调用
+  方持锁）与 `accounting_sync.release_egress()` 均已接入同一把
+  `lingsway:<database>:gateway-route-bindings-write` 命名锁；锁的获取
+  发生在专用于持锁的独立 MySQL 连接上（而非复用 ORM Session 会随
+  自身事务边界换连接的池化连接），因此 `GET_LOCK()`/`RELEASE_LOCK()`
+  始终由同一物理连接持有，不依赖"连接池大概率还是同一条"的假设；
+  调用方仍需在锁保护的 `with` 块内自行完成 mutation 与
+  `commit()`/`rollback()`，锁只在该块退出时释放。详细设计、真实
+  MySQL 并发测试结果见本 PR 描述。仍未开始：Candidate B 补丁本身、
+  真实 Marzban adapter、DTO/编排改动、独立 reconciliation 工具、
+  ADR-015 Decision 4 矩阵其余 `YES` 条目——均为后续独立 PR。
+
+  **已知遗留问题（Work 独立审查发现，本轮已记录、未展开架构重构）**：
+  provisioning 路径的命名锁当前从 `ProvisioningService.provision()`
+  开始前就获取，持锁跨越 egress/accounting/gateway/notify 等多个外部
+  调用，`DEFAULT_LOCK_TIMEOUT_SECONDS = 30` 只是一个占位默认值，不是
+  基于真实 provider 调用延迟推导出的预算——当前测试用的是近乎瞬时
+  返回的 mock provider，而真实 Webshare transport 单次调用已文档化
+  超时 20 秒、外加限流/重试等待，可能远超这个假设。**在真实（非
+  mock）provider 接入之前，必须重新评估锁的持有跨度与超时值**；
+  如果要在不改变 provisioning saga 事务/补偿语义的前提下安全缩小
+  锁的持有跨度，需要先给出具体设计（例如把锁的获取点从
+  `provision()` 整体前移到 `APPLY_GATEWAY` 步骤内部，这需要修改
+  `ProvisioningService.provision()` 本身的控制流），本轮不做这个
+  架构改动，留给下一个 Phase 2B 实现 PR 作为已知 blocker 处理。

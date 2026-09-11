@@ -1,5 +1,6 @@
 import secrets
 from collections.abc import Callable, Mapping
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
@@ -92,6 +93,16 @@ class ProvisionRunStore(Protocol):
 
 
 class ProvisioningState(Protocol):
+    """Domain-facing DB state.
+
+    ``gateway_route_binding_lock()`` exists per ADR-016 ("Decision 3 / Xray
+    route identity architecture unblock"), which mandates a single MySQL
+    named advisory lock as the only correct concurrency contract for
+    ``GatewayRouteBinding`` writers -- ``GatewayRouteBinding`` has no index
+    supporting the predicate its writers filter on, so a plain
+    ``SELECT ... FOR UPDATE`` cannot serialize them.
+    """
+
     def reject_capacity(self, order_id: str, reason: str) -> None: ...
 
     def allocate_endpoint(self, customer_id: str) -> EgressEndpointDTO: ...
@@ -103,6 +114,16 @@ class ProvisioningState(Protocol):
     ) -> str: ...
 
     def rollback_database(self) -> None: ...
+
+    def gateway_route_binding_lock(self) -> AbstractContextManager[None]:
+        """ADR-016 Decision 3: the mandatory named-lock concurrency
+        contract for GatewayRouteBinding. Callers must perform
+        desired_routing_state()'s GatewayRouteBinding mutation, and their
+        own eventual DB commit/rollback for it, entirely inside this
+        context -- see backend/app/infra/gateway_route_lock.py for why the
+        lock must be held across that full span, not just the mutation
+        itself."""
+        ...
 
     def current_forwarder_state(self) -> DesiredForwarderState: ...
 
