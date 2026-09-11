@@ -374,30 +374,39 @@ def release_egress(db: Session, subscription_id: int, now: datetime | None = Non
     """
     now = now or datetime.now(UTC)
     with gateway_route_binding_write(db):
-        # Any exception here -- including db.commit() itself raising --
-        # must be rolled back while the named lock is still held: releasing
-        # it before the rollback completes would let a concurrent writer
-        # observe (or race against) a transaction we haven't actually
-        # finalized yet. The early "nothing to release" return is the same
-        # rule applied to a no-op outcome: the with_for_update() reads above
-        # still opened a transaction, so it must be explicitly finalized
-        # (rolled back -- nothing was mutated) before this function returns,
-        # never left open for the context manager to silently paper over.
+        # release_egress() does not always own db's transaction:
+        # sync_subscription_usage() calls it mid-transaction, after already
+        # adding UsageSample/UsageDelta and updating UsagePeriod/subscription
+        # state on this same Session, and only commits everything together
+        # in its own db.commit() *after* this function returns. When there
+        # is nothing here for the named lock to protect (no active
+        # EgressBinding to release), we must not touch that shared
+        # transaction at all -- no commit, and critically no rollback,
+        # which would silently erase the caller's already-pending, unrelated
+        # work. It is safe to release the lock at this point regardless of
+        # what else is still pending on `db`: nothing GatewayRouteBinding-
+        # related has been mutated in this branch, so there is nothing the
+        # lock needs to keep protecting past this return.
+        db.scalar(
+            select(Subscription).where(Subscription.id == subscription_id).with_for_update()
+        )
+        binding = db.scalar(
+            select(EgressBinding)
+            .where(
+                EgressBinding.subscription_id == subscription_id,
+                EgressBinding.released_at.is_(None),
+            )
+            .with_for_update()
+        )
+        if binding is None:
+            return
+        # From here on we are actually mutating GatewayRouteBinding (and
+        # EgressBinding/EgressEndpoint): any failure, including db.commit()
+        # itself raising, must be rolled back while the named lock is still
+        # held -- releasing it before the rollback completes would let a
+        # concurrent writer observe (or race against) a transaction we
+        # haven't actually finalized yet.
         try:
-            db.scalar(
-                select(Subscription).where(Subscription.id == subscription_id).with_for_update()
-            )
-            binding = db.scalar(
-                select(EgressBinding)
-                .where(
-                    EgressBinding.subscription_id == subscription_id,
-                    EgressBinding.released_at.is_(None),
-                )
-                .with_for_update()
-            )
-            if binding is None:
-                db.rollback()
-                return
             egress = db.scalar(
                 select(EgressEndpoint)
                 .where(EgressEndpoint.id == binding.egress_id)

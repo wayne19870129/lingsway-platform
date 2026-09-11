@@ -24,7 +24,7 @@ import os
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest import mock
 
@@ -785,3 +785,128 @@ def test_release_lock_success_does_not_invalidate_the_connection() -> None:
 
     assert connection.invalidated is False
     assert connection.closed is True
+
+
+# ---------------------------------------------------------------------------
+# Major 1 regression (Work review round 3): release_egress()'s no-op path
+# must not roll back a caller's already-pending, unrelated transaction.
+# ---------------------------------------------------------------------------
+
+
+def test_sync_subscription_usage_expiry_persists_when_no_active_egress_binding(
+    engine: Engine,
+) -> None:
+    """The real sync_subscription_usage() -> release_egress() path, for a
+    subscription with no active EgressBinding: release_egress()'s no-op
+    branch must leave sync_subscription_usage()'s already-pending
+    UsageSample/UsageDelta/UsagePeriod/subscription-expiry changes on the
+    same Session intact for its own later db.commit() -- not roll them
+    back just because there was nothing for the named lock to protect."""
+    from backend.app.models import (
+        Customer,
+        Plan,
+        Subscription,
+        SubscriptionStatus,
+        UsageDelta,
+        UsagePeriod,
+        UsagePeriodStatus,
+        UsageSample,
+    )
+    from backend.app.providers.accounting.mock import MockAccountingProvider
+    from backend.app.workers.accounting_sync import sync_subscription_usage
+
+    now = datetime.now(UTC)
+    with Session(engine) as db:
+        customer = Customer(
+            customer_no="CUS-LOCK-SYNCUSAGE",
+            email="lock-syncusage@example.invalid",
+            password_hash="hash",
+        )
+        plan = Plan(
+            plan_code="LOCK-PLAN-SYNCUSAGE",
+            name="Lock Plan",
+            traffic_limit_bytes=50 * 1024**3,
+            duration_days=30,
+            price="30.00",
+            currency="USD",
+            route_group_code="RG_LOCK_SYNCUSAGE",
+        )
+        db.add_all([customer, plan])
+        db.flush()
+        order = Order(
+            order_no="ORD-LOCK-SYNCUSAGE",
+            customer_id=customer.id,
+            plan_id=plan.id,
+            client_request_id="lock-request-syncusage",
+            order_type="PURCHASE",
+            amount="30.00",
+            currency="USD",
+        )
+        db.add(order)
+        db.flush()
+        subscription = Subscription(
+            subscription_no="SUB-LOCK-SYNCUSAGE",
+            customer_id=customer.id,
+            plan_id=plan.id,
+            order_id=order.id,
+            accounting_user_id="marzban-user-syncusage",
+            # GRACE + an already-past service_expire_at makes
+            # apply_expiry_policy() advance straight to EXPIRED inside this
+            # one sync_subscription_usage() call, which is what triggers
+            # its release_egress() call -- for a subscription that, per
+            # this test, has no active EgressBinding to release.
+            status=SubscriptionStatus.GRACE,
+            route_group_code="RG_LOCK_SYNCUSAGE",
+            service_expire_at=now - timedelta(hours=1),
+        )
+        db.add(subscription)
+        db.flush()
+        period = UsagePeriod(
+            subscription_id=subscription.id,
+            period_start=now - timedelta(days=30),
+            period_end=now,
+            used_bytes=0,
+            quota_bytes=50 * 1024**3,
+            status=UsagePeriodStatus.ACTIVE,
+        )
+        db.add(period)
+        db.flush()
+        subscription.current_period_id = period.id
+        db.commit()
+
+        subscription_id = subscription.id
+        period_id = period.id
+
+        provider = MockAccountingProvider()
+        provider.set_mock_usage("marzban-user-syncusage", 12345)
+
+        # No EgressBinding/GatewayRouteBinding rows exist for this
+        # subscription at all -- release_egress() must take its no-op path.
+        delta_bytes = sync_subscription_usage(db, subscription, provider, now)
+        db.commit()
+
+    assert delta_bytes == 12345
+
+    with Session(engine) as verify_db:
+        persisted_subscription = verify_db.get(Subscription, subscription_id)
+        assert persisted_subscription is not None
+        assert persisted_subscription.status == SubscriptionStatus.EXPIRED
+        assert persisted_subscription.last_usage_synced_at is not None
+
+        persisted_period = verify_db.get(UsagePeriod, period_id)
+        assert persisted_period is not None
+        assert persisted_period.used_bytes == 12345
+
+        sample = verify_db.scalar(
+            select(UsageSample).where(UsageSample.subscription_id == subscription_id)
+        )
+        assert sample is not None
+        assert sample.source_counter == 12345
+
+        delta = verify_db.scalar(
+            select(UsageDelta).where(UsageDelta.subscription_id == subscription_id)
+        )
+        assert delta is not None
+        assert delta.delta_bytes == 12345
+
+        assert _gateway_row_count(verify_db, subscription_id) == 0
