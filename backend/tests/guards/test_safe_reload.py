@@ -35,9 +35,31 @@ def config(*, users: tuple[str, ...] = ("old-user",)) -> dict[str, object]:
 
 
 class Runtime:
-    def __init__(self, *, xray_valid: bool = True, health: list[bool] | None = None) -> None:
+    """Fake `XrayRuntime` with explicit failure-injection hooks.
+
+    Every hook is `None` by default (no injected failure). Each hook fires
+    at most once, the first time its corresponding method is called, so a
+    single `Runtime` instance can model "this call raises, the next
+    (rollback) call to the same method succeeds" -- e.g. `reload_errors`
+    injects a failure on a specific 1-indexed `reload()` call number, since
+    the same method is called once for the primary apply and again (if
+    reached) during rollback.
+    """
+
+    def __init__(
+        self,
+        *,
+        xray_valid: bool = True,
+        health: list[bool | Exception] | None = None,
+        install_error: Exception | None = None,
+        reload_errors: dict[int, Exception] | None = None,
+        restore_error: Exception | None = None,
+    ) -> None:
         self.xray_valid = xray_valid
-        self.health_values = health or [True]
+        self.health_values: list[bool | Exception] = health or [True]
+        self.install_error = install_error
+        self.reload_errors = reload_errors or {}
+        self.restore_error = restore_error
         self.events: list[str] = []
         self.timeline: list[str] = []
         self.reload_calls = 0
@@ -61,22 +83,32 @@ class Runtime:
     def install(self, content: Mapping[str, object]) -> None:
         self.events.append("install")
         self.timeline.append("install")
+        if self.install_error is not None:
+            error, self.install_error = self.install_error, None
+            raise error
         self._current = content
 
     def reload(self) -> None:
         self.reload_calls += 1
         self.events.append(f"reload:{self.reload_calls}")
         self.timeline.append(f"reload:{self.reload_calls}")
+        if self.reload_calls in self.reload_errors:
+            raise self.reload_errors[self.reload_calls]
 
     def health(self) -> HealthReport:
         self.events.append("health")
         self.timeline.append("health")
         value = self.health_values.pop(0)
+        if isinstance(value, Exception):
+            raise value
         return HealthReport(value)
 
     def restore(self, backup: object) -> None:
         self.events.append("restore")
         self.timeline.append("restore")
+        if self.restore_error is not None:
+            error, self.restore_error = self.restore_error, None
+            raise error
         self._current = self._backup
 
 
@@ -149,6 +181,297 @@ def test_failed_post_reload_health_executes_complete_rollback_sequence() -> None
         "new_user_disabled",
         "alert_sent",
     ]
+
+
+def _apply_with_recorders(
+    runtime: Runtime, candidate: dict[str, object], *, new_username: str | None
+) -> tuple[list[str], list[str], list[str], XrayReloadError]:
+    """Run `apply()` expecting failure; return (disabled, alerts, audits, exc)."""
+    disabled: list[str] = []
+    alerts: list[str] = []
+    audits: list[str] = []
+    provider = XrayFileProvider(
+        runtime,
+        disable_user=lambda u: disabled.append(u),
+        alert=lambda m: alerts.append(m),
+        audit=lambda event, _details: audits.append(event),
+    )
+    with pytest.raises(XrayReloadError) as excinfo:
+        provider.apply(CandidateConfig(candidate, "v2"), new_username=new_username)
+    return disabled, alerts, audits, excinfo.value
+
+
+def test_install_exception_triggers_full_rollback_and_fails_closed() -> None:
+    """`install()` raising must not leave a bare exception, nor be treated
+    as a successful apply -- rollback must run and, if it succeeds, the
+    call must still fail closed rather than silently reporting success."""
+    original_error = RuntimeError("disk full")
+    runtime = Runtime(install_error=original_error)
+    disabled, alerts, audits, raised = _apply_with_recorders(
+        runtime,
+        config(users=("old-user", "new-user")),
+        new_username="new-user",
+    )
+
+    # install() raised before any reload was attempted; rollback still runs
+    # the full restore -> reload -> health sequence and confirms success.
+    assert runtime.events == [
+        "backup",
+        "xray_test",
+        "install",
+        "restore",
+        "reload:1",
+        "health",
+    ]
+    assert runtime.reload_calls == 1
+    assert disabled == ["new-user"]
+    assert len(alerts) == 1
+    assert audits == [
+        "backup_created",
+        "apply_mutation_failed",
+        "backup_restored",
+        "rollback_reload",
+        "rollback_reverified",
+        "new_user_disabled",
+        "alert_sent",
+    ]
+    # The candidate never took effect: current config equals the pre-apply
+    # backup, not the candidate that failed to install.
+    assert runtime._current == runtime._backup
+    # Original install() failure is preserved in the exception chain.
+    assert raised.__context__ is original_error
+
+
+def test_first_reload_exception_triggers_full_rollback_and_fails_closed() -> None:
+    """The first `reload()` (after a successful `install()`) raising must
+    trigger the same fail-closed rollback path as a post-reload health
+    failure -- a successful recovery must still not be reported as apply
+    success."""
+    original_error = RuntimeError("systemctl reload failed")
+    runtime = Runtime(reload_errors={1: original_error})
+    disabled, alerts, audits, raised = _apply_with_recorders(
+        runtime,
+        config(users=("old-user", "new-user")),
+        new_username="new-user",
+    )
+
+    assert runtime.events == [
+        "backup",
+        "xray_test",
+        "install",
+        "reload:1",
+        "restore",
+        "reload:2",
+        "health",
+    ]
+    assert runtime.reload_calls == 2
+    assert disabled == ["new-user"]
+    assert len(alerts) == 1
+    assert audits == [
+        "backup_created",
+        "apply_mutation_failed",
+        "backup_restored",
+        "rollback_reload",
+        "rollback_reverified",
+        "new_user_disabled",
+        "alert_sent",
+    ]
+    assert runtime._current == runtime._backup
+    assert raised.__context__ is original_error
+
+
+def test_main_post_reload_health_exception_triggers_full_rollback_and_fails_closed() -> None:
+    """The primary post-reload `health()` call (distinct from rollback's own
+    `health()` call) raising must also be treated as a pre-health mutating
+    exception: install() and reload() have already mutated state, and a
+    crashing health probe leaves that state unconfirmed. This must trigger
+    the same fail-closed rollback path as install()/reload() raising or a
+    health() result of False, never a bare propagated exception."""
+    original_error = RuntimeError("health probe crashed")
+    runtime = Runtime(health=[original_error, True])
+    disabled, alerts, audits, raised = _apply_with_recorders(
+        runtime,
+        config(users=("old-user", "new-user")),
+        new_username="new-user",
+    )
+
+    assert runtime.events == [
+        "backup",
+        "xray_test",
+        "install",
+        "reload:1",
+        "health",
+        "restore",
+        "reload:2",
+        "health",
+    ]
+    assert runtime.reload_calls == 2
+    assert disabled == ["new-user"]
+    assert len(alerts) == 1
+    assert audits == [
+        "backup_created",
+        "reload",
+        "apply_mutation_failed",
+        "backup_restored",
+        "rollback_reload",
+        "rollback_reverified",
+        "new_user_disabled",
+        "alert_sent",
+    ]
+    assert runtime._current == runtime._backup
+    assert raised.__context__ is original_error
+
+
+def test_rollback_restore_exception_fails_closed_without_claiming_recovery() -> None:
+    """If `restore()` itself raises during rollback, the system state is
+    unknown: this must never be reported as a successful rollback, must
+    never reach `rollback_reverified`, and must still disable the new user
+    and alert."""
+    original_error = RuntimeError("disk unavailable")
+    runtime = Runtime(health=[False], restore_error=original_error)
+    disabled, alerts, audits, raised = _apply_with_recorders(
+        runtime,
+        config(users=("old-user", "new-user")),
+        new_username="new-user",
+    )
+
+    assert runtime.events == [
+        "backup",
+        "xray_test",
+        "install",
+        "reload:1",
+        "health",
+        "restore",
+    ]
+    # restore() raised: no second reload, no rollback health check was ever
+    # attempted, and rollback must never be recorded as verified.
+    assert runtime.reload_calls == 1
+    assert "rollback_reload" not in audits
+    assert "rollback_reverified" not in audits
+    assert disabled == ["new-user"]
+    assert len(alerts) == 1
+    assert audits == [
+        "backup_created",
+        "reload",
+        "rollback_restore_failed",
+        "new_user_disabled",
+        "alert_sent",
+    ]
+    assert raised.__cause__ is original_error
+    assert "unknown" in str(raised).lower()
+
+
+def test_rollback_second_reload_exception_fails_closed_without_claiming_recovery() -> None:
+    """If the rollback's own `reload()` raises after a successful
+    `restore()`, the runtime state is unknown: must never claim recovery,
+    must never reach `rollback_reverified`, and must still disable the new
+    user and alert."""
+    original_error = RuntimeError("systemctl reload failed")
+    runtime = Runtime(health=[False], reload_errors={2: original_error})
+    disabled, alerts, audits, raised = _apply_with_recorders(
+        runtime,
+        config(users=("old-user", "new-user")),
+        new_username="new-user",
+    )
+
+    assert runtime.events == [
+        "backup",
+        "xray_test",
+        "install",
+        "reload:1",
+        "health",
+        "restore",
+        "reload:2",
+    ]
+    assert runtime.reload_calls == 2
+    assert "rollback_reverified" not in audits
+    assert disabled == ["new-user"]
+    assert len(alerts) == 1
+    assert audits == [
+        "backup_created",
+        "reload",
+        "backup_restored",
+        "rollback_reload_failed",
+        "new_user_disabled",
+        "alert_sent",
+    ]
+    assert raised.__cause__ is original_error
+    assert "unknown" in str(raised).lower()
+
+
+def test_rollback_health_check_exception_fails_closed_without_claiming_recovery() -> None:
+    """If the rollback's own `health()` call raises (rather than returning
+    an unhealthy result), that must also fail closed without claiming
+    `rollback_reverified`."""
+    original_error = RuntimeError("health probe crashed")
+    runtime = Runtime(health=[False, original_error])
+    disabled, alerts, audits, raised = _apply_with_recorders(
+        runtime,
+        config(users=("old-user", "new-user")),
+        new_username="new-user",
+    )
+
+    assert runtime.events == [
+        "backup",
+        "xray_test",
+        "install",
+        "reload:1",
+        "health",
+        "restore",
+        "reload:2",
+        "health",
+    ]
+    assert "rollback_reverified" not in audits
+    assert disabled == ["new-user"]
+    assert len(alerts) == 1
+    assert audits == [
+        "backup_created",
+        "reload",
+        "backup_restored",
+        "rollback_reload",
+        "rollback_health_check_failed",
+        "new_user_disabled",
+        "alert_sent",
+    ]
+    assert raised.__cause__ is original_error
+    assert "unknown" in str(raised).lower()
+
+
+def test_rollback_reload_succeeds_but_rollback_health_unhealthy_fails_closed() -> None:
+    """Copying the backup back to disk is not the same as a confirmed-safe
+    runtime: if rollback's own health check reports unhealthy, that must
+    still fail closed, still disable the new user, still alert -- and must
+    not be misreported as a healthy `rollback_reverified`."""
+    runtime = Runtime(health=[False, False])
+    disabled, alerts, audits, raised = _apply_with_recorders(
+        runtime,
+        config(users=("old-user", "new-user")),
+        new_username="new-user",
+    )
+
+    assert runtime.events == [
+        "backup",
+        "xray_test",
+        "install",
+        "reload:1",
+        "health",
+        "restore",
+        "reload:2",
+        "health",
+    ]
+    assert runtime.reload_calls == 2
+    assert disabled == ["new-user"]
+    assert len(alerts) == 1
+    assert audits == [
+        "backup_created",
+        "reload",
+        "backup_restored",
+        "rollback_reload",
+        "rollback_reverified",
+        "new_user_disabled",
+        "alert_sent",
+    ]
+    assert "unhealthy" in str(raised).lower()
 
 
 def test_preservation_rejects_missing_existing_user_and_outbound() -> None:
