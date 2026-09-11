@@ -167,6 +167,11 @@ patch's second hunk: the same, real, patched module's
 while `UserResponse` still includes it — this is the regression test for
 the leak this PR's own review process found and fixed (see ADR-016
 Decision 3's dated correction).
+`test_subscription_info_http_route_excludes_routing_principal` repeats
+this check driven through a real FastAPI `TestClient` HTTP round trip
+against a route shaped like the real `GET /{token}/info` endpoint, not
+just a direct `model_dump()` call, so the same exclusion is also proven
+through FastAPI's own `response_model` serialization path.
 
 Also included: `test_patch_drift_guard.py`, which proves the fail-closed
 contract with real `git apply` runs (not simulated): applying the patch

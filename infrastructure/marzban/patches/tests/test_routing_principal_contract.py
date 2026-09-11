@@ -93,6 +93,22 @@ def _build_app(module: types.ModuleType) -> FastAPI:
     return app
 
 
+def _build_subscription_app(module: types.ModuleType) -> FastAPI:
+    """One route shaped like the real customer-facing subscription-info
+    endpoint this PR's patch must NOT leak `routing_principal` into
+    (`GET /{token}/info`, `response_model=SubscriptionUserResponse` in the
+    pinned `app/routers/subscription.py`) -- not its real handler body."""
+    app = FastAPI()
+    SubscriptionUserResponse = module.SubscriptionUserResponse
+
+    @app.get("/{token}/info", response_model=SubscriptionUserResponse)
+    def get_subscription_info(token: str) -> Any:
+        return app.state.dbusers[token]
+
+    app.state.dbusers = {}
+    return app
+
+
 def test_post_and_get_return_the_same_routing_principal(
     patched_user_response_module: types.ModuleType,
 ) -> None:
@@ -229,6 +245,33 @@ def test_subscription_user_response_excludes_routing_principal(
     # The customer-facing subscription surface must not.
     assert "routing_principal" not in subscription_body
     assert "id" not in subscription_body
+
+
+def test_subscription_info_http_route_excludes_routing_principal(
+    patched_user_response_module: types.ModuleType,
+) -> None:
+    """Same regression as `test_subscription_user_response_excludes_
+    routing_principal` above, but driven through a real FastAPI
+    `TestClient` HTTP round trip against a route shaped exactly like the
+    real customer-facing `GET /{token}/info` endpoint (path, method,
+    `response_model=SubscriptionUserResponse`), not a bare
+    `model_dump()` call -- strengthening the regression test to also
+    cover FastAPI's own response_model serialization path, not just the
+    underlying Pydantic exclusion in isolation."""
+    module = patched_user_response_module
+    dbuser = _make_dbuser(module, id_=123, username="sub-http-check")
+    app = _build_subscription_app(module)
+    app.state.dbusers["some-subscription-token"] = dbuser
+
+    with TestClient(app) as client:
+        response = client.get("/some-subscription-token/info")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "routing_principal" not in body
+    assert "id" not in body
+    assert '"id"' not in response.text
+    assert body["username"] == "sub-http-check"
 
 
 def test_empty_links_and_subscription_url_exercise_real_validation_path(
