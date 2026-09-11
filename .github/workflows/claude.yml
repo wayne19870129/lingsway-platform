@@ -16,15 +16,60 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  claude:
-    # Bot-authored comments (CI status bots, Work, or this action's own
-    # prior replies) are excluded here at the job level, before any run is
-    # even started, rather than relying only on the action's own actor
-    # checks -- avoids burning a job invocation on a comment that could
-    # never have been a genuine human instruction in the first place.
+  # Enforceable de-duplication gate, run before ever invoking Claude --
+  # Issue #50 requires ignoring a duplicate delivery or an already-handled
+  # instruction, not just asking Claude nicely to notice. This only covers
+  # the PR-rework path (a comment on an existing PR): the dedup key is
+  # (PR number, PR's current head SHA), recorded via a marker comment
+  # posted before Claude runs. A second @claude mention -- or a duplicate
+  # webhook delivery of the same one -- against a head SHA already marked
+  # is skipped, because nothing about the code changed since the last time
+  # Claude was invoked for it; once a new commit lands, the head SHA
+  # changes and the gate opens again. This does NOT cover the Issue-first-
+  # trigger path (no PR/head SHA exists yet to key on) -- see TASK-T17 for
+  # why that side is left to the branch/PR-reuse check already in the
+  # prompt plus the genuine rarity of duplicate Issue-comment deliveries,
+  # not a persisted gate.
+  dedup:
     if: |
       contains(github.event.comment.body, '@claude') &&
       github.event.comment.user.type != 'Bot'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    outputs:
+      proceed: ${{ steps.check.outputs.proceed }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+    steps:
+      - id: check
+        shell: bash
+        run: |
+          set -euo pipefail
+          is_pr_comment="${{ github.event.issue.pull_request != null || github.event.pull_request != null }}"
+          if [ "$is_pr_comment" != "true" ]; then
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+            echo "Issue-context trigger; no head-SHA dedup key exists yet, proceeding."
+            exit 0
+          fi
+          pr_number="${{ github.event.issue.number || github.event.pull_request.number }}"
+          head_sha=$(gh pr view "$pr_number" --repo "$REPO" --json headRefOid --jq .headRefOid)
+          marker="<!-- claude-invoked:${pr_number}:${head_sha} -->"
+          existing=$(gh api "repos/${REPO}/issues/${pr_number}/comments" --paginate \
+            --jq '[.[] | select(.body // "" | contains("'"$marker"'"))] | length')
+          if [ "$existing" -gt 0 ]; then
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            echo "Already invoked Claude for PR #$pr_number at head $head_sha -- duplicate/repeat instruction against an unchanged commit, skipping."
+          else
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+            gh pr comment "$pr_number" --repo "$REPO" --body "Claude is processing this. $marker"
+          fi
+
+  claude:
+    needs: dedup
+    if: needs.dedup.outputs.proceed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
