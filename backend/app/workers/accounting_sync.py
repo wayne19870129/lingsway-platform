@@ -10,6 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from backend.app.core.config import get_settings
+from backend.app.infra.gateway_route_lock import gateway_route_binding_write
 from backend.app.models import (
     AuditLog,
     EgressBinding,
@@ -361,37 +362,47 @@ def run_next_usage_job(
 
 
 def release_egress(db: Session, subscription_id: int, now: datetime | None = None) -> None:
-    """Preserve the legacy expiry compensation without an external provider call."""
+    """Preserve the legacy expiry compensation without an external provider call.
+
+    ADR-016: this reads and potentially mutates GatewayRouteBinding
+    (enabled/released_at), so the whole read-decide-mutate-commit sequence
+    below runs under the same named lock as
+    SqlAlchemyProvisioningState.ensure_gateway_route_binding() -- the
+    existing `with_for_update()` row locks stay as defense in depth, but
+    they alone cannot serialize writers against the missing composite
+    index on (enabled, released_at).
+    """
     now = now or datetime.now(UTC)
-    db.scalar(
-        select(Subscription).where(Subscription.id == subscription_id).with_for_update()
-    )
-    binding = db.scalar(
-        select(EgressBinding)
-        .where(
-            EgressBinding.subscription_id == subscription_id,
-            EgressBinding.released_at.is_(None),
+    with gateway_route_binding_write(db):
+        db.scalar(
+            select(Subscription).where(Subscription.id == subscription_id).with_for_update()
         )
-        .with_for_update()
-    )
-    if binding is None:
-        return
-    egress = db.scalar(
-        select(EgressEndpoint).where(EgressEndpoint.id == binding.egress_id).with_for_update()
-    )
-    binding.released_at = now
-    gateway_binding = db.scalar(
-        select(GatewayRouteBinding)
-        .where(
-            GatewayRouteBinding.subscription_id == subscription_id,
-            GatewayRouteBinding.released_at.is_(None),
+        binding = db.scalar(
+            select(EgressBinding)
+            .where(
+                EgressBinding.subscription_id == subscription_id,
+                EgressBinding.released_at.is_(None),
+            )
+            .with_for_update()
         )
-        .with_for_update()
-    )
-    if gateway_binding is not None:
-        gateway_binding.enabled = False
-        gateway_binding.released_at = now
-    if egress is not None:
-        egress.current_count = 0
-        egress.status = "QUARANTINED"
-    db.commit()
+        if binding is None:
+            return
+        egress = db.scalar(
+            select(EgressEndpoint).where(EgressEndpoint.id == binding.egress_id).with_for_update()
+        )
+        binding.released_at = now
+        gateway_binding = db.scalar(
+            select(GatewayRouteBinding)
+            .where(
+                GatewayRouteBinding.subscription_id == subscription_id,
+                GatewayRouteBinding.released_at.is_(None),
+            )
+            .with_for_update()
+        )
+        if gateway_binding is not None:
+            gateway_binding.enabled = False
+            gateway_binding.released_at = now
+        if egress is not None:
+            egress.current_count = 0
+            egress.status = "QUARANTINED"
+        db.commit()

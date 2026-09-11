@@ -175,10 +175,12 @@ def test_gateway_route_binding_is_idempotent_and_active_unique(
 ) -> None:
     db, state, endpoint = state_fixture
     dto = EgressEndpointDTO(str(endpoint.id), endpoint.host, endpoint.port)
-    first = state.ensure_gateway_route_binding("marzban-user-1", dto)
-    db.commit()
-    second = state.ensure_gateway_route_binding("marzban-user-1", dto)
-    db.commit()
+    with state.gateway_route_binding_lock():
+        first = state.ensure_gateway_route_binding("marzban-user-1", dto)
+        db.commit()
+    with state.gateway_route_binding_lock():
+        second = state.ensure_gateway_route_binding("marzban-user-1", dto)
+        db.commit()
 
     assert first.id == second.id
     assert db.scalar(

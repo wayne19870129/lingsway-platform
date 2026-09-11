@@ -22,6 +22,7 @@ from backend.app.domain.provisioning import (
     ProvisionStatus,
     ProvisionStep,
 )
+from backend.app.infra.gateway_route_lock import gateway_route_binding_write
 from backend.app.infra.provisioning_state import SqlAlchemyProvisioningState
 from backend.app.models import (
     AuditLog,
@@ -287,6 +288,11 @@ class _OrderProvisioningState:
 
     def rollback_database(self) -> None:
         self.db.rollback()
+
+    @contextmanager
+    def gateway_route_binding_lock(self) -> Iterator[None]:
+        with gateway_route_binding_write(self.db):
+            yield
 
     def current_forwarder_state(self) -> DesiredForwarderState:
         return self._delegate().current_forwarder_state()

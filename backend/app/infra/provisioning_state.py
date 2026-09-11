@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -13,6 +15,7 @@ from sqlalchemy.orm import Session
 from backend.app.core.config import get_settings
 from backend.app.core.secrets import put_secret, reveal_secret
 from backend.app.domain.provisioning import ProvisioningState, ProvisionRequest
+from backend.app.infra.gateway_route_lock import gateway_route_binding_write
 from backend.app.models import (
     EgressBinding,
     EgressEndpoint,
@@ -150,6 +153,18 @@ class SqlAlchemyProvisioningState(ProvisioningState):
 
     def rollback_database(self) -> None:
         self.db.rollback()
+
+    @contextmanager
+    def gateway_route_binding_lock(self) -> Iterator[None]:
+        """ADR-016: the mandatory concurrency contract for this table.
+
+        Callers must perform ``ensure_gateway_route_binding()`` and their
+        own eventual ``self.db.commit()``/``self.db.rollback()`` for that
+        mutation *inside* this context -- see
+        ``gateway_route_binding_write()`` for the exact ordering guarantee.
+        """
+        with gateway_route_binding_write(self.db):
+            yield
 
     def current_forwarder_state(self) -> DesiredForwarderState:
         listeners = {

@@ -1,5 +1,7 @@
 import base64
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -63,6 +65,14 @@ class FakeState:
 
     def rollback_database(self) -> None:
         self.database_rolled_back = True
+
+    @contextmanager
+    def gateway_route_binding_lock(self) -> Iterator[None]:
+        self.events.append("lock:acquire")
+        try:
+            yield
+        finally:
+            self.events.append("lock:release")
 
     def current_forwarder_state(self) -> DesiredForwarderState:
         return DesiredForwarderState({"existing": "outbound-existing"})

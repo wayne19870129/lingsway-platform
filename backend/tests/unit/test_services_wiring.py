@@ -68,6 +68,14 @@ class State:
     def rollback_database(self) -> None:
         self.events.append("rollback")
 
+    @contextmanager
+    def gateway_route_binding_lock(self) -> Iterator[None]:
+        self.events.append("lock:acquire")
+        try:
+            yield
+        finally:
+            self.events.append("lock:release")
+
     def current_forwarder_state(self) -> DesiredForwarderState:
         return DesiredForwarderState({})
 
