@@ -245,9 +245,25 @@ provider（只要它拿到的是已经解析好的配置值，而不是自己在
   之所以没有暴露这个问题，是因为测试固件里 `current()` 返回的基线配置本身
   也没有 `inbounds` 字段（两边都是空集，差集为空，测试通不出这个缺口）。
   这是一个真实的、会在有真实 inbound 客户端的环境下必现的自我校验失败，
-  必须先修（要么 `render()` 补上从 `desired`/现有配置读取并保留
-  `inbounds`，要么明确这个 provider 目前不支持任何已有 inbound 客户端的
-  场景），不能指望"先接进 registry 再说"。
+  必须先修，不能指望"先接进 registry 再说"。
+
+  **修复方向的一处更正（独立审查第三轮，已核实）**：上一版这里写的其中
+  一个候选修复方向——"`render()` 补上从**现有配置**读取并保留
+  `inbounds`"——**核实后确认违反 `AGENTS.md` 铁律第 1 条**（"配置渲染
+  一律从数据库全量生成，禁止增量拼接"）：如果 `render()` 为了不删除
+  `self._runtime.current()` 里已有的 inbound 客户端，转而去读当前运行时
+  文件、把里面的内容原样搬进候选配置，运行时文件就变成了和数据库并列的
+  第二数据源，这正是铁律禁止的"增量拼接"。真正合规的方向只有一个：
+  **候选配置必须完全由数据库表达的期望态一次性生成，不得读取或拼接当前
+  运行时文件的任何内容**。而 `backend/app/providers/base.py` 里
+  `DesiredRoutingState`（`render()` 的输入类型）目前**只有
+  `user_routes: Mapping[str, str]` 和 `outbound_tags: tuple[str, ...]`
+  两个字段，完全没有 `inbounds`/`clients` 的位置**——也就是说，这不是
+  "`render()` 忘了读一下 inbounds"这么简单，而是当前的期望态 DTO 本身
+  就没有能力表达 inbounds/clients 应该是什么样子。阶段二要解决这个问题，
+  第一步必须是回答"数据库模型和查询能不能完整表达 Xray 需要的
+  inbounds/clients/routing/outbounds"，答不出来就要先补这个契约，而不是
+  假设"从当前文件复制缺失部分"是一个可用的临时方案。
 - **`MihomoForwarderProvider.health()` 是硬编码的
   `return HealthReport(True, {"provider": "mihomo"})`**（`mihomo.py:137-138`），
   不读取 `self._runtime` 的任何真实状态；`apply()`（`mihomo.py:120-135`）
@@ -321,20 +337,43 @@ if self.app_env == "production" and self.accounting_provider == "marzban":
    更大。所以阶段二**首选 `XrayFileProvider`**；Mihomo 的
    post-reload 健康校验缺口本身记为待办，但不在阶段二第一步的范围内。
 
+   **阶段二第一步必须遵守 `AGENTS.md` 铁律第 1 条（"配置渲染一律从数据库
+   全量生成，禁止增量拼接"），这一点在上一版还没写清楚（独立审查第三轮
+   指出后核实确认）：** 上一版把 preservation 契约写成"不能删除既有
+   inbound 客户端/routing rule/outbound"，这个措辞暗示"拿当前运行时
+   文件当基准、候选配置不得比它少东西"，等于把运行时文件当成了跟数据库
+   并列的第二数据源，一旦按这个方向实现 `render()`，就会违反铁律第 1 条；
+   而且这个措辞本身也有问题：如果数据库期望态里某个用户路由/inbound
+   客户端已经被合法删除，"无条件不能比当前配置少东西"这条规则会永远
+   挡住这次合法删除，配置永远无法瘦身。
+
    阶段二的具体步骤（这里只记录 handoff 内容，本 PR 不实现、不改动
-   `xray_file.py` 或任何测试文件）：
-   ①**先建立并验证 Xray 的 full-config preservation 契约**——针对当前
-   配置已经存在 `inbounds`/客户端的场景，设计并补充契约测试，至少覆盖：
-   新候选配置不能删除既有 inbound 客户端；不能删除既有 routing rule；
-   不能删除既有 outbound；`private BLOCK` 规则和 `tcp,udp BLOCK` 兜底
-   规则这两条安全不变量仍然成立；候选配置能通过 `xray_test()`（`xray
-   run -test`）边界校验；重载失败或健康/preservation 校验失败时仍能
-   完整回滚到重载前状态。这些测试和对应的 `render()`/`_preservation_
-   errors()` 修复留给阶段二实现，本阶段不动这些文件。
-   ②契约测试稳定之后，再以**显式 opt-in**（而不是让它替换 `registry.py`
+   `xray_file.py`、`base.py` 或任何测试文件）：
+   ①**先盘点数据库模型/查询和 `DesiredRoutingState` 能不能完整表达
+   Xray 需要的全部内容**——目前 `DesiredRoutingState`
+   （`backend/app/providers/base.py`）只有 `user_routes` 和
+   `outbound_tags` 两个字段，没有 `inbounds`/`clients` 的位置。如果
+   数据库/领域模型已经能查出"当前应该存在哪些 inbound、哪些 client"，
+   阶段二第一步是把这些信息补进期望态 DTO，让 `render()` 完全基于这个
+   一次性生成的完整期望态产出候选配置（不读、不拼接当前运行时文件）；
+   如果数据库/领域模型本身还没有这些概念，第一步就是先记录并设计这个
+   缺口和边界，不能假设"从当前文件复制缺失部分"是一个可行的临时方案——
+   这一步本身可能已经超出"补一条 preservation 测试"的工作量，需要
+   阶段二自己重新评估范围。
+   ②**preservation/校验语义要重新定义为"候选及重载后配置与数据库期望态
+   一致"，不是"不丢失当前运行时文件里的任何历史对象"**——校验应该保护
+   `AGENTS.md` 的安全不变量（`private BLOCK` 规则、`tcp,udp BLOCK` 兜底
+   规则等），并确认生效配置确实等于数据库期望态生成的候选配置，而不是
+   笼统要求"候选不能比当前配置少任何 routing rule/outbound/inbound
+   客户端"；同时要明确定义合法删除/撤销该怎么发生（例如某个客户端在
+   数据库里被撤销后，下一次 render 出的候选配置里就应该不再包含它，
+   这不应该被 preservation 校验拦下）。候选配置仍然需要能通过
+   `xray_test()`（`xray run -test`）边界校验，重载失败或校验失败时仍
+   需完整回滚到重载前状态。
+   ③契约和数据源设计稳定之后，再以**显式 opt-in**（而不是让它替换 `registry.py`
    现有的默认拒绝分支）的方式接入 registry——具体是新增一个独立的环境
    变量开关还是别的机制，留给阶段二自己设计。
-   ③在①②完成之前，`build_registry()` 不接入 `XrayFileProvider`，
+   ④在①②③完成之前，`build_registry()` 不接入 `XrayFileProvider`，
    `forwarder/mihomo.py` 也保持现状不接入。
 2. **阶段三：补完 `egress/webshare.py` 的响应映射**——`list_endpoints()`/
    `capacity()` 的真实响应体到 DTO 的映射需要先补上（目前是发真实请求、
