@@ -18,7 +18,19 @@
   行为，不是真正的 FastAPI 序列化；本轮改为在 pinned Marzban 精确
   依赖版本 `pydantic==2.10.4`/`fastapi==0.115.2` 下，用真正的
   FastAPI `TestClient` 对两条路径发起真实 HTTP 请求重新验证，结论
-  不变但证据强度提升。）
+  不变但证据强度提升。同日第五次修订：独立审查核实
+  `GatewayRouteBinding` 真实索引后指出，第四轮"`SELECT ... FOR
+  UPDATE` 依赖 `enabled = TRUE AND released_at IS NULL` 的索引范围
+  next-key lock 挡住 phantom insert"这个论证的前提与真实 schema
+  不符——这张表没有支撑该复合条件的索引。本轮撤回这个错误论证，
+  改为要求所有 `GatewayRouteBinding` writer（含
+  `ensure_gateway_route_binding()`、`release_egress()`、未来的
+  reconciliation 工具）共同遵守一个统一的 MySQL named advisory
+  lock（`GET_LOCK()`/`RELEASE_LOCK()`）作为跨进程互斥的唯一
+  正确性来源，conditional UPDATE + rowcount 校验降级为纵深防御，
+  人工维护窗口降级为可选运维措施而非 correctness primitive，并
+  明确这个机制的边界（不约束直接 SQL 操作、假定单一 MySQL server
+  写拓扑）。）
 - 决策范围: TASK-T16 route-identity architecture research (docs/ADR-only,
   不实现代码)。本 ADR 是 `ADR-015-marzban-ownership-and-route-identity.md`
   Decision 3（`BLOCKED`）的专项后续研究，**supersede** ADR-015 的
@@ -558,79 +570,161 @@ provisioning 请求时才 fail closed。
    字段缺失）都记录下来但不中止查询循环本身；查询阶段全部完成后，
    如果**存在任何**失败记录，**整个流程中止，不进入第 4 步，不做
    任何 UPDATE**——不允许"跳过失败的行，更新其它行"。
-4. **（第三轮新增，第四轮独立审查指出仍未真正闭合，本轮再次更正）**
-   第 1 步的全量快照和第 2 步的外部查询之间可能经过相当长时间
-   （受限流/超时影响），期间可能有新的 provisioning/release 发生。
-   **第三轮的修复不够**：独立审查第四轮指出，进入写事务后做一次
-   普通 `SELECT` 重新查询并比较，**不能防止"比较完成之后、UPDATE/
-   COMMIT 之前"这个窗口内发生的并发修改或 phantom insert**——普通
-   `SELECT` 不加锁，不能阻止另一个事务在这之后修改/释放已经比较过
-   的行，也不能阻止一个全新的 active binding 在这个窗口内被提交，
-   而这次批量 UPDATE 仍然会"成功"，工具会错误地宣称"全量收敛"。
+4. **（第三轮新增，第四轮/第五轮独立审查指出仍未真正闭合，本轮
+   彻底重写）** 第 1 步的全量快照和第 2 步的外部查询之间可能经过
+   相当长时间（受限流/超时影响），期间可能有新的 provisioning/
+   release 发生。**第三轮"事务内重新查询+比较"和第四轮"`SELECT
+   ... FOR UPDATE` 依赖索引范围 next-key lock"两次修复都不成立**：
+   第五轮独立审查核实 `backend/app/models/gateway.py::
+   GatewayRouteBinding` 的真实索引后指出，这张表**只有**
+   `subscription_id`/`egress_id`/`gateway_principal` 三个单列索引，
+   以及 `active_subscription_id`/`active_egress_id`/
+   `active_gateway_principal` 三个生成列上的唯一约束——**完全没有
+   支撑 `enabled = TRUE AND released_at IS NULL` 这个复合条件的
+   索引**。第四轮"对索引范围条件做 `SELECT ... FOR UPDATE` 会产生
+   next-key lock，从而挡住 phantom insert"这个论证的前提（"有索引
+   支撑的等值/范围条件"）与真实 schema 不符，**本轮撤回这个结论，
+   不再以它作为并发正确性的基础**。
 
-   **更正后的强制机制**（不再依赖"事务内重新查询+比较"单独兜底，
-   必须同时具备锁 + 条件更新两层保护）：
+   **更正后的强制机制：MySQL server-wide / connection-scoped
+   cooperative named advisory lock**（基于 `GET_LOCK()`/
+   `RELEASE_LOCK()`，不称为"lease"——它不是一个有独立到期时间、可
+   被动过期的租约，而是一个必须被显式获取和释放的命名互斥锁）：
 
-   a. **行锁**：进入写事务后，对目标行集合执行 `SELECT ... FOR
-      UPDATE`（而不是普通 `SELECT`），过滤条件与第 1 步全量快照
-      相同（`enabled = True AND released_at IS NULL`）。在 MySQL
-      8.4/InnoDB 的 REPEATABLE READ（本仓库默认隔离级别）下，对一个
-      有索引支撑的等值/范围条件做 `SELECT ... FOR UPDATE` 会施加
-      next-key lock，**在这个事务提交或回滚之前，阻塞其它事务插入
-      落在同一索引范围内、会被这次查询匹配到的新行**（即挡住这个
-      条件下的 phantom insert），同时锁住已经匹配到的现有行，阻止
-      并发修改/释放。
-   b. **条件更新 + rowcount 校验**：批量 UPDATE 必须带上"原始值"
-      条件（例如 `WHERE id = :id AND enabled = 1 AND released_at
-      IS NULL AND gateway_principal = :snapshot_old_value`），而不是
-      只按主键无条件更新；每一行 UPDATE 后必须核对受影响行数
-      （rowcount）等于预期的 1——如果任何一行的 rowcount 不是 1
-      （说明这一行在锁定之后、这次 UPDATE 执行之前已经被别的方式
-      改变，理论上因为 a 的行锁不应该发生，但仍要求作为第二层
-      防御显式校验），**整个事务回滚，不做任何写入**。
-   c. **强制的人工维护窗口作为前置条件，不是可选运维优化**：
-      第三轮把维护窗口写成"建议""可选"，独立审查第四轮指出这是
-      错误的——仅凭 a/b 两层数据库机制在理论上是充分的（InnoDB 的
-      next-key lock 确实能挡住匹配范围内的 phantom insert），但要求
-      Phase 2B 的实现完全依赖"实现者把 WHERE 条件、索引覆盖范围、
-      隔离级别全部配置正确"这个假设本身有风险——**本轮把维护窗口
-      改为强制前置条件**：运行本工具期间，所有会修改
-      `GatewayRouteBinding`（`enabled`/`released_at`/
-      `gateway_principal`/新建行）的 provisioning/release 代码路径
-      必须暂停（例如通过一个应用层的功能开关/维护标志位阻止
-      `ensure_gateway_route_binding()`/release 逻辑执行，而不仅仅是
-      文档提醒运维"手动注意"）——a/b 两层机制在此基础上作为**纵深
-      防御**，用于捕获维护窗口本身存在漏洞（例如某个遗漏的写入
-      路径未被暂停）的情况，而不是唯一防线。
-   d. **加锁顺序与超时**：如果同一次运行需要对多行加锁，必须按照
-      固定顺序（例如按主键升序）获取行锁，避免多个并发运行之间
-      产生死锁；数据库事务必须设置合理的锁等待超时（沿用现有
-      连接池/ORM 配置的默认超时即可，不需要新的机制），超时后
-      视为本次运行失败、回滚、不做任何写入，允许人工判断后重跑。
-5. 只有第 4 步的行锁 + 重新校验 + 条件更新全部通过后，才在**同一个
-   事务内**完成批量 UPDATE——这是流程中唯一的写操作，要么全部成功
-   要么全部不生效。
-6. 冲突检测：批量更新前检测目标 `routing_principal` 值之间、以及
-   和 `active_gateway_principal` 唯一约束的潜在冲突，冲突同样导致
-   整体中止、不做任何 UPDATE；这项检测必须基于第 4 步加锁后重新
-   校验的同一个行集合，不能用第 1 步的旧快照做冲突判断。
-7. 工具必须**可安全重跑**：重复执行时，已经等于目标值的行不产生
+   a. **唯一、稳定、命名空间隔离的锁名**：概念上形如
+      `lingsway:<database>:gateway-route-bindings-write`（具体命名
+      留 Phase 2B 确定，但必须满足：所有协作者/进程使用完全相同的
+      锁名；把目标数据库名编码进锁名，避免同一 MySQL server 上
+      staging/production 或不同 database 之间意外互相阻塞；长度
+      在 MySQL `GET_LOCK()` 的名称长度限制内）。
+   b. **这个锁是 `GatewayRouteBinding` 所有 mutation 的统一
+      concurrency contract**，不是只有 reconciliation 工具才需要
+      获取——以下路径全部必须在修改这张表之前获取同一个命名锁，
+      缺一个就意味着这个 contract 不成立：
+      - `SqlAlchemyProvisioningState.ensure_gateway_route_binding()`
+        （`backend/app/infra/provisioning_state.py`，upsert 路径）；
+      - `release_egress()`（`backend/app/workers/accounting_sync.py`，
+        释放路径，查询 `released_at IS None` 的行并释放）；
+      - 未来的 route-principal reconciliation 工具；
+      - 未来任何新增的、会 INSERT 一行 `GatewayRouteBinding`，或
+        修改 `gateway_principal`/`enabled`/`released_at`，或修改
+        任何影响 active binding identity/ownership 字段的路径。
+   c. **锁的获取/释放必须覆盖完整写事务，且由同一个物理 DB 连接
+      持有**：`ensure_gateway_route_binding()` 当前只做
+      `self.db.flush()`，事务的 commit/rollback 由外层调用者
+      管理——**不能简单写成"方法内部调用一次 `GET_LOCK()`"**。
+      Phase 2B 必须提供一个真正的、lock-aware 的事务边界/上下文
+      管理器，保证顺序始终是：`GET_LOCK()` 获取命名锁 → 执行
+      mutation → DB commit/rollback → `RELEASE_LOCK()` 释放锁，
+      而且 `GET_LOCK()`/`RELEASE_LOCK()` 必须发生在同一个数据库
+      session/连接上（MySQL 命名锁是 per-connection 的，换连接
+      释放会失败或释放到错误的持有者）。
+   d. **必须显式检查 `GET_LOCK()` 的返回值**：只有返回 `1` 才允许
+      继续执行 mutation。返回 `0`（等待超时）或 `NULL`（出错，例如
+      锁名非法）都必须 **fail closed**：不修改
+      `GatewayRouteBinding`，不继续 reconciliation，记录一条可审计
+      的失败，向调用方返回明确错误——不允许把超时/错误当成"当前
+      没有其它写入者，可以继续"来处理。
+   e. **不能假设事务 COMMIT/ROLLBACK 会自动释放命名锁**：MySQL 的
+      `GET_LOCK()` 锁不随事务提交/回滚自动释放，必须显式管理：
+      成功 commit 后显式 `RELEASE_LOCK()`；rollback/异常路径同样要
+      在 `finally`（或等价保证执行的路径）里显式 `RELEASE_LOCK()`；
+      只有当数据库连接本身意外终止时，MySQL 才会自动释放该连接
+      持有的命名锁——这是最后的兜底，不是正常控制流应该依赖的
+      释放机制。
+   f. **加锁顺序与超时**：所有获取这个命名锁的路径必须使用同一个
+      锁名、不需要额外排序（因为整张表只有一把锁，不存在多把锁
+      之间的死锁问题）；`GET_LOCK()` 调用必须带超时参数，超时按
+      d 的规则 fail closed，允许人工判断后重跑。
+   g. **conditional UPDATE + rowcount 校验作为纵深防御，继续
+      保留**：批量 UPDATE 仍然带上"原始值"条件（例如
+      `WHERE id = :id AND enabled = 1 AND released_at IS NULL AND
+      gateway_principal = :snapshot_old_value`），每一行核对受影响
+      行数等于 1，任何不一致整体回滚——但这不再是并发正确性的
+      主要来源（那是 named lock 的职责），只是在命名锁被正确使用
+      的前提下捕获意外情况的第二层保险。
+   h. **人工维护窗口降级为 operational safety measure，不是
+      correctness primitive**：第三轮"建议"、第四轮"改为强制前置
+      条件"两种表述都不再准确——**真正的跨进程互斥保证来自 b 里
+      "所有 writer 都遵守同一个命名锁 contract"这件事本身**：如果
+      某个 writer 不获取这个锁，无论有没有维护窗口，contract 都不
+      成立。如果项目仍然想保留人工维护窗口，只能把它记录为一个
+      额外的运维层面安全措施（进一步降低竞争概率、方便运维观察），
+      不能把它当作 correctness 的必要条件写进这里。
+5. **existing-data reconciliation 的两阶段顺序**（本轮重写，采纳
+   独立审查要求的 Phase A/B 划分）：
+
+   - **Phase A——不持锁的只读外部 preflight**：对第 1 步的全量
+     `GatewayRouteBinding` 快照，逐行调用打了补丁的 Marzban
+     `GET /api/user/{username}`，解析全部 `routing_principal`，
+     完成 missing/duplicate/冲突检测和全量 preflight；**这个阶段
+     全程不获取 b 里的命名锁**（Marzban HTTP 请求可能较慢/被限流，
+     不应该在这期间持有一个会阻塞所有 provisioning/release 写入的
+     全表锁）；任何查询失败/字段缺失，立即整体退出，DB 零写入。
+   - **Phase B——持锁的原子 DB 写入阶段**：
+     1. 获取 b 里定义的统一命名锁；获取失败（d 的 `0`/`NULL`
+        情况）立即 fail closed，不做任何后续步骤。
+     2. 锁获取成功后，在锁的保护下重新查询一次完整的目标 active
+        binding 集合。
+     3. 把这次重新查询的结果和 Phase A 快照做严格比较——包括行数
+        （row count）、行 identity（哪些主键存在/消失）、以及会
+        影响 reconciliation 结果的原始字段（`enabled`/
+        `released_at`/当前 `gateway_principal`）；只要有任何差异，
+        整体中止，不进入下一步，不做任何写入。
+     4. 比较通过后，在**单一数据库事务**内执行 conditional UPDATE
+        （第 4 步 g 的写法），逐行核对 rowcount；任何异常/rowcount
+        不符，整体回滚。
+     5. 全部成功才 commit；commit 或 rollback **完成之后**才释放
+        第 1 步获取的命名锁（呼应第 4 步 e：commit 本身不释放锁，
+        释放是独立的最后一步）。
+6. 工具必须**可安全重跑**：重复执行时，已经等于目标值的行不产生
    无意义写入；如果 Marzban 一侧数据在两次执行之间发生变化（正常
-   业务变化），重跑会按新查询结果再次收敛，且同样受第 4 步的行锁+
-   条件更新保护——这是"独立显式触发的工具"而不是"一次性 migration"
-   的直接好处，不需要为"重复执行"这件事发明特殊语义。
-8. 必须有**审计**（记录每次运行的时间、操作者、处理的行数、
-   成功/中止结果，包括因为第 4 步加锁/校验失败而中止的次数和原因）
-   和**人工批准边界**（例如要求显式的 `--confirm`/审批流程触发，
-   不作为部署流程的自动一环，不在 Alembic `upgrade` 或应用启动时
-   被动触发）。
-9. 凭据注入方式沿用现有 `AccountingProvider` 的 admin token 配置
+   业务变化），重跑会按新查询结果再次收敛，且同样受 Phase B 的
+   命名锁+比较+conditional UPDATE 保护。
+7. 必须有**审计**（记录每次运行的时间、操作者、处理的行数、
+   成功/中止结果，包括因为锁获取失败或 Phase B 比较失败而中止的
+   次数和原因）和**人工批准边界**（例如要求显式的 `--confirm`/
+   审批流程触发，不作为部署流程的自动一环，不在 Alembic `upgrade`
+   或应用启动时被动触发）。
+8. 凭据注入方式沿用现有 `AccountingProvider` 的 admin token 配置
    路径，不新增独立的凭据存储机制。
+
+**cooperative lock 的边界（本轮新增，明确这个机制能保证什么、不能
+保证什么）**：
+
+- 它只能协调**遵守这个协议的 Lingsway 代码路径**（第 4 步 b 列出的
+  writer）；对管理员/运维直接连接 MySQL 执行 SQL 修改这张表**没有
+  任何约束力**——这属于超出应用层协作范围的场景，本 ADR 不处理。
+- 当前设计假定 **单个 MySQL server / 单一写入拓扑**（`GET_LOCK()`
+  是单个 MySQL server 实例内的机制）。如果未来架构改为
+  multi-primary 或多个 MySQL server 共同接受写入，`GET_LOCK()`
+  不再提供跨服务器互斥，必须重新评估这个机制（例如改用外部分布式
+  锁服务），不能继续假设现在这套设计在那种拓扑下依然成立。
 
 **这依赖 Candidate B 的补丁已经部署并对存量用户生效**——补丁本身
 不需要 Marzban 重新创建用户（`routing_principal` 是从已有
 `dbuser.id`/`dbuser.username` 现算的，不是创建时才写入的新列），
 所以对存量用户同样立即可用，不需要额外的"存量用户迁移"步骤。
+
+**Phase 2B 未来验收测试清单（本轮新增，针对上述命名锁 contract）**：
+
+1. 两个独立 DB session 竞争同一个命名锁：第二个必须等待/超时，不能
+   同时进入。
+2. reconciliation 工具持锁期间，provisioning writer
+   （`ensure_gateway_route_binding()`）尝试获取锁必须被阻止。
+3. provisioning/release writer 持锁期间，reconciliation 工具尝试
+   获取锁必须被阻止。
+4. `GET_LOCK()` 返回 `0`（超时）或 `NULL`（错误）时：验证零写入、
+   fail closed、返回明确错误。
+5. 异常/rollback 路径最终必须释放锁（验证不会因为异常而永久持锁）。
+6. 验证锁在 commit **之前**不会被提前释放（例如故意在 commit 前
+   检查锁状态）。
+7. 模拟"Phase A 快照完成之后、Phase B 获取锁之前"发生并发变化
+   （新增/修改/释放一行），验证 Phase B 的重新比较能检测到差异并
+   整体 abort，零写入。
+8. 验证未来任何新增的 `GatewayRouteBinding` writer 如果不通过统一
+   的加锁 helper/事务边界执行，护栏测试应能发现这个遗漏（例如通过
+   代码层面的约定检查或集成测试覆盖所有已知 writer 路径）。
 
 ### DB schema 影响
 

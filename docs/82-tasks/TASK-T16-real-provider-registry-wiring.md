@@ -842,20 +842,25 @@ ADR-016 Part C/D。
 Alembic revision（会把数据库 schema 升级绑定在一个非事务性外部
 系统上，`AGENTS.md` 铁律第 7 条针对的是纯数据库确定性 reconciliation，
 不适用于这种场景）——改为一个**独立的、显式触发的受控 reconciliation
-工具/作业**：全量只读查询 + preflight 完成后，**第四轮更正（第三轮
-的修复不完整）**：独立审查指出"进入写事务后普通 SELECT 重新查询+
-比较"不能防止"比较完成后、UPDATE/COMMIT 前"这个窗口内的并发修改或
-phantom insert（普通 SELECT 不加锁）。更正为三层强制机制：①
-`SELECT ... FOR UPDATE` 行锁（MySQL 8.4/InnoDB REPEATABLE READ 下
-对索引范围的 next-key lock 能挡住匹配条件的 phantom insert，同时
-锁住已匹配的现有行）；②带原始值条件的 UPDATE + rowcount 校验
-（`WHERE ... AND gateway_principal = :snapshot_old_value`，任何一行
-rowcount 不为 1 就整体回滚）；③**人工维护窗口从"可选建议"改为强制
-前置条件**——运行期间所有会修改 `GatewayRouteBinding` 的
-provisioning/release 代码路径必须暂停，①②作为纵深防御而不是唯一
-防线。批量 UPDATE 收拢在同一个事务内，具备可安全重跑、超时/限流、
-审计、人工批准边界，凭据沿用现有 `AccountingProvider` 配置路径。
-完整设计见 ADR-016。
+工具/作业**：全量只读查询 + preflight 完成后，**第五轮更正（第三、
+四轮的修复均不成立）**：独立审查核实 `GatewayRouteBinding` 真实
+索引后指出，第四轮"`SELECT ... FOR UPDATE` 依赖索引范围 next-key
+lock 挡住 phantom insert"的前提与真实 schema 不符——这张表没有
+支撑 `enabled = TRUE AND released_at IS NULL` 这个复合条件的索引。
+更正为 **MySQL named advisory lock**（`GET_LOCK()`/
+`RELEASE_LOCK()`，命名空间隔离、覆盖数据库名）作为跨进程互斥的
+唯一正确性来源：`ensure_gateway_route_binding()`、
+`release_egress()`、未来的 reconciliation 工具全部必须获取同一把
+命名锁才能修改 `GatewayRouteBinding`；锁的获取/释放必须覆盖完整
+写事务（同一物理连接持有，commit/rollback 不自动释放锁，需要
+显式 `RELEASE_LOCK()`）；`GET_LOCK()` 返回 `0`/`NULL` 一律 fail
+closed。既有数据 reconciliation 拆成两阶段：Phase A 不持锁的只读
+外部 preflight（避免 Marzban 慢请求期间持有全表锁），Phase B 持锁
+后重新查询、与 Phase A 快照严格比较、通过后才在单一事务内批量
+UPDATE。conditional UPDATE + rowcount 校验降级为纵深防御；人工
+维护窗口降级为可选运维措施，不再是 correctness 的必要条件——真正
+的互斥保证来自"所有 writer 都遵守同一把命名锁"这件事本身。完整
+设计（含锁的边界说明和 Phase 2B 验收测试清单）见 ADR-016。
 
 **Phase 2B gate**：`ADR-014` 第 5 条"选定收敛方向"的前提条件现在
 已满足，门槛本身解除。**但这不等于可以立即开始实现**——真正的
