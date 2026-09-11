@@ -578,3 +578,106 @@ registry wiring**。2A/2B/2C 不合并成一个阶段。
   `gateway_principal`/`accounting_user_id` 收敛方向，并确认 ADR-014
   收窄后的两个 `UNVERIFIED` 问题的真实答案（可能需要跟运维或产品确认
   部署拓扑/Marzban 行为），再决定具体的 DTO/schema 改动范围。
+
+## 阶段二 B0：关闭 Phase 2B 前置决策（2026-09-11，只读研究 +
+ADR/TASK 决策，未改动业务代码）
+
+Phase 2A（ADR-014）结尾留下三个前置问题，明确不能跳过直接进
+`DesiredRoutingState`/schema/renderer 代码改动。本阶段（2B0）只读研究
+公开的 Marzban v0.8.4 源码/文档和仓库既有 provider 契约，逐一关闭这
+三个问题，完整证据和推导过程记录在新 ADR：
+**`docs/80-decisions/ADR-015-marzban-ownership-and-route-identity.md`**
+——本节只摘录结论。
+
+### Decision 1：Marzban v0.8.4 是否管理 Xray inbound clients
+
+**`YES`**。通过只读检索 `github.com/Gozargah/Marzban` 的 `v0.8.4` tag
+公开源码确认：Marzban 自己的数据库（`db_models.User`/`db_models.Proxy`，
+本仓库部署拓扑里对应挂载的 `db.sqlite3`）是 client 认证材料的
+authoritative source；`app/xray/config.py::include_db_users()` 在
+Marzban 内部每次重建配置时从这个库查询并把 client 追加进内存里的
+`XRayConfig` 对象；最终配置通过 `xray/core.py` 的 `-config stdin:`
+直接喂给 Marzban 自己管理的 Xray 子进程，**从不写回**本仓库挂载的
+`xray_config.json` 文件本身（该文件只在 Marzban 自己进程启动时被读取
+一次，作为 `inbounds`/`outbounds`/`routing` 的初始骨架）。因此：本仓库
+的 renderer 全量替换这个文件是安全的，不会破坏 Marzban 管理的 client
+数据；唯一需要保留的约束是 renderer 产出的 `inbounds` tag 不能破坏
+Marzban `include_db_users()` 依赖的协议匹配（已记入 Phase 2B 验收
+标准）。详细的 8 项逐条证据（含 `CONFIRMED`/`INFERENCE` 标注）见
+ADR-015 Part A。
+
+### Decision 2：Marzban 的 provider classification
+
+**`ACCOUNTING`**。`Settings` 里全部 `marzban_*` 字段（`base_url`、
+`admin_username`、`admin_password`、`default_protocol`、
+`default_inbounds_json`、`verify_tls`）逐一对应"调用 Marzban admin API
+创建/管理用户"所需信息，精确匹配 `AccountingProvider` Protocol
+（`create_user`/`disable_user`/`set_quota`/`set_expire`/
+`get_connection_links`/`get_usage`），和 `TransportProvider`（节点同步/
+容量/健康）契约没有交集；Decision 1 的证据也证实 Marzban 核心职责就是
+用户/账务管理，不是节点库存管理。**`ADR-013`"Marzban 在新架构中的定位
+是 transport 层"这一句表述被证明不准确，已被新增的
+`ADR-015-marzban-ownership-and-route-identity.md` supersede**——
+`/admin/accounting/health` 复用 `TransportProvider.health_check()` 这
+一具体代码接线本身不受影响、不需要修改（这是避免为单个健康检查端点
+碰 `providers/base.py` 的成本考虑，和 Marzban 该归哪一类无关）。方案 3
+（拆成两个 adapter）不成立：没有证据显示 Marzban 有任何节点库存/容量
+能力需要单独的 transport adapter 承接。详见 ADR-015 Part B。
+
+### Decision 3：Xray route identity 收敛方案
+
+**`A`**——恢复 `GatewayRouteBinding.gateway_principal` 的 accounting-
+principal 语义：`SqlAlchemyProvisioningState.desired_routing_state()`
+调用 `ensure_gateway_route_binding()` 时改传 `request.username`（而不是
+当前的 `tenant.tenant_id`）。理由（完整对比见 ADR-015 Part C 的十二维
+评估表）：候选 A 同时解决"字段写入值和模型/测试契约不一致"和"持久化
+时机晚于渲染发生"两个问题，因为 `gateway_principal` 本身就在
+`APPLY_GATEWAY`（第 7 步）当场写入，不依赖后续步骤；改动范围是全部
+候选里最小的（`desired_routing_state()` 的一行调用参数）；`Subscription
+.accounting_user_id` 不受影响，继续服务 `admin_sync_usage()` 的独立
+读取路径，两个字段的值理应相同（都来自同一个 `request.username`），
+不需要额外同步机制。候选 B（提前 `accounting_user_id` 持久化时机）
+和候选 C（`sub-{order.id}` 正式契约化）均被否决——B 引入不必要的跨
+编排步骤事务/补偿复杂度，C 把路由正确性长期绑定在一个字符串推导公式
+永不改变的假设上，两者都不如 A 简洁、风险更低。
+
+### Reality ownership：无 NEW EVIDENCE
+
+本阶段研究过程中没有发现任何推翻 ADR-014 已 Accepted 的 Reality
+ownership 结论的证据，维持原结论不变，不重新讨论。
+
+### Decision 4：Phase 2B implementation matrix
+
+| 改动类型 | 需要？ |
+|---|---|
+| `DesiredRoutingState` DTO change | **YES**（扩展 outbound 连接细节；route identity 部分不需要新增字段） |
+| Settings change | **YES**（`XRAY_REALITY_DEST`/`XRAY_REALITY_SERVER_NAME` 读取路径，ADR-014 已定方向） |
+| Secret persistence change | **YES**（Reality `privateKey`/`shortIds`，ADR-014 已定方向） |
+| DB schema/migration | **NO**（Part A/B/C 均复用现有字段/机制，未发现需要新表/新列） |
+| provisioning orchestration change | **YES，但范围很小**（只改 `desired_routing_state()` 一处调用参数） |
+| query/adapter change | **YES**（参照 `render_xray_routes.py::_active_routes()` 的 JOIN 逻辑） |
+| Xray renderer change | **YES**（产出完整 outbound；Reality `dest`/`serverNames` 改为只读 env） |
+| preservation/validation change | **YES**（按 ADR-014"合法删除语义"重写，且保留 Marzban 协议匹配约束） |
+
+### Phase 2B implementation handoff（严格收窄）
+
+只实现本 ADR-015/本节已经决定的 DB → desired-state contract + Xray
+renderer/测试护栏，具体范围就是上面 Decision 4 表格里标 `YES` 的八项，
+不包括：`registry.py` 的真实 opt-in wiring、生产环境启用、真实生产
+凭据、真实 Xray reload、部署。这些仍然属于 Phase 2C。
+
+### 本阶段（2B0）验收
+
+- 新增 `docs/80-decisions/ADR-015-marzban-ownership-and-route-identity.md`，
+  修改本文档，`ADR-013` 补一段 supersede 说明（不重写原文），
+  `backend/**`/`ops/**`/`infrastructure/**`/`deploy/**`/`frontend/**`
+  等代码目录零改动。
+- 只读检索了 Marzban 官方公开仓库 `v0.8.4` tag 的源码/文档，未连接
+  任何真实 Marzban 实例，未使用任何真实凭据。
+- 没有调用任何真实 provider 的网络请求，没有读取生产配置/`.env`/
+  `/etc/lingsway/*.conf`。
+- 没有 reload 或调用 Xray/Mihomo，没有修改生产数据库。
+- 三个前置决策全部关闭（Decision 1/2/3 均给出唯一结论），不再是
+  `UNVERIFIED / DECISION REQUIRED`。
+- 下一步是真正的 Phase 2B 实现 PR，按上面 Decision 4/handoff 的范围
+  实施代码改动。

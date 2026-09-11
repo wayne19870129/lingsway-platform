@@ -2,6 +2,18 @@
 
 - 状态：已接受
 - 日期：2026-09-04
+- **部分表述已被 `ADR-015-marzban-ownership-and-route-identity.md`
+  supersede（2026-09-11）**：下方"决定"一节里"Marzban 在新架构中的
+  定位是 transport 层，健康检查归属该层一致"这一句判断，经
+  TASK-T16 Phase 2B0 只读研究（Marzban v0.8.4 公开源码 + `config.py`
+  `marzban_*` 字段形状 + `AccountingProvider`/`TransportProvider`
+  Protocol 对比）核实为不准确，已在 ADR-015 里纠正为"Marzban 的定位是
+  accounting 层"。`/admin/accounting/health` 复用
+  `TransportProvider.health_check()` 这一具体代码接线本身**不受影响、
+  不需要修改**——ADR-015 明确这只是为单个健康检查端点避免修改
+  `providers/base.py` 的成本考虑（本段紧随其后的理由仍然成立），和
+  Marzban 该归为哪个 provider 分类无关。本段以下原文保持不动，仅在此
+  加注更正指向。
 
 ## 背景
 
