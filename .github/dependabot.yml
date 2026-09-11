@@ -1,0 +1,11 @@
+version: 2
+updates:
+  # Third-party GitHub Actions used in this repo are pinned to full commit
+  # SHAs (see .github/workflows/claude.yml) rather than mutable version
+  # tags, since some of them hold repo-write permissions and secrets.
+  # Dependabot still opens a PR when a newer version is available; that PR
+  # goes through normal review before merge, it is never auto-merged.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

@@ -6,6 +6,10 @@ on:
     branches: [main]
   schedule:
     - cron: "17 4 * * 1"
+  # See ci.yml: GITHUB_TOKEN-authored PRs/pushes don't trigger pull_request,
+  # so claude.yml re-runs this via `gh workflow run security.yml --ref
+  # <branch>` after creating/updating a PR. No PR payload is needed here.
+  workflow_dispatch:
 
 permissions:
   contents: read

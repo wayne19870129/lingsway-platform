@@ -4,6 +4,13 @@ on:
   pull_request:
   push:
     branches: [main]
+  # GITHUB_TOKEN-authored pushes/PRs (e.g. from .github/workflows/claude.yml
+  # creating or updating a PR) do not trigger pull_request/push events by
+  # design (GitHub's anti-recursion rule), so claude.yml explicitly re-runs
+  # this workflow via `gh workflow run ci.yml --ref <branch>` after pushing.
+  # workflow_dispatch is exempt from that rule, and this job needs no PR
+  # payload, so it runs unchanged against whatever ref was dispatched.
+  workflow_dispatch:
 
 permissions:
   contents: read
