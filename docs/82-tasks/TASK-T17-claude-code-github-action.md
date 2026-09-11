@@ -1,7 +1,11 @@
 # TASK-T17 — 官方 Claude Code GitHub Action(`@claude` 触发)
 
-风险等级:medium(新增 CI 触发面 + 仓库写权限授予给 Action,但不涉及生产
-凭据、不涉及部署、不涉及数据库)
+风险等级:medium(T17 最初落地时的评级,新增 CI 触发面 + 仓库写权限授予给
+Action,但不涉及生产凭据、不涉及部署、不涉及数据库)。**这是历史评级,不
+代表当前状态**——`actions: write` 加入之后(见下方),`risk-classify.yml`
+对触碰 `.github/workflows/**` 的 PR 一律落 `risk:high`,Issue #50 的修复
+PR 也确实被打上了 `risk:high`;当前实际风险水平以那个自动分类结果为准,
+这个 `medium` 字段只保留作为 T17 初次实现时的原始记录。
 
 **范围更新(见 `TASK-T18-conditional-auto-merge.md`)**:下面"关于'开 PR'
 这一步"这段描述的是**本任务(T17)范围内**、`@claude` 首次接入时的默认
@@ -94,7 +98,13 @@ SHA 来源和核实方式见对应 PR 描述。
   以及降低无谓的 Actions 用量/token 消耗)。
 - 权限声明为完成任务所需的最小集合:`contents: write`、
   `pull-requests: write`、`issues: write`、`id-token: write`、
-  `actions: read`。不加 `deployments`、`packages`、`administration` 等
+  `actions: write`。**`actions: write`(不是最初 T17 落地时的
+  `actions: read`)**——升级原因见上面"为什么 `claude.yml` 需要
+  `actions: write`"一节:`gh workflow run` 需要这个权限才能在推送后手动
+  触发 `ci.yml`/`security.yml`/`risk-classify.yml`。这个变化之前只体现
+  在 `claude.yml` 本身的注释里,没有同步更新这里和下面的验收标准,导致
+  文档和实际代码不一致——Issue #50 的 PR 已经把这两处都改成
+  `actions: write`。不加 `deployments`、`packages`、`administration` 等
   本任务用不到的权限。其中 `id-token: write` 的准确理由是官方文档写明的
   "required for the Claude Code GitHub Action's default GitHub App
   authentication"——是 Action 默认走 GitHub App 身份认证这条路径本身
@@ -118,11 +128,24 @@ SHA 来源和核实方式见对应 PR 描述。
     这种更细的权限档位。真正的硬性拦截只能来自分支保护规则(要求人工
     批准才能合并),而这个仓库目前(`AGENTS.md` 铁律第 8 条)明确写着
     机械分支保护尚未启用。
-  - 因此本任务只能做到:①提示词层面明确指示 Claude 不得 merge/close/
-    部署;②仓库现有的 `deploy-*.yml` 全部是 `workflow_dispatch` 手动
-    触发或 dry-run,这条新 Action 的权限里不含 `actions: write`,
-    无法自己触发部署 workflow。这两条组合起来是当前能做到的全部,
-    不构成机械意义上的"不可能",验收时必须如实说明。
+  - **这一条已经因为 `actions: write` 的加入而变化,必须重新如实说明**
+    (Work 在 Issue #50 的 PR 审查里指出了这一点,原文这里曾经说
+    "这条新 Action 的权限里不含 `actions: write`,无法自己触发部署
+    workflow",在加入 `actions: write` 之后已经不再成立)。`deploy-auto.yml`
+    /`deploy-gateway.yml`/`deploy-migration.yml` 都有 `workflow_dispatch`
+    触发入口,`actions: write` 技术上确实允许 `claude.yml`(或任何持有
+    这个仓库 `GITHUB_TOKEN` 写权限的工作流)用 `gh workflow run
+    deploy-*.yml` 把它们触发起来——不再是"权限上做不到"。真正的边界现在
+    只剩:①提示词层面明确指示 Claude 不得触发/批准/执行生产部署;②这三个
+    部署工作流当前全部是硬编码的 fail-closed dry-run(`test "$DRY_RUN" =
+    "true"` 强制检查,步骤内容全部是 `echo "[DRY_RUN] would ..."` 占位,
+    没有真正执行 `deploy/lib/*.sh` 或 alembic 迁移的代码路径),所以即使
+    被触发,也不会产生真实的远程副作用——阻挡的不是"触发这个 workflow"
+    这件事,而是"这个 workflow 目前根本没有真正执行部署的代码"。如果
+    将来这些 workflow 接上真实部署逻辑(T7),这条防线就会消失,届时必须
+    重新评估 `claude.yml` 是否还应该保留 `actions: write`,或者需要换成
+    范围更窄的权限模型。这两条组合起来是当前能做到的全部,不构成机械
+    意义上的"不可能",验收时必须如实说明。
 - 认证优先用 `CLAUDE_CODE_OAUTH_TOKEN`(订阅模式);只有在用户明确要求
   或订阅方式不可用时才退回 `ANTHROPIC_API_KEY`。不管哪种,**都不能要求
   用户把 token/key 粘贴进聊天、Issue、PR 或仓库文件**——只能告诉用户
