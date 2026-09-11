@@ -28,7 +28,7 @@ jobs:
       # write (not read) so this job can run `gh workflow run ci.yml` /
       # security.yml / risk-classify.yml after pushing -- see the
       # workflow_dispatch additions on those three files and
-      # docs/82-tasks/TASK-T18-conditional-auto-merge.md. Needed because
+      # docs/82-tasks/TASK-T17-claude-code-github-action.md. Needed because
       # GITHUB_TOKEN-authored pushes/PRs don't trigger pull_request/push
       # events (GitHub's anti-recursion rule), so those workflows would
       # otherwise never run against Claude's own commits.

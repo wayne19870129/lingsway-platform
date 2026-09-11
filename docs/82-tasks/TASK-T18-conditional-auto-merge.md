@@ -1,7 +1,15 @@
 # TASK-T18 — 自动创建 PR + 自动返工 + 条件自动合并
 
 **状态:条件自动合并部分已撤销(见下方"撤销记录"),仅作历史存档。**
-自动创建 PR、自动返工重触发 CI 这两部分保留在 `claude.yml` 里继续生效,
+保留在 `claude.yml` 里继续生效的是:自动创建 PR,以及**被 `@claude`
+提及触发之后**的返工推送 + `workflow_dispatch` 重新触发 CI/Security/
+Risk-classify——注意这仍然是 **PR 评论触发的返工**,不是"Work 给出
+`NEEDS_CHANGES` 就自动唤醒 Claude"那种全自动闭环:`claude.yml` 的触发
+条件是 `contains(github.event.comment.body, '@claude')`,而 Work 的
+审查评论本身不包含这个字符串,所以每一轮返工目前仍然需要有人(或者未来
+某个中继工作流)手动 `@claude` 一下才会触发——这一点在"撤销记录"里已经
+是导致撤销自动合并的原因之一,这里重复强调一次是为了避免把"自动创建
+PR/自动返工推送"这两个仍然保留的能力,误读成"审查到修复全自动"。
 `.github/workflows/claude-automerge.yml` 已删除,`AGENTS.md`/`CLAUDE.md`
 里对应的例外条款已回退。不要按这份文档现在的状态去理解仓库当前行为——
 下方"撤销记录"之前的正文是撤销前的原始设计记录,保留是为了让人理解
