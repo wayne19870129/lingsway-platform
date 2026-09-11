@@ -1,0 +1,33 @@
+diff --git a/app/models/user.py b/app/models/user.py
+index fa59003..d740d4c 100644
+--- a/app/models/user.py
++++ b/app/models/user.py
+@@ -4,7 +4,7 @@
+ from enum import Enum
+ from typing import Dict, List, Optional, Union
+ 
+-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
++from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
+ 
+ from app import xray
+ from app.models.admin import Admin
+@@ -293,6 +293,19 @@
+     admin: Optional[Admin] = None
+     model_config = ConfigDict(from_attributes=True)
+ 
++    # Lingsway ADR-016 patch: expose the Xray routing principal that
++    # Marzban itself already computes internally (app/xray/operations.py:
++    # f"{dbuser.id}.{dbuser.username}") on the public Admin API response,
++    # without exposing the raw database id as its own field. See
++    # docs/80-decisions/ADR-016-route-identity-architecture-unblock.md
++    # (Decision 3, Candidate B) in the Lingsway platform repository.
++    id: int = Field(exclude=True)
++
++    @computed_field
++    @property
++    def routing_principal(self) -> str:
++        return f"{self.id}.{self.username}"
++
+     @model_validator(mode="after")
+     def validate_links(self):
+         if not self.links:
