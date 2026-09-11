@@ -3,7 +3,10 @@
 - 状态: 已接受
 - 日期: 2026-09-11（2026-09-11 第二次修订：修正 route-match 用户名持久化、
   `TrafficRule` 用途、Reality shortIds、部署拓扑四处独立审查指出的事实
-  错误）
+  错误；2026-09-11 第三次修订：新增"A2"明确铁律第 1 条与静态模板的边界，
+  修正 `docs/10-deploy-new-server.md` 里仍不准确的 Reality 来源描述，
+  更正 `GatewayRouteBinding.gateway_principal` 的设计意图判断，补充
+  `Subscription.accounting_user_id` 持久化时机晚于渲染发生这一时序缺口）
 - 决策范围: TASK-T16 Phase 2A（只读盘点 + 契约决策，不实现代码）
 
 ## Context
@@ -144,9 +147,11 @@ source of truth"——如果 Marzban 自己动态管理 client 写入（上面�
 但仍需要人工确认，而不是假设）；如果确认这个机制缺失，数据库目前
 **完全没有**能力表达它（见下方"结论 1"）。
 
-### 事实三（已更正）：Xray 路由匹配用的 accounting username 已经有明确
-的持久化 canonical source——`Subscription.accounting_user_id`，
-`GatewayRouteBinding` 不需要新增字段
+### 事实三（已更正，本轮独立审查又补充了两处遗漏）：Xray 路由匹配用的
+accounting username 有一个持久化 canonical source——
+`Subscription.accounting_user_id`——但它的持久化时机晚于渲染发生的时刻，
+且 `GatewayRouteBinding.gateway_principal` 当前实际写入的值和模型/测试
+契约期望的值不一致
 
 **第一版这里的结论是错误的，独立审查指出后核实确认，完整改正如下。**
 第一版声称"`ProvisionRequest.username` 没有持久化在任何表里"、"数据库
@@ -194,17 +199,108 @@ accounting_user_id: Mapped[str | None] = mapped_column(String(128), unique=True)
    accounting_user_id` 这条已经存在的路径就能拿到 Xray `"user"` 匹配
    所需要的值，不需要额外 schema。
 
-`GatewayRouteBinding.gateway_principal` 这个字段本身的定位不变：核实
-`ensure_gateway_route_binding()`/`desired_routing_state()`，它被赋值为
-`tenant.tenant_id`（`EgressProvider.create_tenant()` 返回的 Webshare
-出口子账户 ID），不是 Xray 客户端身份，是审计用途——这一点第一版的结论
-是对的，本轮不改；改的只是"这个字段之外，是否还缺一个能恢复 username
-的持久化位置"这个判断，答案是**不缺，已经有了**。
+**`GatewayRouteBinding.gateway_principal` 的"设计意图 vs. 当前实现"这里
+需要更正（本轮独立审查指出后核实确认，第一版把当前实现误判成设计
+意图）。** 第一版说这个字段"是审计用途，设计上就不是 Xray 身份"——重新
+核实模型 docstring、集成测试和实际调用方之后，这个说法把"当前实现的
+错误/偏离"当成了"设计契约"，两者不是一回事：
 
-（如果未来出于"想让路由匹配键和 accounting username 解耦"这类设计考虑，
-要给 `GatewayRouteBinding` 或路由匹配值单独设计一个字段，那是 Phase 2B
-自己可以做的**设计选择**，不是本 ADR 描述的"当前数据缺失"这一既成事实
-——本 ADR 不预先替 Phase 2B 做这个选择。）
+- **模型契约**：`backend/app/models/gateway.py::GatewayRouteBinding` 的
+  docstring 明确写"Maps one accounting user principal to exactly one
+  Egress outbound."——按这个契约，`gateway_principal` 的设计意图就是
+  **accounting principal**（账务/Xray 客户端身份），不是 Webshare 出口
+  租户 ID。
+- **测试契约**：`backend/tests/integration/test_db_adapters.py` 里
+  `state.ensure_gateway_route_binding("marzban-user-1", dto)` 传入的是
+  一个 accounting 风格的用户名（`"marzban-user-1"`），和 docstring 的
+  契约一致。
+- **当前生产 writer**：`SqlAlchemyProvisioningState.desired_routing_state()`
+  实际调用的是 `self.ensure_gateway_route_binding(tenant.tenant_id, endpoint)`
+  ——`tenant.tenant_id` 是 `EgressProvider.create_tenant()` 返回的
+  Webshare 出口子账户 ID，不是 accounting principal。
+- **部署 renderer**：`render_xray_routes.py::render_config()` 把
+  `route.gateway_principal` 直接当 Xray 路由的 `"user"` 匹配值使用。
+
+三者放在一起，暴露的是一个**当前实现内部不一致**，不是一个已经想清楚
+的设计：模型/测试的契约期望这里存的是 accounting principal，但生产
+writer 实际写入的是 egress tenant id，renderer 又把这个被写歪的字段
+直接当 Xray 用户身份使用。第一版把"当前 writer 的行为"误当成"这个字段
+的设计意图"来描述，这是需要更正的地方——正确的记录方式是：**这是一处
+已确认的实现不一致，不是刻意的审计字段设计**，具体怎么收敛（改 writer
+让它写 accounting principal，还是改模型契约承认它现在存的是 tenant id
+另开字段存 accounting principal）是 Phase 2B 需要做的决策，本 ADR 不
+替它决定。
+
+**在这处不一致收敛之前，"通过 `GatewayRouteBinding.subscription_id` →
+`Subscription.accounting_user_id` 就能拿到 Xray 路由匹配键"这条结论
+需要加一个限定条件（见下方的时序问题）**：即使 schema 层面不需要新字段，
+Phase 2B 仍然需要先解决 `gateway_principal` 当前写入的到底是什么、和
+`accounting_user_id` 是否应该是同一个值这两个问题，而不是假设两者已经
+自动对齐。
+
+### 事实三补充：`Subscription.accounting_user_id` 的持久化时机晚于
+`APPLY_GATEWAY` 步骤，Phase 2B 不能假设渲染时它已经存在
+
+**本轮独立审查指出的时序问题，核实确认为真实存在。** 重新核对
+`backend/app/domain/provisioning.py` 的编排顺序和
+`backend/app/api/admin.py::admin_confirm_payment` 的调用顺序：
+
+```python
+# domain/provisioning.py（节选，编号对应 ProvisionStep）
+self._start(run_id, ProvisionStep.CREATE_ACCOUNTING_USER)      # 步骤 6
+self.accounting.create_user(...)
+...
+self._start(run_id, ProvisionStep.APPLY_GATEWAY)                # 步骤 7
+desired_routing = self.state.desired_routing_state(request, endpoint, tenant)
+candidate = self.gateway.render(desired_routing)
+...
+self.gateway.apply(candidate)
+...
+self._start(run_id, ProvisionStep.ISSUE_SUBSCRIPTION)           # 步骤 8
+...
+# 步骤 9 NOTIFY 之后，confirm_payment_and_provision() 才返回
+```
+
+```python
+# api/admin.py::admin_confirm_payment（节选）
+outcome = confirm_payment_and_provision(...)          # 完整跑完九步编排
+subscription = db.scalar(select(Subscription)...)
+...
+if subscription.accounting_user_id is None:
+    subscription.accounting_user_id = request.username  # 编排全部完成之后才写
+    db.commit()
+```
+
+也就是说：`desired_routing_state()`（在 `APPLY_GATEWAY`，即第 7 步）
+执行的时候，`Subscription.accounting_user_id` **还没有被写入**——它是在
+整个九步编排（含第 8 步 `ISSUE_SUBSCRIPTION`、第 9 步 `NOTIFY`）全部跑完、
+`confirm_payment_and_provision()` 返回之后，`admin_confirm_payment()`
+才把它 commit 进去。这对 Phase 2B 的"完整 candidate 必须从数据库完整
+期望态一次性生成"这个目标很关键：**如果 Phase 2B 的期望态查询打算读
+`Subscription.accounting_user_id` 来生成路由匹配键，在首次开通这个时间
+点上，这一列在渲染发生时可能还是 `NULL`**，不能假设它已经就绪。
+
+第一版这里只写了"通过 `GatewayRouteBinding.subscription_id` JOIN
+`Subscription.accounting_user_id` 即可"，没有考虑这个时序缺口，本轮
+补充记录，不在本 ADR 里替 Phase 2B 选定解法，只列出候选（Phase 2B 自己
+决定选哪个）：
+
+- **候选 A**：恢复 `GatewayRouteBinding.gateway_principal` 的
+  accounting-principal 语义（对齐模型 docstring 和测试契约），并确保
+  在生产 writer 里及时、正确地持久化这个值——这同时解决上面"字段设计
+  意图不一致"和"时序"两个问题，因为 `gateway_principal` 本身就是在
+  `APPLY_GATEWAY` 这一步写入的，不依赖后续步骤。
+- **候选 B**：把 `Subscription.accounting_user_id` 的写入提前到
+  `CREATE_ACCOUNTING_USER`（第 6 步）成功之后、`APPLY_GATEWAY`（第 7 步）
+  之前，并确保这段代码的事务/补偿语义正确（例如第 7 步失败时这一列要
+  不要回滚）。
+- **候选 C**：继续用 `Subscription.order_id` → `f"sub-{order.id}"` 这个
+  确定性推导，但必须明确写成**正式契约**（不只是"没有持久化时的
+  fallback"），并且要说明未来如果这个命名规则本身需要变更，会有什么
+  迁移风险（例如已经渲染过的 Xray 路由规则里嵌入的旧 `sub-{id}` 值和
+  新规则不一致）。
+
+本轮不在这里选定 A/B/C 中的哪一个，留给 Phase 2B 自己决策。
 
 ### 事实四（已更正）：`TrafficRule` 不是死代码——它是 Mihomo/forwarder
 渲染器的真实动态流量策略数据源，只是和 Xray 的 `DesiredRoutingState.
@@ -298,12 +394,62 @@ short ID**，两者都是 Reality 协议里客户端配置需要固定下来的�
 |---|---|---|---|
 | 应用/数据库拥有 | 路由规则（用户 → outbound 映射） | `GatewayRouteBinding`（不需要新增 username 字段，见事实三） | `render_xray_routes.py` 已经这样做 |
 | 应用/数据库拥有 | outbound 定义（host/port/protocol/凭据引用） | `EgressEndpoint` + `EgressBinding`/`Secret` | 同上，已验证的数据流 |
-| 应用/数据库拥有 | Xray `"user"` 路由匹配键 | `Subscription.accounting_user_id`（通过 `GatewayRouteBinding.subscription_id` 关联可得） | 事实三 |
+| 应用/数据库拥有，**但持久化时机和字段一致性都还有缺口，不能当成已经解决** | Xray `"user"` 路由匹配键 | `Subscription.accounting_user_id`（有 canonical source，但在 `APPLY_GATEWAY` 渲染时可能还未写入）；`GatewayRouteBinding.gateway_principal`（模型/测试契约期望是 accounting principal，当前 writer 实际写入 Webshare tenant id，两者不一致） | 事实三（含第二轮补充） |
 | 应用拥有，但**不来自数据库行数据**（固定不变量，允许硬编码） | private BLOCK 首条规则、tcp/udp BLOCK 兜底、禁止 DIRECT | 渲染器代码本身 | `AGENTS.md` 铁律第 2 条要求"一律"，属于应用级不变量而非按订阅变化的期望态 |
-| 运维/部署时静态模板拥有 | inbound 的 protocol/listen/port/TLS-Reality 参数骨架 | `infrastructure/marzban/xray_config.base.json` | 事实一、二 |
+| 运维/部署时静态模板拥有，**范围严格限定为不因客户/部署内容而变的固定基础设施骨架**（见下方"A2"，不是数据库之外的第二个可变 desired-state 来源） | inbound 的 protocol/listen/port | `infrastructure/marzban/xray_config.base.json` | 事实一、二、A2 |
+| **不应继续留在静态模板里、按铁律第 1 条的严格解读目前不合规，需要 Phase 2B 挪进数据库/Secret 表** | Reality `privateKey`/`shortIds`（`dest`/`serverNames` 在模板为空时还会退回读 env，同样不是数据库） | 目前：模板为空时由 `_reality_settings()` 现场生成/由 env 提供；应该：数据库或 `Secret` 表的持久化 canonical source | 事实五、A2 |
 | 与 Xray desired state 无关，但真实在用（不要混进本 ADR 范围） | Mihomo 动态流量策略 | `TrafficRule` → `ops/forwarder/render_mihomo_config.py` | 事实四 |
-| **尚未确定，需要专门 ADR/TASK 决策或人工核实部署拓扑，不在本 ADR 范围内解决** | Marzban 是否/如何动态管理 `inbounds[].settings.clients`（范围已缩小，见事实二）；Reality `privateKey`/`shortIds` 的持久化位置；Marzban 到底对应 `accounting_provider` 还是 `transport_provider_mode`（ADR-013 与 `config.py` 现有矛盾） | UNVERIFIED / DECISION REQUIRED | 事实二、五 |
+| **尚未确定，需要专门 ADR/TASK 决策或人工核实部署拓扑，不在本 ADR 范围内解决** | Marzban 是否/如何动态管理 `inbounds[].settings.clients`（范围已缩小，见事实二）；Marzban 到底对应 `accounting_provider` 还是 `transport_provider_mode`（ADR-013 与 `config.py` 现有矛盾） | UNVERIFIED / DECISION REQUIRED | 事实二 |
 | 运行时文件（Xray 当前 `config.json`）角色 | 只读——backup / rollback / drift detection / validation / post-reload 校验 | 明确禁止作为 desired state 的第二数据源（铁律第 1 条） | 已在 TASK-T16 前几轮记录 |
+
+### A2. `AGENTS.md` 铁律第 1 条与静态模板的边界（回应独立审查 Major 1）
+
+**上一版把"静态模板拥有 inbound 的 protocol/listen/port/TLS-Reality 参数
+骨架"整体列成一行，容易读成"模板是和数据库并列的第二个 desired-state
+owner"，这和铁律第 1 条（"配置渲染一律从数据库全量生成，禁止增量拼接"）
+表面上冲突——独立审查指出后核实确认这个混淆是真实存在的，需要把三类
+概念明确分开，而不是笼统地说"模板也是一种归属"：**
+
+1. **可变 desired state（必须有数据库/Secret canonical source，不允许
+   活在无状态模板里）**——凡是会因部署、客户、凭据、服务器身份变化而
+   影响候选配置的内容都属于这一类。已确认属于这一类、且已经有数据库
+   canonical source 的：路由规则、outbound 连接细节。**已确认属于这一
+   类、但目前没有数据库/Secret canonical source 的（这是不合规现状，
+   不是可以接受的模板归属）**：Reality `privateKey`/`shortIds`——这两个
+   值是服务器身份材料，理论上每套部署应该固定，属于"可变但应该稳定"的
+   desired state，不是"永远不变、可以硬编码在模板里"的基础设施骨架；
+   `dest`/`serverNames` 在模板为空时也会退回读环境变量，同样不是来自
+   数据库，本 ADR 记录这一点但暂不强制归类（是否需要挪进数据库，留给
+   Phase 2B 评估，因为它们本身變动频率可能确实接近"部署时固定"而非
+   "按客户变化"）。
+2. **代码级固定安全不变量（允许硬编码在渲染器代码里，不是数据源问题）**
+   ——private BLOCK 首条规则、tcp/udp BLOCK 兜底、禁止 DIRECT。这些不
+   随客户/部署变化，`AGENTS.md` 铁律第 2 条本身要求"一律"，硬编码是
+   正确做法，不构成对铁律第 1 条的例外，因为它们根本不是"配置渲染"意义
+   上的期望态数据，是渲染逻辑本身的不变约束。
+3. **静态模板（严格限定为不随客户/部署内容变化的固定基础设施骨架）**
+   ——本 ADR **不**把整个 `xray_config.base.json` 都当作合法的、和数据库
+   并列的 desired-state 来源；模板真正应该保留的内容收窄为
+   **inbound 的 protocol/listen/port** 这类纯粹的基础设施接线信息（同一
+   套部署里几乎不会因为哪个客户下单而改变），不包括 Reality 身份材料。
+
+**本 ADR 的决定是：不对 `AGENTS.md` 铁律第 1 条做例外覆盖**——不采用
+"模板作为 desired-state 的一个合法来源，需要写覆盖范围/版本管理/漂移
+检测"这条路径。理由：Reality `privateKey`/`shortIds` 一旦被承认为
+"模板可以合法拥有的内容"，就需要一整套模板版本管理、漂移检测、DB/模板
+冲突时优先级判定的机制（用户在本轮审查里列出的那些验收项），这套机制
+目前完全不存在，而且这些值本质上是**应用需要能追踪、轮换、审计的服务器
+身份材料**，更适合走已有的 `Secret` 表机制，而不是新开一套"模板管理"
+体系。因此这里选择更简单的路径：**维持数据库/Secret 是唯一可变
+desired-state 来源这条铁律不变，把 Reality 身份材料的持久化缺口如实
+记录为"当前不合规、Phase 2B 必须解决"，而不是把模板拔高成一个新的、
+需要额外治理机制的 desired-state owner**。
+
+这不代表模板本身要被移除——protocol/listen/port 这类真正固定的基础
+设施接线信息继续留在模板里是合理的（这类内容变化时通常伴随一次有意识
+的运维操作，而不是"客户下单/退订"这种业务事件驱动的变化，用固定文件
+承载比每次查数据库更简单，也不违反铁律第 1 条的精神——铁律第 1 条要
+禁止的是"业务期望态的增量拼接"，不是"禁止一切非数据库配置输入"）。
 
 ### B. 数据流（DB → desired state → renderer → candidate）
 
@@ -312,17 +458,22 @@ short ID**，两者都是 Reality 协议里客户端配置需要固定下来的�
 
 ```
 GatewayRouteBinding (routing) ─────────────┐
-Subscription.accounting_user_id (匹配键)    ├─→ 期望态 DTO（需要扩展，见下）─→ renderer ─→ candidate
+Subscription.accounting_user_id (匹配键，*) ├─→ 期望态 DTO（需要扩展，见下）─→ renderer ─→ candidate
 EgressEndpoint (outbound 基础信息)          │
 EgressBinding/Secret (凭据引用)            ─┘
+
+  * 见事实三：这一列的持久化时机晚于 APPLY_GATEWAY 渲染发生的时刻，
+    且 GatewayRouteBinding.gateway_principal 当前写入值与模型/测试
+    契约期望值不一致——Phase 2B 必须先在候选 A/B/C 中选定收敛方向，
+    这张数据流图才算真正成立，本 ADR 不预先假设已经解决。
 ```
 
 不允许在这条链路的任何一环读取当前运行时 `config.json` 来补齐缺失字段。
-静态模板文件（inbound 骨架）可以作为 renderer 的一个**输入**（不是数据库，
-但也不是"当前运行时状态"，是部署时配置），只要 renderer 不依赖它保存
-任何"跨渲染必须保持一致"的状态（这正是事实五暴露的问题——如果 Reality
-私钥/shortIds 必须跨渲染稳定，它们就不能只活在这个无状态模板里，需要
-挪进数据库或 Secret 表）。
+静态模板文件仅限于 A2 收窄后的固定基础设施骨架（inbound
+protocol/listen/port）可以作为 renderer 的一个**输入**（不是数据库，
+但也不是"当前运行时状态"，是部署时配置）；Reality 身份材料
+（`privateKey`/`shortIds`）**不属于**这个允许范围，按 A2 的决定必须挪进
+数据库/Secret 表，不能继续以"模板输入"的名义留在无状态文件里。
 
 ### C. 合法删除语义
 
@@ -392,11 +543,14 @@ class DesiredRoutingState:
 ### G. 是否需要新增/修改 DB schema
 
 需要，但具体列留给 Phase 2B/后续 ADR 决定，本 ADR 只记录必要性和已知
-候选（**本轮已删除"`GatewayRouteBinding` 需要新增 username 字段"这一条
-——事实三核实后确认不需要**）：
+候选（**"`GatewayRouteBinding` 需要新增 username 字段"这一条候选仍然
+不需要**——事实三核实后确认 `Subscription.accounting_user_id` 已有
+canonical source；但本轮新增了两项和"字段一致性/写入时机"相关的候选，
+不是新的 schema 列，而是**代码/编排层面**需要 Phase 2B 解决的问题）：
 
 - Reality `privateKey`/`shortIds` 需要一个持久化位置（数据库列或 Secret
-  表条目），不能只靠静态模板文件（事实五）。
+  表条目），不能只靠静态模板文件（事实五、A2——A2 明确了这是按铁律第 1
+  条严格解读目前不合规的现状，不是可以接受的模板归属）。
 - 如果事实二最终确认 Marzban 不会自己动态管理 client（即缺失机制这个
   分支成立），需要一张新表或对 `GatewayRouteBinding` 的扩展来持久化
   client UUID/密码等认证材料，并通过 `Secret` 机制加密存储。
@@ -404,16 +558,26 @@ class DesiredRoutingState:
   schema，但需要在文档里明确写清楚"Marzban 如何、以什么频率、通过什么
   机制往共享的 `xray_config.json` 写入 client"这件事，目前没有任何
   现存文档说清楚过。
+- **（本轮新增）`GatewayRouteBinding.gateway_principal` 当前写入值和
+  模型/测试契约期望值不一致的问题**：不一定需要新增 schema 列，但
+  Phase 2B 必须先决定收敛方向（事实三候选 A/B/C 之一），否则"路由匹配键
+  从数据库哪里读"这件事本身就是模糊的。
+- **（本轮新增）`Subscription.accounting_user_id` 的持久化时机问题**：
+  同样不一定需要新增 schema 列（取决于选哪个候选），但如果 Phase 2B
+  选择候选 B（提前持久化时机），需要重新设计这段代码在
+  `CREATE_ACCOUNTING_USER` 之后、`APPLY_GATEWAY` 之前的事务/补偿语义。
 
 ## 约束
 
 1. 本 ADR 不实现任何代码、schema、迁移改动——纯粹是所有权边界和数据流
    的决策记录。
-2. 事实二收窄后的 Marzban client 管理机制问题、Reality 材料持久化位置、
-   Marzban 对应 `accounting` 还是 `transport` 的矛盾，三者均标记
+2. 事实二收窄后的 Marzban client 管理机制问题、Marzban 对应
+   `accounting` 还是 `transport` 的矛盾，均标记
    `UNVERIFIED / DECISION REQUIRED`，本 ADR 不替它们下结论；Phase 2B
-   开始前必须先有针对这三点的明确决定（可以是本 ADR 的后续修订，也可以
-   是新的 ADR）。
+   开始前必须先有针对这两点的明确决定（可以是本 ADR 的后续修订，也可以
+   是新的 ADR）。Reality 材料持久化位置**不再标记为 UNVERIFIED**——A2
+   已经决定"必须挪进数据库/Secret，不接受模板长期拥有"这个方向，具体
+   落在哪张表/哪个字段留给 Phase 2B，但方向已定。
 3. `ops/gateway/render_xray_routes.py` 现有的、已经在生产部署路径上跑的
    数据流（`GatewayRouteBinding` JOIN `EgressEndpoint`/`EgressBinding` →
    完整 outbound）在 Phase 2B 设计新的期望态 DTO 时应当作为参考实现，
@@ -421,6 +585,13 @@ class DesiredRoutingState:
 4. `TrafficRule` 是 Mihomo/forwarder 渲染器的真实数据源，Phase 2B 及
    之后任何工作都不得把它当作死代码删除或忽略；它和 Xray 期望态 DTO
    的扩展是两件不相关的事，不要混在一起改。
+5. **（本轮新增）Phase 2B 开始前，必须先在事实三的候选 A/B/C 中选定
+   `gateway_principal`/`accounting_user_id` 的收敛方向**——这不是可以
+   在写 DTO 的过程中顺便决定的细节，它直接决定期望态查询该读哪个字段、
+   该在编排的哪一步读。
+6. 静态模板（`xray_config.base.json`）今后只承载 A2 里收窄后的固定
+   基础设施骨架（inbound protocol/listen/port），不得把新的、会随部署/
+   客户变化的内容悄悄塞回模板来"绕开"这条边界。
 
 ## 考虑过的替代方案
 
@@ -436,21 +607,36 @@ class DesiredRoutingState:
    排除了这个候选和"共享同一份文件"候选的对等关系，继续断言"完全独立"
    与仓库内证据矛盾，否决——保留为收窄后的 UNVERIFIED（Marzban 是否/
    如何动态管理这份共享文件里的 client），不再假设两个独立实例。
+4. **（本轮新增）把静态模板正式定义为和数据库并列的合法 desired-state
+   来源，为它写覆盖范围/版本管理/漂移检测/DB-模板冲突优先级/验收测试**：
+   这条路径技术上可行，但需要新建一整套目前完全不存在的模板治理机制，
+   而 Reality 身份材料本质上更适合用已有的 `Secret` 表机制管理（可
+   追踪、可轮换、可审计），没有必要为了保留"模板"这个形式而新建一套
+   平行的治理体系，否决——见 A2。
 
 ## 安全影响
 
 - 事实五描述的 Reality `privateKey`/`shortIds` 轮换问题如果在生产环境
   发生，会导致存量客户连接失效——这是一个高优先级的、独立于 Phase 2A
   本身的运维风险，建议记录为单独的 Issue/TASK 尽快核实生产环境
-  `xray_config.base.json` 是否已经手动固定了这两个值。
-- 事实三已更正：route-match 用户名有明确的持久化来源
-  （`Subscription.accounting_user_id` + 确定性 fallback），这一条此前
-  记录的"可能导致客户连接静默失效"的安全风险**不再成立**，本轮予以
-  撤销。
+  `xray_config.base.json` 是否已经手动固定了这两个值。A2 进一步明确：
+  这不是"模板管理方式的选择问题"，而是"这两个值按铁律第 1 条本来就不
+  应该只活在模板里"，优先级应视为需要尽快解决，不是可以无限期搁置的
+  设计讨论。
+- 事实三已更正：route-match 用户名有一个明确的持久化来源
+  （`Subscription.accounting_user_id`），但**本轮（第三次修订）发现这个
+  来源的持久化时机晚于 `APPLY_GATEWAY` 渲染发生的时刻**，且
+  `GatewayRouteBinding.gateway_principal` 当前实际写入值与模型/测试
+  契约期望值不一致——"这一条安全风险不再成立"的说法需要撤回：如果
+  Phase 2B 不解决这两个问题就直接假设"读
+  `Subscription.accounting_user_id` 就能拿到正确的路由匹配键"，仍然
+  可能产生和实际客户连接不一致的 Xray 路由规则，具体后果取决于
+  Phase 2B 选择候选 A/B/C 中的哪一个来解决。
 
 ## 重新评估条件
 
 当事实二收窄后的问题（Marzban 是否/如何动态管理共享 `xray_config.json`
-里的 client）、"Marzban 对应哪个 provider 分类"这两个 UNVERIFIED 问题
-任一得到确认的答案时，重新评估并更新本 ADR 或提交后续 ADR，明确最终的
-schema 变更范围。
+里的 client）、"Marzban 对应哪个 provider 分类"、事实三的
+`gateway_principal`/`accounting_user_id` 收敛方向（候选 A/B/C）这几个
+问题任一得到确认的答案时，重新评估并更新本 ADR 或提交后续 ADR，明确
+最终的 schema 变更范围。

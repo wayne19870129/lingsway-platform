@@ -406,8 +406,12 @@ if self.app_env == "production" and self.accounting_provider == "marzban":
 
 ## 阶段二 A：数据库能否作为 Xray desired state 的唯一 source of truth
 （2026-09-11，只读设计/契约分析，未改动业务代码；同日第二次修订：独立
-审查指出并核实了四处事实错误 + 一处措辞问题，已全部修正，见下方各条
-"已更正"标注）
+审查指出并核实了四处事实错误 + 一处措辞问题，已全部修正；同日第三次
+修订：独立审查又指出并核实了三处 Major——铁律第 1 条与静态模板边界不清、
+`docs/10` 对 Reality 来源的描述仍不准确、`GatewayRouteBinding.
+gateway_principal` 设计意图判断错误 + `Subscription.accounting_user_id`
+持久化时机晚于渲染发生——已全部修正，完整证据见 ADR-014 的"A2"节和
+"事实三"节）
 
 按用户要求，阶段二先只回答一个问题："数据库能不能完整表达应用负责管理的
 Xray desired state"，不做 registry wiring、不做 provider 实现、不碰
@@ -431,16 +435,26 @@ Xray reload。完整分析和证据记录在新 ADR：
   启动后是否/如何动态把自己面板新增的用户写回这份共享文件"——这一点
   属于 Marzban 自身运行时行为，本仓库代码看不到，继续标记
   `UNVERIFIED / DECISION REQUIRED`，不猜测。
-- **（已更正）Xray 路由匹配用的 accounting username 已经有明确的持久化
-  来源**：`backend/app/api/admin.py::admin_confirm_payment` 把
+- **（已更正，第三次修订又补充了两处遗漏）Xray 路由匹配用的 accounting
+  username 有一个持久化来源，但持久化时机和字段一致性都还有缺口**：
+  `backend/app/api/admin.py::admin_confirm_payment` 把
   `request.username`（`f"sub-{order.id}"`，对 `order.id` 确定性推导）
-  写入 `Subscription.accounting_user_id`（`unique` 列）并 commit；
-  `GatewayRouteBinding` 通过 `subscription_id` 外键就能关联到这个已经
-  持久化的值，**不需要新增字段**。第一版这里"username 没有持久化在任何
-  表里""`GatewayRouteBinding` 需要新增字段"的结论是错的，已在 ADR-014
-  "事实三"改正，本文档同步删除这个缺口。`GatewayRouteBinding.
-  gateway_principal` 本身仍然不是 Xray client 身份（是 Webshare 出口
-  租户 ID，审计用途）——这一点第一版是对的，不变。
+  写入 `Subscription.accounting_user_id`（`unique` 列）并 commit——这个
+  canonical source 确实存在，第一版"username 没有持久化在任何表里"的
+  结论是错的，`GatewayRouteBinding` 也确实不需要新增字段来存它。但
+  **本轮独立审查又指出并核实了两处遗漏**：①`admin_confirm_payment` 是
+  在整个九步开通编排（`confirm_payment_and_provision`）全部跑完之后才
+  写入 `accounting_user_id`，而 `desired_routing_state()`（生成路由
+  期望态的地方）是在编排的第 7 步 `APPLY_GATEWAY` 执行的——**渲染发生
+  的时刻，这一列可能还是 `NULL`**，Phase 2B 不能假设它已经就绪；
+  ②`GatewayRouteBinding.gateway_principal` 的**模型 docstring**（"Maps
+  one accounting user principal..."）和**集成测试**
+  （`ensure_gateway_route_binding("marzban-user-1", dto)`）都期望这里
+  存的是 accounting principal，但**当前生产 writer**
+  （`desired_routing_state()`）实际写入的是 `tenant.tenant_id`（Webshare
+  出口租户 ID）——第一版把"当前 writer 的行为"当成"这个字段的设计意图"
+  来描述是错的，这是一处需要 Phase 2B 收敛的**实现不一致**，不是一个
+  已经想清楚的审计字段设计。详见 ADR-014"事实三"完整证据和候选 A/B/C。
 - **outbound 的连接细节（host/port/protocol/凭据）数据库层面是有的**
   （`EgressEndpoint`/`EgressBinding`/`Secret`，`ops/gateway/
   render_xray_routes.py::render_config()` 已经证明这条数据流跑得通，
@@ -449,11 +463,18 @@ Xray reload。完整分析和证据记录在新 ADR：
   `GatewayProvider` Protocol/provider 抽象层**——`XrayFileProvider.
   render()`（provider 抽象层的实现）完全没有用到这些信息，只产出没有
   连接细节的空壳 outbound。
-- **Reality `privateKey` 和 `shortIds` 都没有持久化位置**（已扩充：
-  第一版只记录了 privateKey，`shortIds` 同样从空模板生成、从不写回，
-  一并记录）：`_reality_settings()` 每次从静态模板文件生成新的
-  privateKey/shortIds，理论上每次渲染都可能轮换、破坏存量客户连接
-  （ADR-014"事实五"，这是静态阅读代码即可确认的缺陷，不是 UNVERIFIED）。
+- **Reality `privateKey` 和 `shortIds` 都没有持久化位置，且按
+  `AGENTS.md` 铁律第 1 条的严格解读，这是当前不合规的现状，不是可以
+  接受的"模板归属"**（已扩充两次：第一版只记录了 privateKey；第二次
+  修订补上 shortIds；本次第三次修订新增 ADR-014"A2"节，明确区分"可变
+  desired state"（必须有 DB/Secret canonical source）、"代码级固定安全
+  不变量"（允许硬编码）、"静态模板"（严格限定为不因客户/部署内容变化的
+  纯基础设施骨架，即 inbound protocol/listen/port）三类概念——Reality
+  `privateKey`/`shortIds` 属于第一类，不是第三类，目前却只活在无状态
+  模板里，是需要 Phase 2B 解决的不合规现状）：`_reality_settings()`
+  每次从静态模板文件生成新的 privateKey/shortIds，理论上每次渲染都可能
+  轮换、破坏存量客户连接（ADR-014"事实五"，这是静态阅读代码即可确认的
+  缺陷，不是 UNVERIFIED）。
 - **（已更正）`TrafficRule` 不是死代码**：`ops/forwarder/
   render_mihomo_config.py` 确实 import 并查询 `TrafficRule`（enabled
   过滤），`_render_traffic_rules()` 把它们渲染成 Mihomo 的 `rules`
@@ -483,8 +504,9 @@ Xray reload。完整分析和证据记录在新 ADR：
 
 | 类型 | 是否需要 | 说明 |
 |---|---|---|
-| DTO change（`DesiredRoutingState`/新增 DTO） | **需要** | 至少要能表达 outbound 连接细节（host/port/protocol/凭据引用）+ 路由匹配键（`Subscription.accounting_user_id`，已确认有持久化来源，不是新缺口）；inbound/client 是否需要取决于 ADR-014 收窄后的 `UNVERIFIED` 问题的答案 |
-| DB model/schema change | **可能需要**，具体列留给 Phase 2B（**已删除"`GatewayRouteBinding` 补 username 字段"这一条候选**——事实三核实后确认不需要） | 候选：Reality `privateKey`/`shortIds` 的持久化位置（新列或 `Secret` 表条目）；如果确认 Marzban 不会自己动态管理 client，需要新表存 client 认证材料 |
+| DTO change（`DesiredRoutingState`/新增 DTO） | **需要** | 至少要能表达 outbound 连接细节（host/port/protocol/凭据引用）+ 路由匹配键；inbound/client 是否需要取决于 ADR-014 收窄后的 `UNVERIFIED` 问题的答案 |
+| DB model/schema change | **可能需要**，具体列留给 Phase 2B（**"`GatewayRouteBinding` 补 username 字段"这一条候选仍然不需要**） | 候选：Reality `privateKey`/`shortIds` 的持久化位置（新列或 `Secret` 表条目，方向已由 ADR-014"A2"确定，不再是 UNVERIFIED）；如果确认 Marzban 不会自己动态管理 client，需要新表存 client 认证材料 |
+| 编排/时序 change（**本轮新增，不是 schema，是代码/编排层面**） | **需要** | `gateway_principal` 当前写入值和模型/测试契约期望值不一致，`accounting_user_id` 持久化时机晚于 `APPLY_GATEWAY` 渲染时刻——Phase 2B 必须先在 ADR-014 事实三的候选 A/B/C 中选定收敛方向，这不是"顺便决定的细节" |
 | query/adapter change | **需要** | 期望态查询逻辑需要参照 `render_xray_routes.py::_active_routes()` 已经跑通的 JOIN 逻辑，而不是从零设计；`SqlAlchemyProvisioningState.desired_routing_state()` 现有实现需要重新评估是否要挪到这条新数据流里 |
 | Xray renderer change | **需要** | `XrayFileProvider.render()` 需要能产出完整 outbound（不只是 tag），且要先解决 inbounds 是否属于它职责范围这个前提问题 |
 | validation/preservation change | **需要** | 按 ADR-014 的"合法删除语义"重新定义：校验候选与"本次从数据库计算出的期望态"一致 + 安全不变量成立，不是"候选是不是运行时当前配置的超集" |
@@ -493,24 +515,28 @@ Xray reload。完整分析和证据记录在新 ADR：
 
 **补齐数据库 → desired-state 的最小契约 + Xray renderer/校验护栏**，
 具体拆解为（Phase 2B 自己的 PR 里再细化，这里只定边界；本轮修正后步骤
-数量不变，内容按上面结论 1/3 的更正同步调整）：
+数量不变，内容按上面结论 1/3 的更正同步调整，新增①.5 这一步）：
 
 1. 先解决 ADR-014 收窄后的 `UNVERIFIED / DECISION REQUIRED`（Marzban
    是否/如何动态管理共享 `xray_config.json` 里的 client；Marzban 对应
    accounting 还是 transport）——这两点任一没有明确答案，后面的 DTO/
    schema 设计都是在猜。这一步本身可能需要跟运维/产品确认真实部署拓扑
-   或 Marzban 自身行为，不是纯代码分析能回答的。（route-match 用户名
-   持久化问题已在本轮解决，不再是阻塞项。）
-2. 在①有答案之后，扩展期望态 DTO，让它至少能表达完整 outbound（参照
-   `render_xray_routes.py` 已验证的字段形状）和路由匹配键
-   （`Subscription.accounting_user_id`）；按①的答案决定要不要加
-   inbound/client 的位置。
+   或 Marzban 自身行为，不是纯代码分析能回答的。
+1.5.（**本轮新增**）在 ADR-014 事实三的候选 A/B/C 中选定
+   `gateway_principal`/`accounting_user_id` 的收敛方向，解决"字段写入值
+   和契约不一致"+"持久化时机晚于渲染"这两个问题——这一步和①同样是
+   DTO/schema 设计能不能开始的前提，不能跳过直接进入②。
+2. 在①、①.5 有答案之后，扩展期望态 DTO，让它至少能表达完整 outbound
+   （参照 `render_xray_routes.py` 已验证的字段形状）和路由匹配键；按
+   ①的答案决定要不要加 inbound/client 的位置。
 3. 为 Reality `privateKey`/`shortIds` 和（如果需要）client 认证材料
-   设计持久化位置，走 `Secret` 表的加密存储机制。
+   设计持久化位置，走 `Secret` 表的加密存储机制（方向已定，见 ADR-014
+   "A2"）。
 4. 重写 preservation/校验逻辑为"候选与本次期望态一致 + 安全不变量"，
    替换掉现在"候选不能比运行时当前配置少任何东西"的旧语义。
 5. 为①~④分别补齐契约测试，覆盖合法删除、Reality 材料稳定性、
-   outbound 凭据正确性等场景。
+   outbound 凭据正确性、`gateway_principal`/`accounting_user_id` 收敛
+   方向等场景。
 6. **不在 Phase 2B 做**：`registry.py` wiring、生产环境启用、Xray
    reload——这些留给 Phase 2C。
 
@@ -529,8 +555,11 @@ registry wiring**。2A/2B/2C 不合并成一个阶段。
   `.env`、`/etc/lingsway/*.conf`，没有使用任何真实 secret/token。
 - 没有 reload 或调用 Xray/Mihomo，没有修改生产数据库。
 - 数据库现状：`INSUFFICIENT`；`DesiredRoutingState`：`INSUFFICIENT`
-  ——详细缺口清单见上方结论 1/2 和 ADR-014（route-match 用户名持久化
-  问题已解决，不再计入缺口）。
-- 下一步（Phase 2B）需要用户先确认 ADR-014 里收窄后的两个 `UNVERIFIED`
-  问题的真实答案（可能需要跟运维或产品确认部署拓扑/Marzban 行为），再
-  决定具体的 DTO/schema 改动范围。
+  ——详细缺口清单见上方结论 1/2 和 ADR-014（route-match 用户名的
+  canonical source 已确认存在，但持久化时机、`gateway_principal` 字段
+  一致性、Reality 材料是否允许留在静态模板这三点在本轮独立审查中被
+  重新核实并更正，具体见 ADR-014"事实三"和"A2"）。
+- 下一步（Phase 2B）需要先在 ADR-014 事实三的候选 A/B/C 中选定
+  `gateway_principal`/`accounting_user_id` 收敛方向，并确认 ADR-014
+  收窄后的两个 `UNVERIFIED` 问题的真实答案（可能需要跟运维或产品确认
+  部署拓扑/Marzban 行为），再决定具体的 DTO/schema 改动范围。

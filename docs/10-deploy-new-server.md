@@ -108,13 +108,24 @@ absent, Docker creates a directory at that path and the container fails before
 its process starts. A deployment must create file-typed runtime paths before
 `compose up`. The checked-in `xray_config.base.json` is intentionally only a
 skeleton: it is not runnable until the database renderer supplies valid
-outbounds, Reality values, and BLOCK routing. (Correction, TASK-T16 Phase
-2A / ADR-014: the renderer does not supply inbound `clients` — it inherits
-whatever `inbounds` the skeleton file already has, unchanged, and that
-skeleton's client list is empty. Whether and how a running Marzban process
-populates that shared file's `inbounds.settings.clients` at runtime is not
-established by this repository's code; see ADR-014 for the still-open
-question.)
+outbounds and BLOCK routing. (Correction, TASK-T16 Phase 2A / ADR-014,
+third revision: an earlier version of this paragraph also credited the
+renderer with supplying "Reality values" and inbound `clients` — neither
+is accurate. The renderer does not supply inbound `clients` at all — it
+inherits whatever `inbounds` the skeleton file already has, unchanged,
+and that skeleton's client list is empty; whether and how a running
+Marzban process populates that shared file's `inbounds.settings.clients`
+at runtime is not established by this repository's code, see ADR-014.
+Reality values are not database-sourced either — **current behavior**
+is: `dest`/`serverNames` come from the skeleton file if present, else
+from the `XRAY_REALITY_DEST`/`XRAY_REALITY_SERVER_NAME` env vars;
+`privateKey`/`shortIds` are generated on the spot by
+`_reality_settings()` whenever the skeleton's fields are empty, and the
+generated values are never written back to the skeleton file, so a
+fresh render can regenerate different values each time. This is a real
+gap, not a design choice: ADR-014 records it as needing a database/Secret
+canonical source in a future Phase 2B, which does not exist yet — do not
+read this paragraph as saying that persistence is already implemented.)
 
 The backend image also previously copied application source without installing
 the dependencies declared in `pyproject.toml`. That allowed image build to
@@ -171,10 +182,12 @@ an explicit `compose.socks.yml` override and is included only when
 
 The Xray skeleton finding was reviewed separately. Adding a guessed outbound
 to `infrastructure/marzban/xray_config.base.json` would hide the fact that
-user routes, Reality values, and BLOCK routing must come from the database
-renderer (inbound `clients` are not part of what the renderer supplies —
-see the correction above and ADR-014). The correct rule is therefore to
-render the full runtime config before stack-up. `40_stack_up.sh` now requires file-typed
+user routes and BLOCK routing must come from the database renderer (Reality
+values and inbound `clients` are not part of what the renderer sources from
+the database today — see the correction above and ADR-014 for the current
+skeleton/env/generated-on-the-spot behavior and the still-open persistence
+gap). The correct rule is therefore to render the full runtime config
+before stack-up. `40_stack_up.sh` now requires file-typed
 `xray_config.json` and `db.sqlite3`, parses the Xray JSON, and rejects an
 unrendered config with no outbounds or routing rules. It never injects a
 synthetic outbound. A fresh deployment must complete the database-backed
