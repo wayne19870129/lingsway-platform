@@ -18,15 +18,29 @@ concurrency:
 jobs:
   # Enforceable de-duplication gate, run before ever invoking Claude --
   # Issue #50 requires ignoring a duplicate delivery or an already-handled
-  # instruction, not just asking Claude nicely to notice. This only covers
-  # the PR-rework path (a comment on an existing PR). The dedup key is
-  # (PR number, PR's current head SHA, a hash of the triggering comment's
-  # own text) -- the SHA half catches a duplicate delivery or a repeated
-  # identical instruction against a commit nothing has changed on since;
-  # the comment-hash half means a genuinely different instruction on that
-  # same head SHA is NOT treated as a duplicate, since it hashes to a
-  # different key (an earlier version of this gate keyed on SHA alone and
-  # over-matched this case -- fixed per review).
+  # instruction, not just asking Claude nicely to notice, and requires this
+  # for BOTH the PR-rework path and the Issue-first path (an earlier
+  # version of this gate only covered the PR path and disclosed the
+  # Issue-first gap rather than closing it -- fixed per review, since
+  # disclosing a scope cut is not the same as being authorized to make it).
+  #
+  # The dedup key is always (target issue/PR number, a "state" component,
+  # a hash of the triggering comment's own normalized text):
+  #   - PR-comment trigger: state = the PR's current head SHA. A duplicate
+  #     delivery or a repeated identical instruction against a commit
+  #     nothing has changed on since hashes to the same key; a genuinely
+  #     different instruction on that same head does not, since the
+  #     instruction-hash component differs.
+  #   - Issue-first trigger: state = the fixed literal "issue" (no head SHA
+  #     exists yet). A duplicate delivery or repeated identical instruction
+  #     on the Issue itself is still caught; a different instruction is not.
+  # Comment text is normalized (whitespace runs collapsed to one space,
+  # then leading/trailing space trimmed) before hashing, so purely
+  # cosmetic differences (extra blank lines, a stray leading/trailing
+  # space) don't produce a different hash for what's really the same
+  # instruction -- an earlier version only collapsed runs without trimming
+  # the ends, which a leading/trailing space could still slip through
+  # (fixed per review).
   #
   # The completion marker is posted by the `claude` job itself, only after
   # its steps succeed -- not by this job before Claude even runs. Keying
@@ -34,16 +48,11 @@ jobs:
   # cancelled (concurrency.cancel-in-progress fires on every new event in
   # this group), timed-out, or failed run would leave a marker with no
   # actual work behind it, permanently skipping every later retry against
-  # that unchanged SHA (fixed per review). A genuinely concurrent duplicate
-  # is instead handled by `concurrency.cancel-in-progress` itself: the
-  # older run (which has not posted a completion marker yet) is cancelled
-  # outright, and only the newest run needs to reach the dedup check.
-  #
-  # This does NOT cover the Issue-first-trigger path (no PR/head SHA exists
-  # yet to key on) -- see TASK-T17 for why that side is left to the
-  # branch/PR-reuse check already in the prompt plus the genuine rarity of
-  # duplicate Issue-comment deliveries, not a persisted gate; that is a
-  # disclosed scope decision, not something this fix silently drops.
+  # that unchanged state (fixed per review). A genuinely concurrent
+  # duplicate is instead handled by `concurrency.cancel-in-progress`
+  # itself: the older run (which has not posted a completion marker yet)
+  # is cancelled outright, and only the newest run needs to reach the
+  # dedup check.
   dedup:
     if: |
       contains(github.event.comment.body, '@claude') &&
@@ -51,10 +60,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
+      issues: write
       pull-requests: write
     outputs:
       proceed: ${{ steps.check.outputs.proceed }}
       marker: ${{ steps.check.outputs.marker }}
+      target_number: ${{ steps.check.outputs.target_number }}
     env:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
@@ -65,23 +76,27 @@ jobs:
         run: |
           set -euo pipefail
           is_pr_comment="${{ github.event.issue.pull_request != null || github.event.pull_request != null }}"
-          if [ "$is_pr_comment" != "true" ]; then
-            echo "proceed=true" >> "$GITHUB_OUTPUT"
-            echo "Issue-context trigger; no head-SHA dedup key exists yet, proceeding."
-            exit 0
+          target_number="${{ github.event.issue.number || github.event.pull_request.number }}"
+          if [ "$is_pr_comment" = "true" ]; then
+            state=$(gh pr view "$target_number" --repo "$REPO" --json headRefOid --jq .headRefOid)
+          else
+            state="issue"
           fi
-          pr_number="${{ github.event.issue.number || github.event.pull_request.number }}"
-          head_sha=$(gh pr view "$pr_number" --repo "$REPO" --json headRefOid --jq .headRefOid)
-          # Normalize whitespace before hashing so trivial formatting
-          # differences don't dodge the duplicate-instruction match.
-          instruction_hash=$(printf '%s' "$COMMENT_BODY" | tr -s '[:space:]' ' ' | sha256sum | cut -c1-16)
-          marker="<!-- claude-done:${pr_number}:${head_sha}:${instruction_hash} -->"
+          # Collapse whitespace runs to one space, then trim the ends --
+          # tr alone leaves a single leading/trailing space behind when
+          # the original had leading/trailing whitespace.
+          instruction_hash=$(printf '%s' "$COMMENT_BODY" \
+            | tr -s '[:space:]' ' ' \
+            | sed -e 's/^ //' -e 's/ $//' \
+            | sha256sum | cut -c1-16)
+          marker="<!-- claude-done:${target_number}:${state}:${instruction_hash} -->"
           echo "marker=${marker}" >> "$GITHUB_OUTPUT"
-          existing=$(gh api "repos/${REPO}/issues/${pr_number}/comments" --paginate \
+          echo "target_number=${target_number}" >> "$GITHUB_OUTPUT"
+          existing=$(gh api "repos/${REPO}/issues/${target_number}/comments" --paginate \
             --jq '[.[] | select(.body // "" | contains("'"$marker"'"))] | length')
           if [ "$existing" -gt 0 ]; then
             echo "proceed=false" >> "$GITHUB_OUTPUT"
-            echo "Already completed this exact instruction for PR #$pr_number at head $head_sha -- duplicate/repeat, skipping."
+            echo "Already completed this exact instruction for #$target_number at state $state -- duplicate/repeat, skipping."
           else
             echo "proceed=true" >> "$GITHUB_OUTPUT"
           fi
@@ -129,11 +144,18 @@ jobs:
       # `dedup` job's check on the next event skips a true duplicate --
       # posted here (after success), not by `dedup` before Claude ran, so a
       # cancelled/timed-out/failed run never blocks a legitimate retry.
+      # Uses the plain issues-comments API (not `gh pr comment`/`gh issue
+      # comment`) since it works identically for an Issue number or a PR
+      # number -- both a PR-rework completion and an Issue-first-trigger
+      # completion post their marker through this same step.
       - if: success() && needs.dedup.outputs.marker != ''
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
+          TARGET_NUMBER: ${{ needs.dedup.outputs.target_number }}
           MARKER: ${{ needs.dedup.outputs.marker }}
-        run: gh pr comment "$PR_NUMBER" --repo "$REPO" --body "Claude finished processing this instruction. $MARKER"
+        run: |
+          set -euo pipefail
+          gh api "repos/${REPO}/issues/${TARGET_NUMBER}/comments" \
+            -f body="Claude finished processing this instruction. ${MARKER}"
