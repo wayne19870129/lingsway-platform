@@ -106,34 +106,35 @@ class XrayFileProvider:
             self._alert("Xray candidate rejected before reload")
             raise XrayValidationError("; ".join(validation.errors))
 
-        # `install()` and this first `reload()` are the only steps that can
-        # mutate disk/runtime state before any health signal exists ("pre-
-        # health mutating exception" in ADR-015 Part A). Either raising must
-        # never leave a bare exception propagating past this point: the
-        # candidate may already be on disk, the running Xray process may or
-        # may not have picked it up, and the only safe response is to
-        # attempt the exact same rollback path used for a post-reload health
-        # failure, then fail this call closed either way.
+        # `install()`, this first `reload()`, and the immediately-following
+        # `health()` call are the only steps that can mutate disk/runtime
+        # state -- or fail to confirm it -- before any health signal is
+        # available ("pre-health mutating exception" in ADR-015 Part A). Any
+        # of the three raising must never leave a bare exception propagating
+        # past this point: the candidate may already be on disk, the running
+        # Xray process may or may not have picked it up, and the only safe
+        # response is to attempt the exact same rollback path used for a
+        # post-reload health failure, then fail this call closed either way.
         try:
             self._runtime.install(candidate.content)
             self._runtime.reload()
+            self._audit("reload", {"version": candidate.version})
+            report = self._runtime.health()
         except Exception as exc:
             self._audit("apply_mutation_failed", {"error": str(exc)})
             self._rollback(
                 backup,
                 new_username=new_username,
                 failure_summary=(
-                    "Xray candidate install or reload raised an exception; "
-                    "backup restored"
+                    "Xray candidate install, reload, or post-reload health "
+                    "check raised an exception; backup restored"
                 ),
                 reload_error_message=(
-                    "candidate install or reload raised an exception before "
-                    "health could be checked"
+                    "candidate install, reload, or health check raised an "
+                    "exception before health could be confirmed"
                 ),
             )
 
-        self._audit("reload", {"version": candidate.version})
-        report = self._runtime.health()
         post_reload_errors = _preservation_errors(
             candidate.content,
             self._runtime.current(),

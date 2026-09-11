@@ -280,6 +280,48 @@ def test_first_reload_exception_triggers_full_rollback_and_fails_closed() -> Non
     assert raised.__context__ is original_error
 
 
+def test_main_post_reload_health_exception_triggers_full_rollback_and_fails_closed() -> None:
+    """The primary post-reload `health()` call (distinct from rollback's own
+    `health()` call) raising must also be treated as a pre-health mutating
+    exception: install() and reload() have already mutated state, and a
+    crashing health probe leaves that state unconfirmed. This must trigger
+    the same fail-closed rollback path as install()/reload() raising or a
+    health() result of False, never a bare propagated exception."""
+    original_error = RuntimeError("health probe crashed")
+    runtime = Runtime(health=[original_error, True])
+    disabled, alerts, audits, raised = _apply_with_recorders(
+        runtime,
+        config(users=("old-user", "new-user")),
+        new_username="new-user",
+    )
+
+    assert runtime.events == [
+        "backup",
+        "xray_test",
+        "install",
+        "reload:1",
+        "health",
+        "restore",
+        "reload:2",
+        "health",
+    ]
+    assert runtime.reload_calls == 2
+    assert disabled == ["new-user"]
+    assert len(alerts) == 1
+    assert audits == [
+        "backup_created",
+        "reload",
+        "apply_mutation_failed",
+        "backup_restored",
+        "rollback_reload",
+        "rollback_reverified",
+        "new_user_disabled",
+        "alert_sent",
+    ]
+    assert runtime._current == runtime._backup
+    assert raised.__context__ is original_error
+
+
 def test_rollback_restore_exception_fails_closed_without_claiming_recovery() -> None:
     """If `restore()` itself raises during rollback, the system state is
     unknown: this must never be reported as a successful rollback, must
