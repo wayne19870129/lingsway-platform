@@ -207,6 +207,80 @@ def test_place_order_rejects_when_no_dedicated_ip_available(db_session: Session)
     ) is None
 
 
+def test_place_order_rejects_when_only_mismatched_egress_endpoints_exist(
+    db_session: Session,
+) -> None:
+    """Endpoints that fail exactly one of the four allocate_endpoint filter
+    conditions must not be counted as available -- the precheck must match
+    that filter exactly, not a looser approximation of it. `capacity` isn't
+    varied here: the schema has `CheckConstraint("capacity = 1")`, so a
+    capacity mismatch can't exist as real data in the first place."""
+    actor = customer()
+    plan = Plan(
+        plan_code="MISMATCH_PLAN",
+        name="Mismatch Plan",
+        traffic_limit_bytes=50 * 1024**3,
+        duration_days=30,
+        price=Decimal("30.00"),
+        currency="USD",
+        route_group_code="DEFAULT",
+    )
+    db_session.add_all([actor, plan])
+    db_session.flush()
+
+    wrong_status = add_available_egress_endpoint(
+        db_session, code="EGRESS_WRONG_STATUS", port=21081
+    )
+    wrong_status.status = "MAINTENANCE"
+    wrong_purpose = add_available_egress_endpoint(
+        db_session, code="EGRESS_WRONG_PURPOSE", port=21082
+    )
+    wrong_purpose.purpose = "STAGING"
+    occupied = add_available_egress_endpoint(db_session, code="EGRESS_OCCUPIED", port=21083)
+    occupied.current_count = 1
+    db_session.flush()
+
+    with pytest.raises(HTTPException) as excinfo:
+        place_order(
+            OrderCreate(plan_id=plan.id, client_request_id="mismatch-request-001"),
+            db_session,
+            actor,
+        )
+    assert excinfo.value.status_code == 409
+    assert db_session.scalar(
+        select(Order).where(Order.client_request_id == "mismatch-request-001")
+    ) is None
+
+
+def test_place_order_precheck_does_not_mutate_egress_endpoint(db_session: Session) -> None:
+    actor = customer()
+    plan = Plan(
+        plan_code="NO_MUTATE_PLAN",
+        name="No Mutate Plan",
+        traffic_limit_bytes=50 * 1024**3,
+        duration_days=30,
+        price=Decimal("30.00"),
+        currency="USD",
+        route_group_code="DEFAULT",
+    )
+    db_session.add_all([actor, plan])
+    db_session.flush()
+    endpoint = add_available_egress_endpoint(db_session)
+    endpoint_id = endpoint.id
+
+    place_order(
+        OrderCreate(plan_id=plan.id, client_request_id="no-mutate-request-001"),
+        db_session,
+        actor,
+    )
+
+    db_session.expire_all()
+    persisted = db_session.get(EgressEndpoint, endpoint_id)
+    assert persisted is not None
+    assert persisted.status == "AVAILABLE"
+    assert persisted.current_count == 0
+
+
 def test_subscription_feed_has_complete_private_headers_and_ua_formats(
     db_session: Session,
 ) -> None:
