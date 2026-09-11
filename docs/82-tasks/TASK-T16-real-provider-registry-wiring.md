@@ -1005,3 +1005,27 @@ adapter、DTO/编排改动、独立的 reconciliation 工具/作业、
   fail-closed 行为。这是与 patch 可套用性验证（`apply_patch.sh
   --check`）互补、独立存在的第二层保证，两者含义不同，缺一不可。
   以上均已落地并通过验证（19/19 测试通过，含新增的 8 个）。
+
+  **第五轮修订（人工明确批准的 Path B：完整依赖锁）**：审查指出
+  `marzban-contract` job 只 pin 了 5 个 top-level 包，pip 仍会为
+  `anyio`/`httpcore`/`certifi`/`typing-extensions`/`pydantic-core`/
+  `pluggy`/`packaging` 等传递依赖解析当天可用的最新兼容版本，
+  "pinned contract" 门禁并不真正可复现。修复：新增
+  `infrastructure/marzban/patches/requirements-contract.in`
+  （5 个 top-level exact pin 的唯一权威记录）与
+  `requirements-contract.txt`（用 pip-tools 7.6.1 + Python 3.12.3 +
+  pip 26.2.1 执行
+  `pip-compile --generate-hashes --output-file=requirements-contract.txt
+  --no-header requirements-contract.in` 生成，全部 17 个直接+传递
+  依赖均精确 `==` 且带 sha256 hash，绝不手工编辑，变更 top-level pin
+  时必须重新生成）；CI 改为
+  `pip install --require-hashes -r requirements-contract.txt` 安装，
+  不再手工列出 5 个包。新增 `lock_consistency.py`（fail-closed 一致性
+  guard，纯标准库、无需先装依赖：top-level pin 缺失/版本不符、
+  出现非精确 `==` 的传递依赖行、缺 hash，均非零退出并汇报全部问题）
+  及 `tests/test_lock_consistency.py`（8 个测试，逐项覆盖上述四种
+  漂移场景 + 正常 lock 的基线）。CI 新增独立步骤先跑一致性 guard，
+  再用 `--require-hashes` 安装，安装/一致性任一失败直接使
+  `marzban-contract` job 失败，不允许 fallback 到无 hash 安装。
+  以上均已落地并在全新 venv 中端到端验证通过
+  （27/27 Marzban 测试全部通过，含新增的 8 个 lock 一致性测试）。

@@ -251,24 +251,86 @@ permanently pending on a PR that happens not to touch
 "Protect `main`" section for whether/how to add it to GitHub's required
 status checks.
 
-Every package the job installs — `pip` itself included — is pinned to an
-exact version (`pip==26.2.1`, `pydantic==2.10.4`, `fastapi==0.115.2`,
-`starlette==0.40.0`, `httpx==0.28.1`, `pytest==9.1.1`). A "pinned
-contract" gate that silently installs whatever the latest `httpx`/
-`pytest` happens to be on a given day isn't actually deterministic — a
-new release of either could turn this job red for reasons having nothing
-to do with Marzban or this repository's own changes. If that ever
-happens (or `pip install` itself fails to reach PyPI, or
-`verify_pinned_upstream.py` fails to reach `raw.githubusercontent.com`),
-treat it the same way as any other flaky-infrastructure failure per
-`CLAUDE.md`'s CI-red guidance: rule out a transient network/PyPI issue
-with at most one re-run before treating it as a real contract break:
-- A hash-mismatch or missing-formula/dependency `FAIL-CLOSED` diagnostic
-  from `verify_pinned_upstream.py` is a real contract break — the pinned
-  Marzban commit's content or this repo's recorded expectations actually
-  disagree — not infrastructure flake.
+## Reproducible dependency lock (`requirements-contract.in`/`.txt`, `lock_consistency.py`)
+
+Pinning only the five top-level packages this contract cares about
+(`pydantic`, `fastapi`, `starlette`, `httpx`, `pytest`) is not actually
+reproducible: `pip install pydantic==2.10.4 fastapi==0.115.2 ...` still
+lets pip resolve whatever the *latest compatible* version of every
+transitive dependency (`anyio`, `httpcore`, `certifi`,
+`annotated-types`, `typing-extensions`, `pydantic-core`, `pluggy`,
+`packaging`, `pygments`, `iniconfig`, `h11`, `idna`, ...) happens to be
+on the day CI runs. A new release of any of those can silently change
+what this "pinned contract" gate actually tests, with zero change to
+this repository.
+
+- **`requirements-contract.in`** records only the five top-level exact
+  pins this contract actually requires — the ones ADR-016/this README
+  already state Marzban was verified against.
+- **`requirements-contract.txt`** is the fully resolved lock: every one
+  of those five packages *and every transitive dependency they pull in*
+  (17 packages total as of this writing), each pinned to an exact
+  version with `--hash=sha256:...` entries. Generated with:
+
+  ```
+  pip-compile --generate-hashes --output-file=requirements-contract.txt \
+    --no-header requirements-contract.in
+  ```
+
+  using **pip-tools 7.6.1** under **Python 3.12.3** with **pip 26.2.1**.
+  **Never hand-edit `requirements-contract.txt`** — regenerate it with
+  the exact command above whenever a pin in `requirements-contract.in`
+  changes, the same way `vendor/upstream/` (removed) was never
+  hand-diffed. The generation command itself talks to PyPI, but CI never
+  re-runs it — CI's only authoritative input is the committed
+  `requirements-contract.txt`, so a routine CI run needs no PyPI
+  metadata resolution, only downloading the exact, already-decided
+  artifacts by hash.
+- **`lock_consistency.py`** is a fail-closed guard (stdlib only, no
+  installed dependencies needed) proving the committed lock hasn't
+  silently drifted from `requirements-contract.in` or lost its
+  guarantees: every top-level pin from the `.in` file must appear in the
+  lock at the same version (missing or version-mismatched → fail); every
+  single resolved entry (top-level and transitive alike) must be an
+  exact `==` pin (any other operator, or none → fail); every entry must
+  carry at least one `--hash=` (missing → fail, since
+  `--require-hashes` would otherwise silently accept an unverified
+  download for that one package). Run it directly:
+
+  ```
+  python infrastructure/marzban/patches/lock_consistency.py
+  ```
+
+  `tests/test_lock_consistency.py` covers each of those four failure
+  modes individually (plus multiple simultaneous failures, plus a
+  positive baseline against the real committed lock) via synthetic
+  fixtures, not just by trusting today's real lock to happen to be
+  broken or not.
+
+CI installs from the lock with `--require-hashes`:
+
+```
+python -m pip install --upgrade pip==26.2.1
+python -m pip install --require-hashes -r infrastructure/marzban/patches/requirements-contract.txt
+```
+
+`--require-hashes` makes pip refuse to install *anything* not listed in
+the lock with a matching hash — no unpinned/unverified fallback is
+possible. This solves version/artifact-content determinism, **not**
+network availability: it still needs to actually reach PyPI to download
+the pinned wheels, the same way `verify_pinned_upstream.py` still needs
+to reach `raw.githubusercontent.com`. If either of those network calls
+fails, or if a lock consistency or hash-verification failure occurs,
+treat it the same way as any other CI-red failure per `CLAUDE.md`'s
+guidance: rule out a transient network/PyPI issue with at most one
+re-run before treating it as real:
+- A `FAIL-CLOSED` diagnostic from `lock_consistency.py` or
+  `verify_pinned_upstream.py` is a real contract break — the committed
+  lock drifted from `requirements-contract.in`, or the pinned Marzban
+  commit's content/this repo's recorded expectations disagree — not
+  infrastructure flake.
 - A bare network/connection error (fetching from PyPI or
-  `raw.githubusercontent.com`) with no `FAIL-CLOSED` diagnostic at all is
+  `raw.githubusercontent.com`) with no such diagnostic at all is
   infrastructure flake — re-run once, and only escalate if it repeats.
 
 ## Explicitly out of scope here
