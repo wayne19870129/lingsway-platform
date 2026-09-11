@@ -1,10 +1,21 @@
 version: 2
 updates:
-  # Third-party GitHub Actions used in this repo are pinned to full commit
-  # SHAs (see .github/workflows/claude.yml) rather than mutable version
-  # tags, since some of them hold repo-write permissions and secrets.
-  # Dependabot still opens a PR when a newer version is available; that PR
-  # goes through normal review before merge, it is never auto-merged.
+  # Every third-party Action referenced anywhere under .github/workflows/
+  # is pinned to a full 40-character commit SHA with a trailing version
+  # comment (`# vX.Y.Z`), not a mutable tag -- see
+  # docs/82-tasks/TASK-T17-claude-code-github-action.md for why, and its
+  # "SHA 锁定退化事故" note for what happens when this isn't checked.
+  #
+  # Dependabot's documented behavior for an Action already pinned this way
+  # is to bump SHA-to-SHA (updating the version comment too), not to
+  # switch to a mutable tag. But that is Dependabot's behavior, not a
+  # guarantee this repository can enforce -- a human reviewer must still
+  # open every Dependabot PR under this ecosystem and confirm the new
+  # `uses:` line is still `owner/repo@<40-hex-char-sha> # vX.Y.Z`, not a
+  # bare tag, before merging it. This happened once already (PRs #44-#47,
+  # #49): those bumped several Actions that had never been SHA-pinned in
+  # the first place (only claude.yml was, before this fix) straight to
+  # mutable `@vN` tags, and were merged without that check catching it.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:

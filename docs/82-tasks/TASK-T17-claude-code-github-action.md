@@ -62,13 +62,36 @@ PR、自己推的返工 commit 完全不会跑 CI。缓解方式是给这三个�
 这一段全自动。不要把这个仍然存在的人工触发步骤,读成一个完整的
 审查→修复闭环。
 
+### SHA 锁定退化事故(Issue #50)
+
+`claude.yml` 是这个仓库唯一从一开始就把第三方 Action 锁定到完整 commit
+SHA 的工作流;`ci.yml`/`security.yml`/`risk-classify.yml`/
+`deploy-*.yml`/`release.yml` 当时用的都是普通的可变版本标签
+(`actions/checkout@v4` 这类),从未锁定过。`.github/dependabot.yml`
+(在 T18 里新建)只在注释里描述了"锁定到 SHA"这个仓库目标,但没有让
+Dependabot 反过来帮那些本来就没锁定的工作流补上 SHA——Dependabot 对
+已经是 SHA 格式的引用会保留 SHA 格式升级(bump SHA→SHA),但对本来就是
+裸标签的引用,只会bump 标签本身(`@v4` → `@v7`),不会主动改成 SHA 格式。
+结果是 PR #44–#47、#49(Dependabot 自动开的版本升级 PR)把这些本来就没
+锁定的工作流升级成了新的可变标签(`@v7`/`@v9`/`@v3`),而且被直接合并
+进了 `main`,没有人在合并前检查"这是不是把可变标签升级成了另一个可变
+标签"。Issue #50 要求的修复,是把 `.github/workflows/**` 里**全部**
+第三方 Action(不只是 `claude.yml` 里那两个)补上完整 SHA 锁定,并且给
+`dependabot.yml` 加一条人工核查规则,防止同样的事情再发生一次——具体
+SHA 来源和核实方式见对应 PR 描述。
+
 ## 约束
 
 - 只监听 `issue_comment`(`created`)和 `pull_request_review_comment`
   (`created`)两种事件,不额外加 `pull_request_review`、`issues`
   (新建时的 body/title 触发)等官方支持但本次未要求的触发面。
-- 用户是否有仓库写权限、是否是真人(非 bot)由 Action 自带的检查完成
-  (`Who can trigger runs`),不额外实现一遍。
+- 用户是否有仓库写权限由 Action 自带的检查完成(`Who can trigger runs`),
+  不额外实现一遍。是否是真人(非 bot)这一层,`claude.yml` 的 job 级
+  `if:` 额外加了 `github.event.comment.user.type != 'Bot'`——这不是重复
+  实现 Action 自己的检查,而是在 job 启动之前就把 bot 发的评论(CI 状态
+  通知、Work、这个 Action 自己之前的回复)排除掉,避免为一个不可能是真人
+  指令的评论真的跑起一次 job(Issue #50 明确要求"忽略 bot、自身消息",
+  以及降低无谓的 Actions 用量/token 消耗)。
 - 权限声明为完成任务所需的最小集合:`contents: write`、
   `pull-requests: write`、`issues: write`、`id-token: write`、
   `actions: read`。不加 `deployments`、`packages`、`administration` 等
