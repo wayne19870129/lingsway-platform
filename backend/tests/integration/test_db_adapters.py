@@ -13,6 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 import backend.app.models  # noqa: F401
+from backend.app.api.public import place_order
 from backend.app.core.database import Base, build_engine
 from backend.app.core.secrets import reveal_secret
 from backend.app.infra.provisioning_state import (
@@ -46,6 +47,7 @@ from backend.app.providers.base import (
     TenantDTO,
 )
 from backend.app.providers.forwarder.mihomo import MihomoForwarderProvider, MihomoRuntimeError
+from backend.app.schemas.public import OrderCreate
 from ops.forwarder.render_mihomo_config import render_mihomo_document
 
 
@@ -305,6 +307,67 @@ def test_ip_precheck_pass_does_not_prevent_authoritative_recheck_from_rejecting(
     # Order B must never be marked PAID off the back of a failed allocation.
     assert order_b.payment_status is PaymentStatus.UNPAID
     assert order_b.status is OrderStatus.PENDING
+
+
+def test_place_order_precheck_does_not_reserve_or_bind_the_endpoint(db: Session) -> None:
+    """TASK-T15: the order-time precheck is read-only. Calling place_order
+    (which runs the precheck and, on success, persists only the Order row)
+    must not change the EgressEndpoint it saw, and must not create an
+    EgressBinding -- binding only happens later, at confirm-payment time,
+    via SqlAlchemyProvisioningState.allocate_endpoint. EgressBinding has
+    MySQL-only generated columns, so this assertion needs the real MySQL
+    integration DB, unlike the sqlite-backed unit tests for this same
+    precheck.
+    """
+    customer = Customer(
+        customer_no="CUS-NOMUTATE-001",
+        email="nomutate@example.invalid",
+        password_hash="hash",
+    )
+    plan = Plan(
+        plan_code="NOMUTATE-PLAN",
+        name="No Mutate Plan",
+        traffic_limit_bytes=50 * 1024**3,
+        duration_days=30,
+        price="30.00",
+        currency="USD",
+        route_group_code="RG_NOMUTATE",
+    )
+    group = EgressGroup(code="EG-NOMUTATE", region="US")
+    db.add_all([customer, plan, group])
+    db.flush()
+    endpoint = EgressEndpoint(
+        group_id=group.id,
+        code="EGRESS_NOMUTATE_01",
+        provider_name="webshare",
+        host="proxy.example.invalid",
+        port=1080,
+        protocol="socks5",
+        credential_secret_ref="egress/nomutate/base",
+        status="AVAILABLE",
+        capacity=1,
+        current_count=0,
+        mihomo_listen_port=11091,
+    )
+    db.add(endpoint)
+    db.flush()
+    endpoint_id = endpoint.id
+
+    place_order(
+        OrderCreate(plan_id=plan.id, client_request_id="nomutate-request-001"),
+        db,
+        customer,
+    )
+
+    db.expire_all()
+    persisted = db.get(EgressEndpoint, endpoint_id)
+    assert persisted is not None
+    assert persisted.status == "AVAILABLE"
+    assert persisted.current_count == 0
+    assert (
+        db.scalar(select(func.count()).select_from(EgressBinding))
+        == 0
+    )
 
 
 @dataclass

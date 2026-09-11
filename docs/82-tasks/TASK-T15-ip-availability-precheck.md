@@ -32,49 +32,55 @@ IP 可用性检查仅存在于旧 `confirm_payment_and_provision` 中，且受 `
 - 确认付款阶段的二次 IP 可用性校验仍然存在。
 - 不引入自动清理或历史 `PAID` / `PROVISION_FAILED` 对账逻辑。
 
-## 现状复核（2026-09-10）与实现建议
+## 现状复核（2026-09-11,Issue #52)
 
-`backend/app/api/public.py` 的 `place_order`（约第 118-168 行）目前只调用
-`ensure_capacity()` 校验 Webshare 侧的 GB 额度，完全没有查询
-`EgressEndpoint` 表，确认本任务尚未开始。
+**本任务的核心实现已经完成,不是"尚未开始"**(这份文档在 2026-09-10 写下
+的"现状复核"一节,当时如实记录了那个时间点的真实状态,但后续一次会话已经
+把预检实现并合并进 `main`,这份文档没有跟着同步更新——Issue #52 在这一节
+把它改成准确的当前状态)。
 
-真正的“确认付款时二次校验”已经存在，位于
-`backend/app/infra/provisioning_state.py` 的
-`SqlAlchemyProvisioningState.allocate_endpoint`（约第 59-77 行），条件是：
-
-```python
-EgressEndpoint.status == "AVAILABLE",
-EgressEndpoint.purpose == "PRODUCTION",
-EgressEndpoint.capacity == 1,
-EgressEndpoint.current_count == 0,
-```
-
-且用 `with_for_update()` 加锁后原子分配。**这段代码不用改，也不要重复
-加锁**——本任务只是在下单这一步补一个更早的只读提示，让用户在真正没有
-IP 的时候不用走完下单流程才发现失败。
-
-建议的新增只读预检，条件应与上面完全一致（不要引入按 `route_group_code`
-/ `EgressGroup` 分组的新过滤逻辑——当前 `allocate_endpoint` 本身就是全局
-分配，不分组，预检若加上分组过滤反而会造成“预检通过、确认付款却分配到
-别的池子”的不一致）：
+`backend/app/api/public.py` 的 `place_order` 现在在 `ensure_capacity()`
+校验之后、`db.add(order)` 之前,有一段只读的 `EgressEndpoint` 库存查询:
 
 ```python
-has_ip = db.scalar(
-    select(func.count()).select_from(EgressEndpoint).where(
+available_ip_count = db.scalar(
+    select(func.count())
+    .select_from(EgressEndpoint)
+    .where(
         EgressEndpoint.status == "AVAILABLE",
         EgressEndpoint.purpose == "PRODUCTION",
         EgressEndpoint.capacity == 1,
         EgressEndpoint.current_count == 0,
     )
-) > 0
+)
+has_available_ip = (available_ip_count or 0) > 0
+if not has_available_ip:
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail="No dedicated egress IP is currently available",
+    )
 ```
 
-放在 `ensure_capacity` 校验之后、`db.add(order)` 之前；没有可用 IP 时返回
-`409`（跟容量不足复用同一状态码更一致），`detail` 说明是 IP 库存不足而
-非流量额度不足，方便前端/客服区分。
+条件和 `SqlAlchemyProvisioningState.allocate_endpoint`（
+`backend/app/infra/provisioning_state.py`）的授权分配条件逐字一致,没有引入
+`route_group_code`/`EgressGroup` 分组过滤,`allocate_endpoint` 本身的
+`with_for_update()` 加锁分配逻辑完全没有改动。
 
-测试可以直接复用 `backend/tests/integration/test_db_adapters.py` 里已有
-的 `EgressEndpoint` fixture 写法（约第 101-116 行，`status="AVAILABLE"`,
-`capacity=1`, `current_count=0`），以及 `backend/tests/unit/test_domain.py`
-里现有的 mock provisioning state 写法，构造“预检通过但确认付款时已被占用”
-的并发场景。
+Issue #52 核实这段实现之后,发现验收标准要求的测试覆盖里,有两项此前没有
+补上,本次一并补齐:
+
+- `backend/tests/unit/test_order_subscription_api.py::test_place_order_rejects_when_only_mismatched_egress_endpoints_exist`——
+  分别构造"状态不对""purpose 不对""current_count 不为 0"三种单独不满足
+  条件的 endpoint,验证预检不会误判为可用(`capacity` 因为有
+  `CheckConstraint("capacity = 1")` 约束,现实中不可能出现不等于 1 的数据,
+  没有单独测)。
+- `backend/tests/unit/test_order_subscription_api.py::test_place_order_precheck_does_not_mutate_egress_endpoint`
+  和 `backend/tests/integration/test_db_adapters.py::test_place_order_precheck_does_not_reserve_or_bind_the_endpoint`——
+  验证预检真的是只读:`EgressEndpoint.status`/`current_count` 在下单前后
+  不变;后者额外验证 `place_order` 不会创建任何 `EgressBinding` 行(这个表
+  用了 MySQL-only 的生成列 SQL,断言这一点必须在真实 MySQL 集成测试里做,
+  sqlite 单测建不出这张表)。
+
+已有的、覆盖"预检通过但确认付款时已被占用"并发场景的
+`test_ip_precheck_pass_does_not_prevent_authoritative_recheck_from_rejecting`
+（`backend/tests/integration/test_db_adapters.py`）本次未改动,继续通过。
