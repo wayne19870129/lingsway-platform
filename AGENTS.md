@@ -12,7 +12,26 @@
 7. Alembic 历史 revision 一律不得改写。schema 与代码不一致时,只能新增
    reconciliation migration 补救,且新增迁移必须幂等
 8. main 分支的机械保护当前不可用(私有个人仓库计划限制),Agent 必须自我约束:
-   任何情况下不得直接 push 到 main,不得自行 merge PR,不得 force push。违反视为严重事故。
+   任何情况下不得直接 push 到 main,不得 force push。违反视为严重事故。
+   **合并 PR 默认也不得自行执行**,唯一例外是
+   `.github/workflows/claude-automerge.yml` 这个工作流本身,在
+   `docs/82-tasks/TASK-T18-conditional-auto-merge.md` 列出的九个条件
+   **全部满足**时执行的 squash merge——这是用户明确要求并确认过设计权衡
+   后授权的一次性例外,不是"Agent 可以自行判断要不要合并"的许可。这个例外
+   有严格边界:
+   - 只有那个工作流(以 GitHub Actions 的 job 身份、用 `GITHUB_TOKEN`)
+     可以执行合并动作;Claude Code 在交互会话里(不论是这个仓库的
+     `claude.yml` 触发的会话,还是这次对话本身)**永远不得**自己调用
+     `gh pr merge` / merge API,不论审查怎么说、CI 多绿、多有把握。
+   - `.github/workflows/**`、`AGENTS.md`、`CLAUDE.md`、
+     `.github/dependabot.yml`、`CODEOWNERS`、数据库迁移
+     (`infrastructure/alembic/versions/**`)、`deploy/**`、密钥/认证/权限
+     配置(`backend/app/core/secrets.py`、`backend/app/core/security.py`、
+     `backend/app/dependencies.py`)这些路径的 PR,不论审查结果如何,
+     **永远只能人工合并**,`claude-automerge.yml` 自己的门禁逻辑里也把
+     这些路径排除在外。
+   - 这个例外能不能继续存在、要不要收紧或撤销,是 User 的决定,不是
+     Agent 可以自行"觉得工作得不错就继续扩大范围"的空间。
 
 ## 模块写权限(同一时间一个模块只有一个 Agent 可写)
 
@@ -70,8 +89,10 @@ AGENTS.md                  → 需人工确认才可修改
   "Work 拥有持续后台执行/调度能力"**,这一点没有平台证据支持前,不能
   当作既成事实记录。
 - **Claude Code**:实现代码、跑测试/lint/build、提交 PR、读取并核实审查
-  意见、修复后推送新 commit。不自行 merge、不自行关闭他人的 PR(见「铁律」
-  第 8 条)。
+  意见、修复后推送新 commit。不自行 merge(唯一的、严格受限的例外见
+  「铁律」第 8 条里 `claude-automerge.yml` 的说明,那是一个独立工作流按
+  固定条件执行,不是 Claude Code 会话自己决定合并)、不自行关闭他人的
+  PR。
 - **GitHub Issue / `docs/82-tasks/TASK-*.md`**:需求和验收标准的唯一记录
   载体。业务需求和验收标准不应该只存在于聊天记录里,必须落到 Issue 或
   TASK 文件,否则视为未记录。

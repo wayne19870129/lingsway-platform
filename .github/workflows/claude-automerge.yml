@@ -1,0 +1,189 @@
+name: Claude auto-merge gate
+
+# Conditionally squash-merges a pull request once ChatGPT Work has given an
+# explicit PASS verdict on the PR's *current* head SHA, all check runs on
+# that SHA are green, and the PR does not touch this repo's automation
+# trust boundary (workflows, AGENTS.md/CLAUDE.md, Dependabot/CODEOWNERS,
+# deploy/secrets/auth config, or database migrations).
+#
+# See docs/82-tasks/TASK-T18-conditional-auto-merge.md for the full design,
+# the accepted residual risks (this gate does text + head-SHA matching on
+# the review comment, not cryptographic author verification -- Work and
+# any human both post as the same GitHub account here), and why several
+# gates fail silently (no PR comment) rather than posting on every event.
+#
+# This workflow never checks out or runs the PR's own code -- it only
+# calls the GitHub API/CLI -- so a malicious PR branch cannot turn this
+# workflow's write permissions against the repository.
+
+on:
+  issue_comment:
+    types: [created]
+  check_suite:
+    types: [completed]
+
+concurrency:
+  group: claude-automerge-${{ github.event.issue.number || (github.event.check_suite.pull_requests && github.event.check_suite.pull_requests[0].number) || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  checks: read
+
+jobs:
+  gate:
+    if: |
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request != null) ||
+      (github.event_name == 'check_suite' && github.event.check_suite.pull_requests[0] != null)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      REPO_OWNER: ${{ github.repository_owner }}
+      PR_NUMBER: ${{ github.event.issue.number || github.event.check_suite.pull_requests[0].number }}
+    steps:
+      - name: Evaluate merge gate
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          repo_name="${REPO#*/}"
+          echo "Evaluating PR #$PR_NUMBER in $REPO"
+
+          pr=$(gh pr view "$PR_NUMBER" --repo "$REPO" \
+            --json number,state,isDraft,mergeable,headRefOid,headRefName,labels,body)
+          state=$(jq -r '.state' <<<"$pr")
+          if [ "$state" != "OPEN" ]; then
+            echo "PR is $state, nothing to do."
+            exit 0
+          fi
+
+          head_sha=$(jq -r '.headRefOid' <<<"$pr")
+          is_draft=$(jq -r '.isDraft' <<<"$pr")
+          mergeable=$(jq -r '.mergeable' <<<"$pr")
+
+          marker_merged="<!-- claude-automerge:merged:${head_sha} -->"
+          marker_blocked_prefix="<!-- claude-automerge:blocked:"
+
+          all_comments=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --paginate)
+
+          # Bail out fast if we've already recorded a decision for this exact
+          # head SHA (idempotency across repeated check_suite events).
+          if jq -e --arg m "$marker_merged" '[.[] | select(.body | contains($m))] | length > 0' <<<"$all_comments" >/dev/null; then
+            echo "Already merged/recorded at this head SHA."
+            exit 0
+          fi
+
+          # --- Locate Work-format reviews: "## Verdict" followed by PASS or
+          # NEEDS_CHANGES, posted by the repository owner's account. Text +
+          # SHA matching only, by explicit product decision -- see TASK-T18.
+          work_comments=$(jq -c --arg owner "$REPO_OWNER" '
+            [ .[] | select(.user.login == $owner and .author_association == "OWNER")
+                  | select(.body | test("(^|\n)##\\s*Verdict\\s*\n\\s*(PASS|NEEDS_CHANGES)"))
+                  | { id, created_at, body,
+                      verdict: (.body | capture("(^|\n)##\\s*Verdict\\s*\n\\s*(?<v>PASS|NEEDS_CHANGES)").v),
+                      sha: (.body | capture("(?<sha>[0-9a-f]{40})"; "i").sha // "") } ]
+          ' <<<"$all_comments")
+
+          needs_changes_rounds=$(jq '[.[] | select(.verdict == "NEEDS_CHANGES")] | length' <<<"$work_comments")
+          echo "NEEDS_CHANGES rounds so far: $needs_changes_rounds"
+
+          if [ "$needs_changes_rounds" -gt 3 ]; then
+            block_marker="${marker_blocked_prefix}round-cap:${head_sha} -->"
+            if ! jq -e --arg m "$block_marker" '[.[] | select(.body | contains($m))] | length > 0' <<<"$all_comments" >/dev/null; then
+              body=$(printf 'Automatic rework rounds exceeded the 3-round cap defined in CLAUDE.md (%s NEEDS_CHANGES rounds recorded). Not auto-merging. A human needs to look at this PR directly.\n\n%s\n' "$needs_changes_rounds" "$block_marker")
+              gh pr comment "$PR_NUMBER" --repo "$REPO" --body "$body"
+            fi
+            exit 0
+          fi
+
+          latest_pass=$(jq -c '[.[] | select(.verdict == "PASS")] | sort_by(.created_at) | last // empty' <<<"$work_comments")
+          if [ -z "$latest_pass" ]; then
+            echo "No PASS verdict recorded yet."
+            exit 0
+          fi
+          # If a NEEDS_CHANGES review is newer than the latest PASS, the PASS
+          # is superseded -- do not merge on stale approval.
+          latest_pass_time=$(jq -r '.created_at' <<<"$latest_pass")
+          newer_needs_changes=$(jq --arg t "$latest_pass_time" '[.[] | select(.verdict == "NEEDS_CHANGES" and .created_at > $t)] | length' <<<"$work_comments")
+          if [ "$newer_needs_changes" -gt 0 ]; then
+            echo "A NEEDS_CHANGES review is newer than the latest PASS; not merging."
+            exit 0
+          fi
+
+          pass_sha=$(jq -r '.sha' <<<"$latest_pass")
+          if [ -z "$pass_sha" ] || [ "$pass_sha" != "$head_sha" ]; then
+            echo "PASS review references SHA '$pass_sha', current head is '$head_sha' -- stale, not merging."
+            exit 0
+          fi
+
+          if [ "$is_draft" = "true" ]; then
+            echo "PR is a draft."
+            exit 0
+          fi
+          if [ "$mergeable" != "MERGEABLE" ]; then
+            echo "PR is not cleanly mergeable (mergeable=$mergeable)."
+            exit 0
+          fi
+
+          blocking_labels=$(jq -r '[.labels[].name | select(test("do-not-merge|blocked|security-review-required"; "i"))] | length' <<<"$pr")
+          if [ "$blocking_labels" -gt 0 ]; then
+            echo "PR carries a blocking label."
+            exit 0
+          fi
+
+          # --- Protected automation-trust-boundary paths (never auto-merged,
+          # regardless of Work's verdict -- always human merge).
+          changed_files=$(gh pr diff "$PR_NUMBER" --repo "$REPO" --name-only)
+          protected_pattern='^(\.github/workflows/|\.github/actions/|AGENTS\.md$|CLAUDE\.md$|\.github/dependabot\.yml$|CODEOWNERS$|\.github/CODEOWNERS$|infrastructure/alembic/versions/|deploy/|backend/app/core/secrets\.py$|backend/app/core/security\.py$|backend/app/dependencies\.py$)'
+          if grep -qE "$protected_pattern" <<<"$changed_files"; then
+            block_marker="${marker_blocked_prefix}protected-path:${head_sha} -->"
+            if ! jq -e --arg m "$block_marker" '[.[] | select(.body | contains($m))] | length > 0' <<<"$all_comments" >/dev/null; then
+              touched=$(grep -E "$protected_pattern" <<<"$changed_files")
+              body=$(printf 'This PR touches a path this repository never auto-merges, regardless of review verdict:\n\n```\n%s\n```\n\nRequires a human merge. Not auto-merging.\n\n%s\n' "$touched" "$block_marker")
+              gh pr comment "$PR_NUMBER" --repo "$REPO" --body "$body"
+            fi
+            exit 0
+          fi
+
+          # --- Unresolved review threads.
+          unresolved=$(gh api graphql -f query='
+            query($owner:String!,$name:String!,$number:Int!){
+              repository(owner:$owner,name:$name){
+                pullRequest(number:$number){
+                  reviewThreads(first:100){ nodes { isResolved } }
+                }
+              }
+            }' -F owner="$REPO_OWNER" -F name="$repo_name" -F number="$PR_NUMBER" \
+            --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length')
+          if [ "$unresolved" -gt 0 ]; then
+            echo "$unresolved unresolved review thread(s)."
+            exit 0
+          fi
+
+          # --- All check runs on this exact head SHA must be green.
+          check_runs=$(gh api "repos/${REPO}/commits/${head_sha}/check-runs" --paginate --jq '.check_runs')
+          total=$(jq 'length' <<<"$check_runs")
+          if [ "$total" -eq 0 ]; then
+            echo "No check runs reported yet for this SHA."
+            exit 0
+          fi
+          not_completed=$(jq '[.[] | select(.status != "completed")] | length' <<<"$check_runs")
+          if [ "$not_completed" -gt 0 ]; then
+            echo "$not_completed check run(s) still in progress."
+            exit 0
+          fi
+          bad=$(jq '[.[] | select(.conclusion != "success" and .conclusion != "skipped" and .conclusion != "neutral")] | length' <<<"$check_runs")
+          if [ "$bad" -gt 0 ]; then
+            echo "$bad check run(s) did not succeed."
+            exit 0
+          fi
+
+          echo "All gates passed for PR #$PR_NUMBER at $head_sha. Squash-merging."
+          gh pr merge "$PR_NUMBER" --repo "$REPO" --squash --delete-branch --match-head-commit "$head_sha"
+
+          body=$(printf 'Auto-merged via claude-automerge.yml: ChatGPT Work PASS on head `%s` matched the PR current head, all check runs on that SHA were green, the PR touched no automation-trust-boundary path, and there were no unresolved review threads, blocking labels, or draft/conflict state. Squash-merged and deleted the branch.\n\n%s\n' "$head_sha" "$marker_merged")
+          gh pr comment "$PR_NUMBER" --repo "$REPO" --body "$body"

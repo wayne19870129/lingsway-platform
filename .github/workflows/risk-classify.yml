@@ -3,6 +3,17 @@ name: Risk classification
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+  # GITHUB_TOKEN-authored PRs/pushes (from claude.yml) don't trigger
+  # pull_request events, so claude.yml re-runs this via
+  # `gh workflow run risk-classify.yml --ref <branch> -f pull_number=<N>`
+  # after creating/updating a PR. pull_number substitutes for the payload's
+  # pull_request object, which workflow_dispatch runs don't receive.
+  workflow_dispatch:
+    inputs:
+      pull_number:
+        description: Pull request number to classify
+        required: true
+        type: number
 
 permissions:
   contents: read
@@ -17,7 +28,9 @@ jobs:
         with:
           script: |
             const { owner, repo } = context.repo;
-            const pullNumber = context.payload.pull_request.number;
+            const pullNumber = context.payload.pull_request
+              ? context.payload.pull_request.number
+              : Number(context.payload.inputs.pull_number);
             const files = await github.paginate(github.rest.pulls.listFiles, {
               owner,
               repo,

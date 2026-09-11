@@ -25,7 +25,14 @@ jobs:
       pull-requests: write
       issues: write
       id-token: write
-      actions: read
+      # write (not read) so this job can run `gh workflow run ci.yml` /
+      # security.yml / risk-classify.yml after pushing -- see the
+      # workflow_dispatch additions on those three files and
+      # docs/82-tasks/TASK-T18-conditional-auto-merge.md. Needed because
+      # GITHUB_TOKEN-authored pushes/PRs don't trigger pull_request/push
+      # events (GitHub's anti-recursion rule), so those workflows would
+      # otherwise never run against Claude's own commits.
+      actions: write
     steps:
       # Pinned to a reviewed commit SHA, not a mutable tag: both actions get
       # repo-write permissions and, for claude-code-action, the
@@ -37,8 +44,12 @@ jobs:
           fetch-depth: 1
 
       - uses: anthropics/claude-code-action@0a8d3c9443bbff909ab973b6a17a340b913f229f # v1
+        env:
+          # Lets `gh` (and hence `gh pr create` / `gh workflow run`) invoked
+          # from Claude's shell tool authenticate as this job's own token.
+          GH_TOKEN: ${{ github.token }}
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           claude_args: |
             --max-turns 30
-            --append-system-prompt "This repository's AGENTS.md and CLAUDE.md govern how you work here and take precedence over convenience. Never merge, approve, or close a pull request. Never trigger, approve, or perform a production deployment (this repository's deploy-*.yml workflows are manual workflow_dispatch only -- do not attempt to invoke them). ${{ (github.event.pull_request != null || github.event.issue.pull_request != null) && 'This trigger is a comment on an existing pull request: push any fix directly to that pull request''s current branch (already checked out). Never open a second pull request for the same task -- this repository requires one task, one PR.' || 'This trigger is a comment on a GitHub Issue, not a pull request: implement the request on a new branch. This action does not auto-create a pull request by default -- it pushes the branch and surfaces its own link to a pre-filled PR-creation page. Do not attempt to force-create a pull request through a separate API call; let that normal flow produce the link for a human to click.' }}"
+            --append-system-prompt "This repository's AGENTS.md and CLAUDE.md govern how you work here and take precedence over convenience. Never merge, approve, or close a pull request yourself; merging happens only through this repository's separate claude-automerge.yml gate workflow acting on a genuine ChatGPT Work PASS, or through a human -- you must never call the merge API or gh pr merge yourself. Never write or restate the exact review format 'Critical / Major / Minor / Checks performed / Verdict: PASS' as if it were your own output, and never claim a Work review said PASS when it did not; the automated merge gate trusts that exact format literally. Never trigger, approve, or perform a production deployment (this repository's deploy-*.yml workflows are manual workflow_dispatch only; do not invoke them). After every commit you push, GitHub will not automatically re-run CI for it, because this job authenticates as the built-in GITHUB_TOKEN and GitHub does not fire pull_request or push events for commits or PRs created by that token. So after each push, explicitly run: gh workflow run ci.yml --ref YOUR_BRANCH and gh workflow run security.yml --ref YOUR_BRANCH, and once a pull request exists for that branch also run gh workflow run risk-classify.yml --ref YOUR_BRANCH -f pull_number=PR_NUMBER. ${{ (github.event.pull_request != null || github.event.issue.pull_request != null) && 'This trigger is a comment on an existing pull request: push any fix directly to that pull request current branch, which is already checked out. Never open a second pull request for the same task.' || 'This trigger is a comment on a GitHub Issue, not a pull request. Before doing anything else, check whether a pull request or branch already exists for this Issue (for example, gh pr list --search referencing this Issue number by title or body, or a remote branch you would previously have used for it); if one exists, check it out and push your changes there instead of starting over, and never open a second pull request for the same Issue. If none exists, implement the request on a new branch, push it, then create a non-draft pull request yourself with gh pr create targeting the repository default branch -- do not rely on any auto-generated PR-creation link and do not leave the PR unopened. The PR body you write must contain separate sections for: which Issue or TASK this implements; a summary of the change; the acceptance criteria; the actual test, lint, and build output you really ran, stated honestly including anything you could not run and why; and any known gaps or risks.' }}"

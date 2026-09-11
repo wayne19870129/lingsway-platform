@@ -3,6 +3,16 @@
 风险等级:medium(新增 CI 触发面 + 仓库写权限授予给 Action,但不涉及生产
 凭据、不涉及部署、不涉及数据库)
 
+**范围更新(见 `TASK-T18-conditional-auto-merge.md`)**:下面"关于'开 PR'
+这一步"这段描述的是**本任务(T17)范围内**、`@claude` 首次接入时的默认
+行为。用户后续在同一个 PR(#43)里明确要求把自动创建 PR(而不是只给链接)
+也做出来,这个能力已经在 T18 里实现——`claude.yml` 的提示词现在会让
+Claude 在 Issue 场景下自己用 `gh pr create` 开出非 Draft PR。T17 这里
+保留"官方 Action 默认不自动开 PR"这句事实描述本身没有错(那确实是
+`anthropics/claude-code-action` 本身、不叠加任何自定义步骤时的行为),
+但不要把它读成"这个仓库最终也不自动开 PR"——完整的当前行为、以及为什么
+要做这个改动,以 T18 为准。
+
 ## 目标
 
 在 `wayne19870129/lingsway-platform` 里接入官方
