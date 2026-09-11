@@ -1,15 +1,15 @@
 # Default ownership
-* @arrickcherney-ops
+* @wayne19870129
 
-/backend/app/providers/ @arrickcherney-ops
-/backend/app/domain/ @arrickcherney-ops
-/backend/app/api/ @arrickcherney-ops
-/frontend/ @arrickcherney-ops
-/ops/ @arrickcherney-ops
-/infrastructure/ @arrickcherney-ops
-/deploy/ @arrickcherney-ops
-/docs/80-decisions/ @arrickcherney-ops
-/docs/81-reviews/ @arrickcherney-ops
-/docs/82-tasks/ @arrickcherney-ops
-/ARCHITECTURE.md @arrickcherney-ops
-/AGENTS.md @arrickcherney-ops
+/backend/app/providers/ @wayne19870129
+/backend/app/domain/ @wayne19870129
+/backend/app/api/ @wayne19870129
+/frontend/ @wayne19870129
+/ops/ @wayne19870129
+/infrastructure/ @wayne19870129
+/deploy/ @wayne19870129
+/docs/80-decisions/ @wayne19870129
+/docs/81-reviews/ @wayne19870129
+/docs/82-tasks/ @wayne19870129
+/ARCHITECTURE.md @wayne19870129
+/AGENTS.md @wayne19870129
