@@ -251,6 +251,26 @@ permanently pending on a PR that happens not to touch
 "Protect `main`" section for whether/how to add it to GitHub's required
 status checks.
 
+Every package the job installs — `pip` itself included — is pinned to an
+exact version (`pip==26.2.1`, `pydantic==2.10.4`, `fastapi==0.115.2`,
+`starlette==0.40.0`, `httpx==0.28.1`, `pytest==9.1.1`). A "pinned
+contract" gate that silently installs whatever the latest `httpx`/
+`pytest` happens to be on a given day isn't actually deterministic — a
+new release of either could turn this job red for reasons having nothing
+to do with Marzban or this repository's own changes. If that ever
+happens (or `pip install` itself fails to reach PyPI, or
+`verify_pinned_upstream.py` fails to reach `raw.githubusercontent.com`),
+treat it the same way as any other flaky-infrastructure failure per
+`CLAUDE.md`'s CI-red guidance: rule out a transient network/PyPI issue
+with at most one re-run before treating it as a real contract break:
+- A hash-mismatch or missing-formula/dependency `FAIL-CLOSED` diagnostic
+  from `verify_pinned_upstream.py` is a real contract break — the pinned
+  Marzban commit's content or this repo's recorded expectations actually
+  disagree — not infrastructure flake.
+- A bare network/connection error (fetching from PyPI or
+  `raw.githubusercontent.com`) with no `FAIL-CLOSED` diagnostic at all is
+  infrastructure flake — re-run once, and only escalate if it repeats.
+
 ## Explicitly out of scope here
 
 No real Marzban `AccountingProvider`, no `AccountUserDTO` change, no

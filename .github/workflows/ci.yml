@@ -132,9 +132,19 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install pinned Marzban contract dependencies
+        # Every package here is pinned to an exact version, pip included --
+        # a "pinned contract" gate that installs an unpinned test/tooling
+        # dependency isn't actually deterministic: a new httpx or pytest
+        # release could turn this job red for reasons having nothing to do
+        # with Marzban or this repository's own changes.
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install pydantic==2.10.4 fastapi==0.115.2 starlette==0.40.0 httpx pytest
+          python -m pip install --upgrade pip==26.2.1
+          python -m pip install \
+            pydantic==2.10.4 \
+            fastapi==0.115.2 \
+            starlette==0.40.0 \
+            httpx==0.28.1 \
+            pytest==9.1.1
       - name: Verify pinned Marzban upstream contract (fail-closed)
         run: python infrastructure/marzban/patches/verify_pinned_upstream.py
       - name: Run Marzban routing_principal patch contract tests
