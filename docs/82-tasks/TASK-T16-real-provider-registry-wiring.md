@@ -635,13 +635,24 @@ last_applied_state` 且磁盘未被动过，是正常业务变更，应正常渲
 `ApplyResult(True, ...)` 之后才提交（不是"写盘成功那一刻"），并区分
 rollback 成功（基线保持不变）、rollback 自身失败（基线标记未知、
 fail closed）、Xray 已生效但基线持久化失败（必须在"回滚运行时"或
-"标记 unknown/fail-closed"之间明确选一个）三种场景，完整规则见
-ADR-015 Part A"drift detection 三态模型"及"last-applied 基线的持久化
-位置"两节。基线持久化不复用 `TransportVersion`/`EgressVersion`
-（grep 确认零引用且 bounded context 不匹配），需要新的、scope 限定
-为共享 Xray 配置文件的持久化机制；首次运行需要显式 bootstrap 策略，
-不得静默假设"无基线=无漂移"。不允许"DB renderer + Marzban
-core-config API"两个并列、互不知情的 source of truth 同时存在。
+"标记 unknown/fail-closed"之间明确选一个）三种场景。**第三次修订
+第三轮再次更正**：核实 `XrayFileProvider.apply()` 现有代码和
+`test_safe_reload.py` 现有测试覆盖后确认，第二轮"任何 apply 失败都
+完整走 restore(backup) 回滚"这个描述和当前实现不符——`install()`/
+第一次 `reload()` 周围没有 `try/except`，两者抛异常会绕过回滚路径
+直接从 `apply()` 传播出去，现有护栏测试也没有覆盖这两种异常场景。
+本轮据实更正 ADR 对当前代码行为的描述，新增第四种场景（异常绕过
+回滚、磁盘/运行时状态不确定，必须按"基线不推进 + fail closed 标记"
+处理，不能等同于"安全地什么都没发生"），并要求 Phase 2B 在实现
+drift-detection 基线机制之前，先加固 `apply()` 让这两处异常也进入
+等价于回滚成功/回滚失败的处理路径，同时补齐对应的护栏测试。完整
+规则见 ADR-015 Part A"drift detection 三态模型"及"last-applied 基线
+的持久化位置"两节。基线持久化不复用 `TransportVersion`/
+`EgressVersion`（grep 确认零引用且 bounded context 不匹配），需要
+新的、scope 限定为共享 Xray 配置文件的持久化机制；首次运行需要显式
+bootstrap 策略，不得静默假设"无基线=无漂移"。不允许"DB renderer +
+Marzban core-config API"两个并列、互不知情的 source of truth 同时
+存在。
 完整的三条运行时路径
 （Path A 应用启动/管理 API、Path B 普通建用户、Path C 普通改/删用户）
 和 8 项逐条 `CONFIRMED`/`INFERENCE` 证据见 ADR-015 Part A。

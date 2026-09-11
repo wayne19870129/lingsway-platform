@@ -40,7 +40,17 @@ route identity 收敛方案
   采纳独立审查建议的更保守路径：不 supersede ADR-014 第 5 条，
   Decision 3 解锁之前不启动任何 Phase 2B 代码实现，下一步改为专门
   解决 route identity 的任务。同时一并处理一条 Minor：PR 标题需要
-  反映"记录了一个 BLOCKED"而不是"关闭了所有前置决策"。）
+  反映"记录了一个 BLOCKED"而不是"关闭了所有前置决策"。2026-09-11
+  第三次修订第三轮：针对 head
+  `fd74f4e047e9286aa327242fadbab99990ddb7fd` 的独立审查指出，第二轮把
+  `XrayFileProvider.apply()` 描述成"任何失败都完整走
+  `restore(backup)` 回滚"，这个描述和当前代码/测试的真实行为不符——
+  `install()`/第一次 `reload()` 周围没有 `try/except`，两者抛异常会
+  绕过回滚路径直接传播，现有 `test_safe_reload.py` 也没有覆盖这两种
+  异常场景。本轮据实更正 ADR 对当前代码行为的描述，新增"场景 D"
+  （异常绕过回滚、状态未知，必须 fail closed 处理），并把"加固
+  `apply()` 捕获这两处异常"列为 Phase 2B 的必需前提，同时要求补齐
+  对应的护栏测试。）
 - 决策范围: TASK-T16 Phase 2B0（只读研究 + ADR/TASK 决策，不实现代码）
 - 前置: `docs/80-decisions/ADR-014-xray-desired-state-ownership.md`
   （Phase 2A，已接受，本 ADR 不重新讨论其中已 Accepted 的 Reality
@@ -337,28 +347,80 @@ scope 限定为这一份共享文件的持久化机制"）。**这意味着 Deci
 - **文件缺失时**：视为需要 renderer 正常渲染并写入（不是漂移，因为
   没有"被别人动过"这件事可比较），写入后建立新的 `last_applied_
   state`。
-- **基线更新时机（第三次修订第二轮更正，修复本轮 Major 2）**：
-  **第一稿的错误**：写的是"renderer 确认成功把候选配置写入磁盘之后
-  才更新"——这句话没有对齐既有的九步安全 reload/rollback 契约
-  （`backend/app/providers/gateway/xray_file.py::XrayFileProvider.
-  apply()`），核实其实现后确认真实流程是：`backup()` → `validate()`
-  → `install()`（写盘）→ `reload()` → `health()` + post-reload
-  preservation 校验；两者都通过才返回 `ApplyResult(True, ...)`；任一
-  失败会 `restore(backup)` 还原磁盘、再次 `reload()`、再跑一次
-  `health()` 做 `rollback_reverified`。**"磁盘写入成功"不等于"配置
-  已经生效"**——如果 `last_applied_state` 在 `install()` 刚写盘那一刻
-  就更新，而随后的 health/preservation 检查失败触发了
-  `restore(backup)`，磁盘会被还原回旧配置，但 `last_applied_state`
-  已经错误地指向了那个被回滚掉的候选配置，下一次 drift 检测会误报
-  未授权漂移。
+- **基线更新时机（第三次修订第二轮更正，修复第三次修订第二轮 Major
+  2；第三次修订第三轮再次更正，修复本轮 Major 1）**：
+  **第二轮的错误尚未完全更正**：第二轮把 `apply()` 描述成"任何失败都
+  会进入 `restore(backup)` 回滚流程"，暗示这是一个完整的九步安全
+  reload/rollback 保证。**独立审查第三轮重新核实
+  `backend/app/providers/gateway/xray_file.py::XrayFileProvider.
+  apply()` 和 `backend/tests/guards/test_safe_reload.py` 的现有实现/
+  测试覆盖后指出，这个描述和当前代码的真实行为不符，本轮据实更正**：
 
-  **更正后的规则**：`last_applied_state` 表示 **last known-good
+  真实 `apply()` 的代码结构是：
+
+  ```python
+  backup = self._runtime.backup()
+  validation = self.validate(candidate, new_username=new_username)
+  if not validation.valid:
+      raise XrayValidationError(...)
+
+  self._runtime.install(candidate.content)   # 没有 try/except 包裹
+  self._runtime.reload()                     # 没有 try/except 包裹
+  report = self._runtime.health()
+  post_reload_errors = _preservation_errors(...)
+  if report.healthy and not post_reload_errors:
+      return ApplyResult(True, candidate.version)
+  # 只有走到这里（health/preservation 检查"返回"不健康，而不是抛异常）
+  # 才会进入 restore(backup) 回滚流程
+  ```
+
+  **`install()` 和第一次 `reload()` 周围没有 `try/except`**——
+  `LocalXrayRuntime.reload()` 用 `subprocess.run(reload_command,
+  check=True)`，reload 命令失败会直接抛
+  `subprocess.CalledProcessError`；`install()` 内部的文件写入/
+  `Path.replace()` 也可能抛异常。**这两处异常都会直接从 `apply()`
+  向外传播，完全绕过 `restore(backup)` 回滚路径**——现有的
+  `test_safe_reload.py` 只覆盖了"校验失败在 reload 之前被拒绝"和
+  "reload 成功、但 post-reload health **返回** `False`"这两种情况，
+  没有对 `install()`/第一次 `reload()` **抛异常**的场景做任何测试，
+  说明这确实是当前实现的一个真实空白，不是文档层面的措辞问题。
+
+  **更正**：本 ADR 不再把当前 `XrayFileProvider.apply()` 描述为"对
+  每一种 apply 失败都提供完整的九步回滚保证"——这不是当前代码的真实
+  行为，只对"reload 成功后，health/preservation 检查以返回值形式报告
+  不健康"这一种失败模式成立。`install()`/第一次 `reload()` 抛异常是
+  一类需要单独承认的失败——这种情况下磁盘可能已经被换成了新
+  candidate（如果是 `install()` 之后、`reload()` 抛异常），但 Xray
+  运行时是否真的在跑这份新配置是未知的（reload 命令失败通常意味着
+  没有成功生效，但也可能是部分生效），而磁盘的旧内容已经不在原地，
+  且**没有任何 `restore()` 被调用**——这是一个第二轮"场景 A/B"矩阵
+  没有覆盖的、真实存在于当前代码里的第三种状态，本轮补上为"场景 D"。
+
+  **`last_applied_state` 的更新规则不变**：仍然表示 **last known-good
   successfully applied config**，不是 **last file write attempt**，
-  只应该在 `apply()` 整个九步流程成功返回 `ApplyResult(True, ...)`
-  （`install()`+`reload()`+post-reload 校验+`health()` 全部通过）
-  之后才提交更新。
+  只应该在 `apply()` 返回 `ApplyResult(True, ...)` 之后才提交更新——
+  场景 D 下 `apply()` 根本不会正常返回（异常直接向外传播），所以基线
+  同样不会被推进，这一点结论不变；但下方矩阵需要新增场景 D，明确这
+  不是"和场景 A/B 一样安全"的失败，而是一个**当前实现下未被兜底**的
+  状态，Phase 2B 必须先修复这个代码缺口，而不是假设它已经被现有
+  `apply()` 处理好了。
 
-  **rollback/baseline 矩阵（本轮按独立审查要求逐场景明确）**：
+  **Phase 2B 必须做的加固**（本轮新增要求）：
+
+  1. 把 `install()` 和第一次 `reload()` 也纳入失败处理路径——任何在
+     `backup()` 之后、且已经可能改变磁盘/运行时状态的操作抛出异常，
+     都必须被捕获，不能让异常未经处理直接从 `apply()` 传播出去。
+  2. 捕获后必须尝试走等价于场景 A/B 的路径：能确认成功
+     `restore(backup)`+`reload()`+复核健康，则按场景 A 处理（基线
+     不推进，保持旧值）；如果这个恢复尝试本身也失败或无法确认磁盘/
+     运行时回到已知良好状态，必须按场景 B 处理（基线标记未知/
+     degraded，fail closed，不能静默假装恢复成功）。
+  3. 必须为"`install()` 抛异常"和"第一次 `reload()` 抛异常"这两种
+     情况分别新增护栏测试，纳入未来 Phase 2B 的验收标准——不能只
+     依赖现有覆盖"health 返回 False"这一种失败模式的测试。
+
+  **rollback/baseline 矩阵（本轮按独立审查要求逐场景明确，第三轮
+  新增场景 D）**：
 
   - **场景 A：candidate apply 后（reload/health/preservation 任一）
     失败，rollback（`restore(backup)`+`reload()`）成功**——磁盘已经
@@ -390,10 +452,27 @@ scope 限定为这一份共享文件的持久化机制"）。**这意味着 Deci
     fail closed，不能静默假设基线迟早会追上。本 ADR 不替 Phase 2B
     选定①或②，但要求 Phase 2B 实现时必须明确选一个并写进代码/文档，
     不能把这个不一致状态放任不处理。
+  - **场景 D（第三次修订第三轮新增）：`install()` 或第一次 `reload()`
+    抛出异常，异常未被捕获、直接从 `apply()` 传播出去，`restore()`
+    从未被调用**——这是当前 `XrayFileProvider.apply()` 实现里真实
+    存在、尚未被兜底的一种失败模式（见上方代码结构分析）。这种情况下
+    磁盘/运行时可能处于三者之一：①`install()` 异常发生在写盘完成
+    之前，磁盘仍是旧内容，但 Xray 进程从未 reload，状态其实接近"什么
+    都没发生"；②`install()` 成功写盘、`reload()` 命令异常，磁盘已经
+    是新 candidate，但 Xray 进程是否真的加载了这份新配置不确定；
+    ③以上两种之外的其它异常时序。**因为这三种子情况在异常发生的
+    当下无法可靠区分，必须统一按"未知"处理**：`last_applied_state`
+    **不推进**（`apply()` 没有正常返回，规则和场景 A/B 一样不推进），
+    且必须**同时**把这次失败标记为需要人工介入的 fail-closed 状态
+    （不能简单等同于场景 A"安全地什么都没发生"），因为和场景 A 不同，
+    场景 D 下磁盘内容有没有变、Xray 有没有重新加载都是不确定的，
+    不能假设"没有走到 restore 就等于没有风险"。Phase 2B 必须先做到
+    "上方加固要求"里的第 1/2 条，把场景 D 尽量收窄/转化为场景 A 或 B，
+    而不是长期依赖这个未兜底的异常传播路径。
 
   如果 Phase 2B 决定这里的语义特意只是"renderer 上一次写盘的字面
   内容"而不是"上一次成功 apply 的配置"，必须明确改名以避免歧义，并
-  单独写清楚它在上述三个场景下的行为，不能含糊地沿用"last applied"
+  单独写清楚它在上述四个场景下的行为，不能含糊地沿用"last applied"
   这个已经暗示"已生效"语义的名字。
 - **基线的定位**：`last_applied_state` **只是完整性元数据（用于
   检测"有没有被意外改动"），永远不是配置数据的 source of truth**——
@@ -982,6 +1061,12 @@ Phase 2B gate 与本 ADR 的关系"一节）显式 supersede 它，因此不能�
     在 Decision 3 从 `BLOCKED` 解锁之前，不得启动任何 Phase 2B 代码
     实现（无论 Decision 4 矩阵里标 `YES` 还是 `BLOCKED`）；下一步是
     专门解决 route identity 的任务，不是 Phase 2B 实现 PR。
+12. **（第三次修订第三轮新增）** 当前 `XrayFileProvider.apply()` 对
+    `install()`/第一次 `reload()` 抛出的异常没有回滚兜底（见 Part A
+    "场景 D"）；Phase 2B 实现 drift-detection 基线机制之前，必须先
+    加固 `apply()` 让这两处异常也进入等价于场景 A/B 的处理路径，并
+    补齐对应的护栏测试；在这个加固完成之前，不能假设当前代码已经
+    对所有 apply 失败模式提供了安全的回滚保证。
 
 ## 考虑过的替代方案
 
