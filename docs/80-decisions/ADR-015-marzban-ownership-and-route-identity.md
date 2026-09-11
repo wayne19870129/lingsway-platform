@@ -1,12 +1,30 @@
 # ADR-015: 关闭 Phase 2B 前置决策——Marzban 运行时归属、provider 分类、
 route identity 收敛方案
 
-- 状态: 已接受
+- 状态: 已接受（Part C 的 Decision 3/既有数据收敛截至第三次修订为
+  `BLOCKED`，见下方——本 ADR 整体状态仍是"已接受"，指"这些研究结论
+  已被接受为当前权威记录"，不代表 Decision 3 已经有一个可以直接实现
+  的答案）
 - 日期: 2026-09-11（2026-09-11 第二次修订：独立审查指出并核实了四处
   事实错误——Marzban 确实会在特定管理 API 路径下写回 `XRAY_JSON`、
   普通用户 CRUD 走增量 Handler API 而非"每次都 include_db_users()+
   重启"、Marzban 确实有真实的远端节点管理能力（此前"完全没有"的说法
-  错误）、候选 A 缺少既有数据的收敛方案——已全部修正，见下方各节）
+  错误）、候选 A 缺少既有数据的收敛方案——已全部修正，见下方各节。
+  2026-09-11 第三次修订：独立审查针对 head `79032282a62d952f478631f
+  ff3a37ec8a8f2404d` 提出三个新 Major——(1) Decision 3 选定的
+  `gateway_principal = request.username` 用错了 Xray 实际匹配的
+  identity：精确核实 Marzban v0.8.4 源码后确认 Xray 侧真正匹配的
+  client email 是 `f"{marzban_db_user_id}.{username}"`，不是纯
+  accounting username，且 Marzban 公开 API（`UserResponse` 家族）不
+  暴露 DB `id`，Decision 3 及既有数据收敛方案在未解决这个问题前不能
+  维持"Selected: A"的结论，本轮改为 `BLOCKED`；(2) 既有数据收敛的
+  NULL/未匹配行处理语言存在"fail closed"与"跳过并记录"的自相矛盾，
+  本轮改为统一的"全量 preflight → 检测到任何异常即整体中止"模型；
+  (3) Decision 1 的 drift detection 算法把"磁盘当前状态 vs DB 期望态"
+  当作漂移判定，会把正常的业务驱动配置变更误判为漂移，本轮引入
+  `last_applied_state`/`current_disk_state`/`new_db_desired_state`
+  三态模型并重新定义比对逻辑。以上三处新发现全部记入下方对应小节，
+  第一版/第二版内容除被明确替换的部分外保持不动。）
 - 决策范围: TASK-T16 Phase 2B0（只读研究 + ADR/TASK 决策，不实现代码）
 - 前置: `docs/80-decisions/ADR-014-xray-desired-state-ownership.md`
   （Phase 2A，已接受，本 ADR 不重新讨论其中已 Accepted 的 Reality
@@ -184,13 +202,98 @@ inbound_tag, email=email, timeout=30)`。这两者都**不调用
   `/api/core/config` 的调用权限，或只允许通过本仓库自己的部署脚本
   触发），本 ADR 只记录这个方向，不在这里替 Phase 2B 决定具体怎么做。
 - **如果权限层面暂时做不到完全阻止**，Phase 2B/后续验证阶段必须有
-  **drift detection**：在 renderer 每次运行前，先读取磁盘上当前
-  `xray_config.json` 的 `outbounds`/`routing` 部分，和数据库期望态
-  比对是否被非 renderer 的写入者动过手脚（例如与上一次 renderer 自己
-  写入的内容不一致），如果检测到漂移，应该 **fail closed 并明确
-  告警**，不能静默覆盖——这是把"repo renderer 可以安全覆盖"这个第一版
-  过于乐观的结论，改成"repo renderer 是唯一合法 writer，其它写入需要
-  被检测并拒绝/告警"这个更谨慎的模型。
+  **drift detection**——**第三次修订：第二版这里的算法是错的，本轮
+  重写，见下方"drift detection 三态模型"小节**。第二版把"磁盘当前
+  状态 vs 数据库当前期望态"的任何差异都称为"漂移"，这个算法会把
+  **正常的、由业务变更驱动的配置更新**（例如新增一个订阅、一次正常
+  的 renderer 重新渲染）也误判成"漂移"并 fail closed——这会导致
+  renderer 在完全正常的业务场景下无法工作，是一个算法层面的错误，
+  不是措辞问题。
+
+#### drift detection 三态模型（第三次修订新增，替换上一段被推翻的
+算法）
+
+必须区分三个不同的状态，而不是只比较"磁盘现状"和"DB 现状"两个值：
+
+- **(A) `last_applied_state`**——renderer **上一次自己成功写入磁盘
+  时**的配置内容（或其指纹/hash），代表"上一次被这个仓库自己确认过
+  的、合法的磁盘状态"。
+- **(B) `current_disk_state`**——现在读取磁盘上 `xray_config.json`
+  实际的 `outbounds`/`routing` 内容（或其指纹/hash）。
+- **(C) `new_db_desired_state`**——现在从数据库计算出的、renderer
+  即将渲染的新期望态（或其指纹/hash）。
+
+**正确的比对逻辑**：
+
+1. `current_disk_state != last_applied_state` → **未授权/未知的漂移**
+   ——说明磁盘文件在 renderer 不知情的情况下被别的写入者改动过（例如
+   运维通过 Marzban `PUT /api/core/config` 写过），**fail closed 并
+   明确告警，不覆盖**。
+2. `new_db_desired_state != last_applied_state` **且** `current_disk_
+   state == last_applied_state` → **正常的、待处理的业务变更**——
+   磁盘和上一次 renderer 自己写入的内容一致，说明没有被别人动过，
+   现在只是数据库期望态本身发生了变化（新订阅/新路由），renderer
+   应该生成新的候选配置并正常校验、正常写入。**不应该被当作"漂移"
+   拒绝。**
+3. 两者都相等 → 无变化，renderer 可以是 no-op。
+
+第二版的算法本质上混淆了 1 和 2——它把"磁盘 vs DB 期望态"的比较结果
+当成了"磁盘 vs 上一次合法写入"的比较结果，而 (C) 几乎总是会和 (B)
+不同（因为 DB 期望态本来就会随业务变化），导致第二版算法在几乎所有
+正常场景下都会误报漂移。
+
+#### last-applied 基线的持久化位置（第三次修订新增）
+
+独立审查要求先盘点现有的 `TransportVersion`/`EgressVersion` 等
+config/version/snapshot/hash 类表，判断能否复用，而不是因为字段形状
+像（都有 `config_hash`）就直接复用。核实 `backend/app/models/
+gateway.py`：
+
+- `TransportVersion`/`EgressVersion` 均有 `config_hash`/
+  `snapshot_json`/`generated_at`/`generated_by`/`reason`/
+  `previous_version_id` 字段，按 `(route_group_id, version_no)`
+  唯一约束。
+- **`CONFIRMED`（grep 核实）**：这两个模型在 `gateway.py` 定义之外
+  **没有任何代码引用**——完全未被使用。
+- **bounded context 不匹配**：两者都按 `route_group_id` 组织（一个
+  Mihomo/egress 路由分组的概念），而本 ADR 需要的基线是"**一份共享
+  的 Xray gateway 配置文件**"这个单一对象的上一次合法写入状态，不是
+  按 route group 分片的版本历史。把一个"Xray 单文件的写入基线"塞进
+  一个为"Mihomo route group 版本历史"设计的表，是和 Part B 里"因为
+  方法名字像就把 Marzban Node 塞进 TransportProvider"同一类型的错误
+  硬映射，不应该重复。
+
+**结论**：`TransportVersion`/`EgressVersion` **不是**合适的复用对象。
+本 ADR 认为 Phase 2B 需要为"Xray 共享配置文件的 last-applied 基线"
+新增一个**独立的、职责单一的持久化位置**（具体是新表还是在现有的
+某个单例配置记录上加两个字段——`last_applied_config_hash`/
+`last_applied_at`——留给 Phase 2B 实现阶段的详细设计，本 ADR 只确定
+方向："不复用 `TransportVersion`/`EgressVersion`，需要一个新的、
+scope 限定为这一份共享文件的持久化机制"）。**这意味着 Decision 4 的
+"DB schema change"不能再统一写"NO"**——drift detection 这一项本身
+就需要新的持久化，即使 Decision 3 的部分不需要 schema 变更。
+
+#### bootstrap（首次运行）行为（第三次修订新增）
+
+- **无基线时（首次运行，`last_applied_state` 不存在）**：不能假设
+  `current_disk_state == last_applied_state` 成立（这会把"从未记录
+  过基线"和"确认过没有漂移"混为一谈）。正确行为：**如果磁盘上已经
+  存在一个文件，且这是第一次引入基线机制，需要一次显式的、有意的
+  "采纳当前磁盘状态为初始基线"操作**（记录下来是谁在什么时间做的
+  这个决定，而不是代码自动静默采纳），而不是把"没有基线"直接当成
+  "无漂移"处理。
+- **文件缺失时**：视为需要 renderer 正常渲染并写入（不是漂移，因为
+  没有"被别人动过"这件事可比较），写入后建立新的 `last_applied_
+  state`。
+- **基线更新时机**：`last_applied_state` **只应该在 renderer 确认
+  成功把候选配置写入磁盘之后才更新**，不能在候选配置生成/校验通过
+  但尚未实际写盘之前提前更新——如果提前更新，一旦实际写盘失败，
+  基线会指向一个从未真正落地的状态，下一次 drift 检测会用错误的
+  基线做比较。
+- **基线的定位**：`last_applied_state` **只是完整性元数据（用于
+  检测"有没有被意外改动"），永远不是配置数据的 source of truth**——
+  真正的期望态 source of truth 仍然是数据库（ADR-014 已确立），
+  基线只用于第 1 步的漂移判定，不能被误用为"渲染时的输入数据源"。
 - **不允许形成"DB renderer + Marzban core-config API"两个并列、互不
   知情的 source of truth**——这是本 ADR 明确否决的候选（不重新打开
   ADR-014 的铁律第 1 条讨论，只是把它应用到这个具体的双 writer 场景）。
@@ -333,10 +436,159 @@ Marzban 本身——这是一个真实的语义错误，不能只说"是捷径�
 health` 现有接线明确不需要修改"**，改为记录 H1 这个新决定，作为
 Phase 2B implementation matrix 的一项。
 
-## Part C：Xray route identity 收敛方案（候选评估不变，新增既有数据
-收敛小节）
+## Part C：Xray route identity 收敛方案（第三次修订：Decision 3 及既有
+数据收敛改为 `BLOCKED`，候选对比表作为历史记录保留）
 
-### 候选对比（评估维度按用户要求逐一比较，不变）
+### 三个必须区分的概念（第三次修订新增，此前所有版本都把这三者混为
+一谈）
+
+独立审查要求先把以下三个不同的值分开定义，本轮逐一核实：
+
+1. **Lingsway accounting username**——本仓库自己的账务系统用户名，
+   例如 `request.username`（形如 `"sub-123"`）。这是 Decision 3
+   第二版选定的 `gateway_principal` 写入值。
+2. **Marzban 内部 DB user id**——Marzban 自己数据库里 `User` 记录的
+   自增主键（`db_models.User.id`），例如 `42`。这个值**完全是
+   Marzban 内部实现细节**，本仓库从未持久化过它。
+3. **Xray routing principal / client email**——Xray Core 运行时用来
+   匹配 `routing.rules[].user` 规则的那个字符串，也就是 Marzban 传给
+   Xray 的 client 对象的 `email` 字段。
+
+### Exact-source 发现（第三次修订新增）：(2) 和 (3) 不等于 (1)
+
+**`CONFIRMED`**——核实精确 commit `7f396db3e703d71a28060bc9ce4a532
+ec64cb1f4` 下的两条独立代码路径，Marzban 构造 Xray client `email`
+字段时使用的都是复合值，不是纯 accounting username：
+
+- `app/xray/config.py::include_db_users()`（Path A，全量重建路径）：
+  为每个 DB 用户构造 client 时使用 `"email": f"{user_id}.{username}"`
+  （`user_id` 是 Marzban DB 里的 `User.id`，`username` 是 accounting
+  username）。
+- `app/xray/operations.py`（Path B/C，增量 Handler API 路径）：
+  `add_user()`/`update_user()`/`remove_user()` 构造/引用的 `account`/
+  `email` 值同样是 `email = f"{dbuser.id}.{dbuser.username}"`。
+
+即：Marzban 传给 Xray、Xray 实际用于路由匹配的 client 标识，形如
+`"42.sub-123"`，**不是** `"sub-123"`。
+
+**`CONFIRMED`（一般行为，非本次逐行核实的具体 runtime 匹配代码行）**
+——Xray Core `v26.3.27`（`infra/conf/router.go`）里路由规则的 `"user"`
+字段填充的是 `RoutingRule.UserEmail`（`protobuf:"bytes,7,rep,
+name=user_email,..."`），按 Xray 公开文档/一般行为描述，运行时用它
+匹配已认证连接的 client email——也就是上面 Marzban 构造出来的复合
+`email` 值，不是 Marzban 数据库里存的纯 `username` 字段。
+
+**结论**：`request.username`（"sub-123"）**不等于** Xray 实际匹配的
+client email（"42.sub-123"）。第二版 Decision 3 选定的
+`gateway_principal = request.username` 写入的是一个 Xray 侧从不会
+用来匹配任何东西的值——如果 renderer 把这个值渲染进
+`routing.rules[].user`，这条路由规则在真实 Marzban+Xray 组合下**永远
+不会命中**，是一个此前未被发现的、会导致路由完全失效（而不是"路由到
+错误的值"）的更严重问题。
+
+### Exact-source 发现（第三次修订新增）：公开 API 是否能拿到 Marzban
+DB user id 或复合 email
+
+按独立审查要求，明确排除以下几种被禁止的推导方式：猜测自增 id、按
+用户数量倒推 id、直接读生产 SQLite、把未公开的 DB 内部实现当作正式
+API 契约依赖。逐一核实公开、受支持的 Admin API 端点：
+
+- `app/models/user.py::UserResponse`（`POST /api/user`、
+  `GET /api/user/{username}`、`GET /api/users` 等端点的响应模型）
+  ——**`CONFIRMED`**（narrow 逐字段核对，纠正了此前一次基于
+  `model_validate(dbuser)` 的不可靠推断）：这个类及其继承链
+  （`username, status, used_traffic, lifetime_used_traffic,
+  created_at, links, subscription_url, proxies, excluded_inbounds,
+  admin` 及 `User` 基类字段 `expire, data_limit,
+  data_limit_reset_strategy, inbounds, note, sub_updated_at,
+  sub_last_user_agent, online_at, on_hold_expire_duration,
+  on_hold_timeout, auto_delete_in_days, next_plan`）**不包含任何
+  `id: int` 或等价字段**。Pydantic 的 `model_validate()` 只序列化
+  目标 schema 声明过的字段，`dbuser`（ORM 对象）本身有 `id` 不代表
+  响应会包含它——第一次基于"用 `model_validate(dbuser)` 构造响应"就
+  推断"响应含 id"的判断方式不可靠，已被更精确的逐字段核对结果推翻。
+- `add_user`（`app/routers/user.py`）的响应模型同样是
+  `UserResponse`——同样不含 `id`。
+- `generate_v2ray_links()`（`app.subscription.share`）构造订阅链接/
+  二维码时使用的 `extra_data=self.model_dump()`，其中 `self` 同样是
+  `UserResponse` 实例——同样不含 `id`，这条路径也无法把 DB id 暴露
+  给任何客户端可见的产出物。
+
+三个独立信号（`UserResponse` 字段列表、`add_user` 的响应模型、订阅
+链接生成器的数据来源）**一致指向同一个结论**：Marzban v0.8.4 公开、
+受支持的 Admin API **没有任何路径能返回 Marzban DB user id，因此也
+没有任何路径能返回 Xray 实际使用的复合 client email
+（`f"{id}.{username}"`）**。
+
+**这是一个 `BLOCKED` 结论，不是一个可以绕过的实现细节**——按独立审查
+明确要求："正确地留下一个有证据支持的 BLOCKED，比错误地宣布问题已
+关闭更好"，本 ADR 在此明确记录：**在没有找到 Marzban 官方支持的、
+能获取该复合 email 的方式之前，route identity 收敛问题不能被认为
+已经解决。**
+
+已考虑但未采纳的绕过方式（逐一说明为何不可行）：
+
+- **假设 Marzban DB user id 从 1 开始自增，按创建顺序推导**——被
+  用户明确禁止（"不得猜测自增 id"），且即使技术上可行也无法应对
+  历史删除行导致的 id gap，脆弱且不可验证。
+- **直接读 Marzban 的生产 SQLite 文件**——被用户明确禁止（"不得把
+  生产 SQLite 当作正常 provider 契约读取"），且这是一个未公开的
+  实现细节，不是 Marzban 承诺维持稳定的接口，随时可能因为 Marzban
+  自身的数据库迁移而失效。
+- **要求 Marzban 部署方额外暴露一个只读的 DB 连接给本应用查询
+  `User.id`**——理论上可行，但这会让本应用依赖 Marzban 的内部 schema
+  （不是公开 API），一旦 Marzban 升级版本改了表结构就会静默破坏，且
+  这已经超出"只读研究现有公开 API"的范围，属于需要新 ADR 明确评估的
+  架构决定，本 ADR 不在这里替 Phase 2B 做出这个决定。
+
+### AccountUserDTO / 编排数据流影响（第三次修订新增，contingent on
+上述 BLOCKED 状态，不是可以现在就实现的方案）
+
+核实 `backend/app/providers/base.py::AccountUserDTO`（`create_user()`
+的返回类型）目前字段为 `username, quota_bytes, expire_at, enabled`
+——**没有任何字段可以携带一个"routing principal"值**。核实
+`backend/app/domain/provisioning.py` 的 `CREATE_ACCOUNTING_USER`
+步骤（第 6 步）：
+
+```python
+self._start(run_id, ProvisionStep.CREATE_ACCOUNTING_USER)
+try:
+    self.accounting.create_user(
+        request.username, quota_gb_to_bytes(request.quota_gb), request.expire_at
+    )
+except Exception as exc:
+    ...
+self._success(run_id, ProvisionStep.CREATE_ACCOUNTING_USER)
+```
+
+**`create_user()` 的返回值被直接丢弃**——即使假设未来某个真实 Marzban
+adapter 能通过某种方式取得复合 email，当前的编排代码里也**没有任何
+数据通道**能把这个值从第 6 步传到第 7 步（`APPLY_GATEWAY`，调用
+`self.state.desired_routing_state(request, endpoint, tenant)`）。
+
+**候选设计（仅作为方向记录，不是本 ADR 的决定，contingent on 上一节
+的 BLOCKED 被解决）**：如果未来找到 Marzban 官方支持的方式能取得复合
+email，可以考虑：①给 `AccountUserDTO` 增加一个 `routing_principal:
+str | None` 字段；②`CREATE_ACCOUNTING_USER` 步骤保留
+`accounting.create_user(...)` 的返回值而不是丢弃；③把这个值经过
+`ProvisioningService` 传给 `APPLY_GATEWAY` 步骤，再传给
+`desired_routing_state()`/`ensure_gateway_route_binding()`；④
+`GatewayRouteBinding.gateway_principal` 的语义相应地从"accounting
+username"重新定义为"Xray routing principal"。**这个设计只有在
+Marzban API 能可靠提供该值时才成立**——在 BLOCKED 状态解除之前，
+不得把这个候选设计当作已经拍板的实现方案写进 Phase 2B 范围。
+
+### `gateway_principal` 的最终语义（第三次修订）
+
+`BLOCKED`——不能在本轮给出最终定义。已排除的错误定义：`accounting
+username`（Xray 侧从不匹配这个值）。当前唯一已知的正确值
+（`f"{marzban_db_user_id}.{username}"`）**无法通过 Marzban 公开 API
+可靠获取**，因此本 ADR 不能在这里写下一个可实现的最终字段语义，只能
+记录"候选设计"一节里 contingent 的方向。
+
+### 候选对比（第二版评估维度，作为历史记录保留——候选 A 已因上述
+exact-source 发现被推翻，不再是可选项；表格保留是为了让后续读者理解
+候选 A 曾经为何被选中、现在为何不能再选）
 
 | 维度 | 候选 A：恢复 `gateway_principal` = accounting principal | 候选 B：`accounting_user_id` 持久化时机提前 | 候选 C：`sub-{order.id}` 定为正式契约 |
 |---|---|---|---|
@@ -353,88 +605,108 @@ Phase 2B implementation matrix 的一项。
 | 最小改动范围 | **最小**——一行调用参数改动 + 一次性数据收敛 | 较大——跨层挪动持久化时机 | 较小，但有长期风险 |
 | 测试难度 | 较容易——现有集成测试已用 `"marzban-user-1"` 这类值调用 `ensure_gateway_route_binding()`；新增数据收敛的测试 | 较难 | 中等 |
 
-### Decision 3（选择不变：`A`，新增前提条件）
+### Decision 3（第三次修订：从 `Selected: A` 改为 `BLOCKED`）
 
-**Selected: `A`**——恢复 `GatewayRouteBinding.gateway_principal` 的
-accounting-principal 语义，`desired_routing_state()` 调用
-`ensure_gateway_route_binding()` 时改传 `request.username`（而不是
-`tenant.tenant_id`）。**这个选择的前提是同时执行下方"既有数据收敛"
-方案，两者是同一个 Decision 3 的两个组成部分，不是"选 A 就完事"。**
+**`BLOCKED`**——第二版"Selected: A"的结论被本轮 exact-source 发现
+推翻：`gateway_principal = request.username` 写入的值不是 Xray 实际
+匹配的 client email，而当前已知能反映真实 Xray client email 的值
+（`f"{marzban_db_user_id}.{username}"`）无法通过 Marzban v0.8.4 公开
+API 可靠获取（见上方"Exact-source 发现"两节）。
 
-**Rejected: B/C**——理由不变，见上表和"约束"一节。
+**候选 A/B/C 现状**：
 
-### 既有数据收敛（本轮新增，第一版遗漏）
+- **候选 A**（`gateway_principal = request.username`）——**推翻**，
+  理由如上，不再是可选项。
+- **候选 B**（`accounting_user_id` 持久化时机提前）——同样使用
+  accounting-side 的值（`Subscription.accounting_user_id`，本质上和
+  accounting username 是同一类值），**同样不等于 Xray 实际匹配的
+  client email**，同样被推翻，理由与候选 A 相同。
+- **候选 C**（`sub-{order.id}` 正式契约化）——同样是一个纯
+  accounting-side 推导值，同样不等于 Xray 实际匹配的 client email，
+  同样被推翻。
 
-**第一版遗漏了这个问题，独立审查指出后核实确认是真实存在的缺口。**
-重新核实 `SqlAlchemyProvisioningState.ensure_gateway_route_binding()`：
-只有当某个 `subscription_id` **再次**进入这个方法（例如重新走一次
-provisioning）时才会更新已存在的 `binding.gateway_principal`；**已经
-存在、状态是 active（`released_at IS NULL`、`enabled=True`）、但从
-未被本方法重新处理过的历史行，`gateway_principal` 会继续保持旧的
-写入值（`tenant.tenant_id`）**，不会因为 Phase 2B 改了 writer 代码就
-自动变正确。而 `ops/gateway/render_xray_routes.py::_active_routes()`
-直接查询所有 `enabled=True AND released_at IS NULL` 的
-`GatewayRouteBinding` 行并把 `route.gateway_principal` 当 Xray
-`"user"` 匹配值使用——**这意味着 Phase 2B 只改 writer，不处理历史行，
-会让已有的活跃订阅的 Xray 路由继续匹配错误的值**，这是一个会影响真实
-（未来会被真正渲染的）路由正确性的问题，不能只归为"schema 层面不需要
-migration"就略过。
+**即：本轮的 exact-source 发现使候选 A/B/C 全部失效**，不是"在三者
+之间重新选择"，而是"这三者共同的前提（Xray 匹配的是某种 accounting-
+side 的值）本身就是错的"。第二版的比较表格因此只有历史参考价值——它
+比较的是"三种得到错误目标值的方式哪种代价最小"，本轮发现问题出在
+目标值本身，表格结论不再适用于选择正式方案。
 
-必须把 Decision 4 里"migration"拆成两个独立问题：
+**在 Marzban 官方 API 提供获取复合 email 的方式之前，本 ADR 不能给出
+一个新的 Decision 3 结论**，只能记录：真正正确的 `gateway_principal`
+应该是"Xray routing principal"（即 `f"{marzban_db_user_id}.
+{username}"`），但这个值当前拿不到，因此正式方案 `BLOCKED`。
 
-- **Schema change**：`NO`——不新增表/列，`gateway_principal` 是已有
-  字段。
-- **既有数据 reconciliation**：**`YES`，需要独立方案**。
+**已排除的绕过方式**：见上方"Exact-source 发现"一节列出的三种绕过
+方式（猜测自增 id、直接读生产 SQLite、要求额外暴露只读 DB 连接）
+及其被排除的理由，不在此重复。
 
-**选定方案**：**A. data-only Alembic reconciliation migration**
-（`AGENTS.md` 铁律第 7 条已经确立的"schema/代码不一致只能新增
-reconciliation migration 补救，且必须幂等"这个模式，直接适用于这里的
-数据不一致场景）。具体设计要点（Phase 2B 实现时展开，这里只定方向和
-安全约束）：
+### 既有数据收敛（第三次修订：改为 `BLOCKED`，contingent on Decision
+3；NULL/未匹配行处理统一为严格 fail-closed 模型）
 
-1. 只处理 `GatewayRouteBinding.enabled = True AND released_at IS
-   NULL`（即 `active_gateway_principal` 非空）的行。
-2. 通过 `subscription_id` JOIN `Subscription`，只处理
-   `Subscription.accounting_user_id IS NOT NULL` 的行——如果关联的
-   `Subscription.accounting_user_id` 还是 `NULL`（理论上不应该出现在
-   已经是 active binding 的订阅上，但要 fail-closed 处理，不假设），
-   跳过并记录，不猜测/不生成一个值。
-3. 只更新 `gateway_principal != accounting_user_id` 的行（幂等：
-   重复跑这个 migration 不会对已经等于目标值的行做无意义的写入）。
-4. **必须处理 `active_gateway_principal` 这个计算列的唯一约束**
-   （`uq_gateway_route_active_principal`）：如果 reconciliation 会导致
-   两条 active 行的目标 `gateway_principal` 撞车（正常情况下不应该
-   发生，因为一个 subscription 只应该有一条 active binding，一个
-   `accounting_user_id` 也只属于一个 subscription），必须在 migration
-   里显式检测这种情况并 **fail closed（中止 migration，报告冲突的
-   行，不做部分更新）**，不允许静默让 UNIQUE 约束报错中断在未知的
-   中间状态，也不允许为了绕过约束而先删后插。
-5. migration 必须幂等（重复执行结果一致），符合 `AGENTS.md` 铁律
-   第 7 条对 reconciliation migration 的要求。
+**第二版这里选定的方案（JOIN `Subscription.accounting_user_id` 把
+`gateway_principal` 收敛成 accounting-side 的值）本身的目标值现在
+已知是错的**——`accounting_user_id` 和 `request.username` 属于同一类
+"accounting-side 值"，不等于 Xray 实际匹配的 client email，收敛到一个
+错误值上不能解决问题，只是把错误值从"部署时写入的旧值（Webshare 出口
+租户 ID）"换成"另一个同样错误的新值（accounting username/
+`accounting_user_id`）"。
 
-**为什么不选 B（一次性脚本/job）**：Alembic migration 是本仓库既有的、
-`AGENTS.md` 已经背书的"reconciliation"标准路径，天然带有版本追踪和
-可重复执行的保证；额外写一个独立脚本/job 只是重新发明这套已有机制，
-没有必要。
+**这个方案在 Decision 3 解决之前是 `BLOCKED`**，不能继续作为既定
+方案往下推进。以下记录 Decision 3 解决之后，无论最终目标值来源是
+什么，既有数据收敛都必须遵守的通用要求（这部分与目标值具体是什么
+无关，是本轮独立审查明确要求"NULL/未匹配行处理必须是真正的、无
+自相矛盾的 fail-closed"这一要求的直接产物）：
 
-**为什么不选 C（renderer 直接从 `Subscription.accounting_user_id`
-读，不依赖 `gateway_principal`）**：这个方案确实可以绕开"历史行没有
-被收敛"的问题（因为不读那一列），但会让候选 A 里"恢复
-`gateway_principal` 的 accounting-principal 语义"这个模型契约修复
-变得没有意义——如果 renderer 根本不读这一列，`gateway_principal`
-存的是对是错就不再重要，等于放弃了修复模型/测试契约不一致这个目标，
-只是把"路由匹配键从哪来"这个问题转移给了另一个字段。候选 A 选择
-"修好 `gateway_principal` 本身"是因为这个字段的模型契约本来就该是
-accounting principal，选 C 相当于承认这个字段的契约不值得维护，
-两者目标不同，不能互相替代。
+1. **全量 preflight，禁止边跑边判断**：migration 必须先对全部目标行
+   （`GatewayRouteBinding.enabled = True AND released_at IS NULL`）
+   计算出目标 `gateway_principal` 值（或判定"无法计算"），**在对
+   任何一行执行实际 UPDATE 之前**，先完成对全部行的检查。
+2. **任何一行无法解析出目标值，整个 migration 中止，不做任何
+   UPDATE**——不存在"跳过这一行，继续处理其它行，最后报告成功但有
+   若干行被跳过"这种中间状态。第二版"跳过并记录，不猜测"这句话被
+   本轮明确废止：**跳过不是一个可接受的落地行为，只有整体中止才是**；
+   "记录"应该发生在中止之后的错误报告里，而不是发生在继续执行的
+   过程中。
+3. **任何一行的目标值会与另一行的目标值发生 `active_gateway_
+   principal` 唯一约束冲突**（`uq_gateway_route_active_principal`），
+   同样在 preflight 阶段检测到，整个 migration 中止，不做任何
+   UPDATE，不依赖数据库 UNIQUE 约束在写入时报错来"发现"冲突。
+4. **中止后的行为是"什么都不做"，不是"部分回滚"**——因为第 1/2/3 条
+   已经保证在检测到任何异常时**尚未执行过任何 UPDATE**，所以不存在
+   "已经改了一半，需要回滚"的场景；migration 的实现必须保证这个
+   顺序（先全量校验，后全量写入），而不是"边校验边写，出错了再回滚
+   已写的部分"。
+5. migration 必须幂等（重复执行在相同输入下产生相同结果），符合
+   `AGENTS.md` 铁律第 7 条对 reconciliation migration 的要求；幂等性
+   要求与上述 fail-closed 要求不冲突——"重复执行结果一致"既可以是
+   "重复执行都成功且不做多余写入"，也可以是"重复执行都在 preflight
+   阶段检测到同样的问题并同样中止"，两种情况都满足幂等定义。
+6. **历史数据能否被正确收敛，取决于 Decision 3 的解决方式**：如果
+   最终确定的目标值（Xray routing principal）**无法从本应用当前的
+   本地 DB 计算出来**（例如它依赖 Marzban 内部的 DB user id，而
+   本应用从未持久化过这个 id），那么"纯本地 DB 数据收敛 migration"
+   在结构上就无法计算出正确的目标值——这种情况下，正确的下一步不是
+   "退而求其次收敛到一个已知错误的值"，而是诚实记录：需要一个额外的
+   数据来源（例如要求 Marzban 侧提供一次性的 `username → 
+   marzban_user_id` 映射导出，作为一次性的、经人工核实的迁移输入），
+   这已经超出"纯 Alembic data-only migration"能独立解决的范围，必须
+   在 Decision 3 解决时一并明确，不能假设"总能找到一种本地数据收敛
+   方式"。
+7. **是否需要 DB schema 变更**同样 `BLOCKED`，contingent on Decision
+   3：如果最终确定 `gateway_principal` 需要存储一个当前 schema 没有
+   持久化过的值（例如需要一个新字段存储"Marzban DB user id"本身，
+   而不只是复合后的字符串），schema change 就会从"NO"变成"YES"——
+   第二版"Schema change: NO"的结论不能在 Decision 3 BLOCKED 期间
+   继续被当作已确定的结论保留，本轮改为 `BLOCKED`。
 
-**为什么不选 D（部署前置检查证明当前数据库没有旧 active 行）**：
-这依赖对当前生产数据库实际内容的现场核实，本 ADR 是 docs-only 只读
-研究阶段，不能也不应该去读生产数据库来"证明"这件事；即使某次检查
-证明了"当前没有"，未来只要 Phase 2B 上线前有任何一笔真实开通流程
-跑过（包括测试/staging 环境如果共享同一套迁移历史），这个前提就可能
-被打破——一次性检查不是可靠的长期保证，reconciliation migration 是
-更稳妥的方案。
+**为什么不能像第二版一样直接给出"选定方案"**：第二版在"目标值是
+`accounting_user_id`"这个（现在已知错误的）前提下比较了方案 A/B/C/D
+四种"如何把旧值收敛到目标值"的路径。本轮发现问题出在目标值本身，
+在目标值确定之前讨论"如何收敛到目标值"的具体路径没有意义——一旦
+Decision 3 确定了正确的目标值来源，本节第 1-7 条的通用 fail-closed
+要求仍然适用，但"具体从哪张表/哪个字段 JOIN 出目标值"这部分需要
+重新设计，不能照搬第二版 JOIN `Subscription.accounting_user_id` 的
+具体做法。
 
 ## Reality ownership：无 NEW EVIDENCE，维持 ADR-014 结论
 
@@ -444,31 +716,49 @@ ownership 结论（inbound protocol/listen/port → 静态模板；Reality
 DB/Secret；routing/outbounds/route identity → DB；运行时 config →
 只读校验/回滚/漂移来源）的证据，本 ADR 不重新打开这些问题。
 
-## Decision 4：Phase 2B implementation matrix（已按本轮修正拆分为
-更细的条目）
+## Decision 4：Phase 2B implementation matrix（第三次修订：按独立
+审查要求，允许 `BLOCKED`/`DECISION_REQUIRED`，不强行归为 YES/NO）
 
 | 改动类型 | 需要？ | 说明 |
 |---|---|---|
-| `DesiredRoutingState` DTO change | **YES** | 扩展以表达完整 outbound 连接细节；route identity 部分不需要新增字段 |
-| Settings change | **YES** | `XRAY_REALITY_DEST`/`XRAY_REALITY_SERVER_NAME` 读取路径（ADR-014 已定方向） |
-| Secret persistence change | **YES** | Reality `privateKey`/`shortIds` 走 `Secret` 表（ADR-014 已定方向） |
-| DB schema change | **NO** | `gateway_principal`/`accounting_user_id` 都是已有列 |
-| **既有数据 reconciliation**（本轮新增独立条目） | **YES** | Alembic data-only reconciliation migration，见上方"既有数据收敛"小节的完整设计要点，含 unique constraint 冲突的 fail-closed 处理 |
-| provisioning writer change | **YES，范围很小** | `desired_routing_state()` 里 `ensure_gateway_route_binding()` 的调用参数从 `tenant.tenant_id` 改为 `request.username` |
-| **accounting health contract/API**（本轮新增独立条目） | **YES** | 给 `AccountingProvider` 新增 `health_check()`（Option H1），`admin_accounting_health()` 改为调用 `accounting.health_check()`；`MockAccountingProvider` 和未来的真实 Marzban adapter 都要实现 |
-| query/adapter change | **YES** | 期望态查询参照 `render_xray_routes.py::_active_routes()` 的 JOIN 逻辑扩展到 provider 抽象层 |
-| Xray renderer change | **YES** | 产出完整 outbound；Reality `dest`/`serverNames` 改为只读 env |
-| preservation/validation change | **YES** | 按 ADR-014"合法删除语义"重写；保留 Marzban 协议匹配约束（Part A） |
-| **共享 `XRAY_JSON` writer guard / drift policy**（本轮新增独立条目） | **YES** | 本仓库 renderer 是唯一合法 writer；本应用不得调用 Marzban `PUT /api/core/config`；需要 drift detection（renderer 运行前比对磁盘当前内容与预期上一次写入是否一致），检测到漂移 fail closed + 告警，不静默覆盖 |
-| tests | **YES** | 覆盖：route identity 收敛后的契约（`gateway_principal == request.username`）、reconciliation migration 的幂等性和 unique-constraint 冲突场景、`accounting.health_check()` 契约、drift-detection 的 fail-closed 行为 |
+| `DesiredRoutingState` DTO change | **YES** | 扩展以表达完整 outbound 连接细节；route identity 部分 `BLOCKED`（见下方专项） |
+| `AccountUserDTO`/accounting 返回契约 change | **BLOCKED** | contingent on Decision 3——只有 Marzban API 能提供 routing principal 时才需要加 `routing_principal` 字段，见 Part C"AccountUserDTO / 编排数据流影响" |
+| provisioning 编排/数据流 change（`CREATE_ACCOUNTING_USER` → `APPLY_GATEWAY`） | **BLOCKED** | 同上，contingent on Decision 3；当前编排丢弃 `create_user()` 返回值，若 Decision 3 需要传递 routing principal，这里需要新增数据通道 |
+| Settings change | **YES** | `XRAY_REALITY_DEST`/`XRAY_REALITY_SERVER_NAME` 读取路径（ADR-014 已定方向），与 route identity 无关，不受本轮 BLOCKED 影响 |
+| Secret persistence change | **YES** | Reality `privateKey`/`shortIds` 走 `Secret` 表（ADR-014 已定方向），与 route identity 无关 |
+| **DB schema change（route identity 部分）** | **BLOCKED** | 第二版"NO"的结论不再成立——如果 Decision 3 最终需要持久化 Marzban DB user id 或类似的新数据，需要新列/新表 |
+| **DB schema change（drift-detection 基线部分）** | **YES（新增独立条目）** | `TransportVersion`/`EgressVersion` 确认不适用（bounded-context 不匹配、且当前零引用），需要新的、scope 限定为共享 Xray 配置文件的 `last_applied_config_hash`/`last_applied_at` 持久化位置，具体形态留 Phase 2B 详细设计 |
+| **route identity 收敛方案本身**（Decision 3） | **BLOCKED** | Marzban 公开 API 无法提供 Xray 实际匹配的复合 client email（`{marzban_user_id}.{username}`），见 Part C |
+| **既有数据 reconciliation** | **BLOCKED** | contingent on Decision 3；目标值未定之前无法设计具体的 JOIN/收敛逻辑；通用 fail-closed 要求（全量 preflight、检测到任何异常整体中止、不允许"跳过并记录"）已经确定，不受 BLOCKED 影响，可以先写进验收标准 |
+| provisioning writer change（route identity 部分） | **BLOCKED** | 同 Decision 3 |
+| **accounting health contract/API**（H1） | **YES，不受本轮三个 Major 影响** | 给 `AccountingProvider` 新增 `health_check()`，`admin_accounting_health()` 改为调用 `accounting.health_check()`；`MockAccountingProvider` 和未来的真实 Marzban adapter 都要实现——这一项是 Part B 的结论，本轮三个 Major 只涉及 Part C（route identity）和 Decision 1（drift detection），不涉及 Part B，继续保持 YES |
+| query/adapter change | **YES（不含 route identity 部分）** | 期望态查询参照 `render_xray_routes.py::_active_routes()` 的 JOIN 逻辑扩展到 provider 抽象层；route identity 相关的具体 JOIN 逻辑 `BLOCKED` |
+| Xray renderer change | **YES（不含 route identity 部分）** | 产出完整 outbound；Reality `dest`/`serverNames` 改为只读 env；route identity 相关的 `routing.rules[].user` 渲染逻辑 `BLOCKED`（渲染 `request.username` 会产生一条永远不会命中的路由规则，不能先上线这部分） |
+| preservation/validation change | **YES** | 按 ADR-014"合法删除语义"重写；保留 Marzban 协议匹配约束（Part A）；与 route identity 无关 |
+| **共享 `XRAY_JSON` writer guard / drift policy** | **YES，算法已重写** | 本仓库 renderer 是唯一合法 writer；本应用不得调用 Marzban `PUT /api/core/config`；drift detection 改用本轮"三态模型"（`last_applied_state`/`current_disk_state`/`new_db_desired_state`），需要新的基线持久化（见上）和显式 bootstrap 策略（见下） |
+| **drift-detection 首次运行 (bootstrap) 策略** | **YES（本轮新增独立条目）** | 无基线时需要一次显式的"采纳当前磁盘状态为初始基线"操作并记录，不能静默假设"无基线=无漂移"；文件缺失时按正常渲染处理；基线只在实际写盘成功后更新，不在校验通过但未写盘时更新 |
+| tests | **部分 YES，部分 BLOCKED** | 可以现在写：`accounting.health_check()` 契约测试、drift-detection 三态模型的单元测试（含 bootstrap/文件缺失/基线更新时机场景）、既有数据 reconciliation 的通用 fail-closed 行为测试（不依赖具体目标值，只测试"任何一行无法解析就整体不写入"这个不变量）；不能现在写：`gateway_principal` 最终值的契约测试（因为最终值本身 `BLOCKED`） |
 
-## Phase 2B implementation handoff（严格收窄，不变）
+## Phase 2B implementation handoff（第三次修订：收窄为"确定可以实现
+的部分"，route identity 相关部分明确排除）
 
-只实现上表全部标 `YES` 的条目——DB → desired-state contract、Xray
-renderer/测试护栏、既有数据 reconciliation、accounting health 契约、
-共享文件 writer guard。**不包括**：`registry.py` 的真实 opt-in
-wiring、生产环境启用、真实生产凭据、真实 Xray reload、部署——这些
-仍然属于 Phase 2C。
+**可以实现的部分**（上表标 `YES` 的条目）：ADR-014 已定方向的
+Reality Settings/Secret 部分、accounting health 契约（H1）、drift
+detection 的三态模型与其新基线持久化与 bootstrap 策略、preservation/
+validation 重写、共享文件 writer guard（不依赖 route identity 具体
+值的部分）。
+
+**明确排除、不得在本轮 Decision 3 解决之前实现**：`gateway_principal`
+的任何写入逻辑改动、`routing.rules[].user` 的渲染逻辑改动、既有数据
+reconciliation migration 的具体实现、`AccountUserDTO`/编排数据流的
+改动——这些全部 contingent on Decision 3，在 Decision 3 找到一个
+exact-source 支持的、可实现的答案之前，实现它们只会把一个已知错误的
+值（accounting username）继续写进生产数据和渲染出的 Xray 配置里，
+不会真正解决路由匹配问题，也会让"这个字段该存什么"的语义在
+reconciliation 之后需要再改一次。
+
+以上仍然**不包括**：`registry.py` 的真实 opt-in wiring、生产环境
+启用、真实生产凭据、真实 Xray reload、部署——这些仍然属于 Phase 2C。
 
 ## 约束
 
@@ -482,15 +772,28 @@ wiring、生产环境启用、真实生产凭据、真实 Xray reload、部署�
    supersede note 需要同步更新为记录 H1（给 `AccountingProvider` 加
    `health_check()`）这个新决定，**不能再写"现有接线明确不需要修改"**
    ——这条表述已被本轮修正推翻。
-4. Decision 3（候选 A）在 Phase 2B 实现时必须同时包含：①一行 writer
-   调用参数改动；②既有数据 reconciliation migration——两者是同一个
-   决策的两个组成部分，缺一不可，不得只做①就视为完成 Decision 3。
+4. **（第三次修订更正，原第 4 条已被推翻）** Decision 3 目前是
+   `BLOCKED`：不得在 Marzban 官方 API 能否提供 Xray 实际匹配的复合
+   client email（`{marzban_user_id}.{username}`）这一问题解决之前，
+   实现"写入 `gateway_principal = request.username`"或任何形式的
+   既有数据 reconciliation migration——这两者都建立在一个已被
+   exact-source 证据推翻的错误目标值上，实现它们不会解决问题，只会
+   把错误值继续写进生产数据。
 5. Part A 发现的两条约束都必须写进 Phase 2B 的验收标准：①renderer
    产出的 inbound tag 不能破坏 Marzban 协议匹配；②本仓库 renderer 是
    共享 `XRAY_JSON` 唯一合法 writer，需要 drift detection 保护这个
    边界。
 6. Decision 2 新增的 accounting health 决定（H1）必须写进 Phase 2B
    实现范围，不能停留在"以后再说"。
+7. **（第三次修订新增）** drift detection 必须使用"三态模型"
+   （`last_applied_state`/`current_disk_state`/`new_db_desired_
+   state`），不得使用第二版"磁盘 vs DB 期望态"的两态比较算法；必须
+   新增 scope 限定为共享 Xray 配置文件的基线持久化（不得复用
+   `TransportVersion`/`EgressVersion`）；必须有显式的 bootstrap
+   （首次运行）策略，不得静默假设"无基线=无漂移"。
+8. **（第三次修订新增）** 既有数据 reconciliation 的 NULL/未匹配行
+   处理必须是"全量 preflight → 检测到任何异常整体中止，不做任何
+   UPDATE"，不允许"跳过并记录、继续处理其它行"这种部分成功的模式。
 
 ## 考虑过的替代方案
 
@@ -515,6 +818,26 @@ wiring、生产环境启用、真实生产凭据、真实 Xray reload、部署�
    立场）**：被 Part A 的更正推翻——Marzban 的 core-config 管理 API
    确实能写这个文件，继续假设它只是 reader 会产生未被检测的双 writer
    竞态，否决，改为"唯一合法 writer + drift detection"的更谨慎模型。
+9. **（第三次修订新增）候选 A（`gateway_principal = request.
+   username`，第二版曾经的 Selected）**：被本轮 exact-source 发现
+   推翻——Xray 实际匹配的是 `f"{marzban_user_id}.{username}"`，不是
+   纯 accounting username，候选 A 写入的值在真实 Marzban+Xray 组合下
+   永远不会被路由规则命中，否决。
+10. **（第三次修订新增）猜测 Marzban DB user id 按自增顺序推导**：
+    被用户明确禁止，且无法应对历史删除导致的 id gap，脆弱不可验证，
+    否决。
+11. **（第三次修订新增）直接读取 Marzban 生产 SQLite 获取 DB user
+    id**：被用户明确禁止，且这是未公开的实现细节，不是 Marzban
+    承诺维持稳定的契约，否决。
+12. **（第三次修订新增）复用 `TransportVersion`/`EgressVersion` 作为
+    drift-detection 的 last-applied 基线存储**：grep 确认两者当前
+    零引用，且按 `route_group_id` 组织，与"单一共享 Xray 配置文件"
+    的 bounded context 不匹配，属于"因为字段形状像就复用"的错误
+    硬映射，否决，改为新增独立的、scope 限定的持久化机制。
+13. **（第三次修订新增）drift detection 静默假设"无基线 = 无漂移"**：
+    会把"从未记录过基线"和"确认过没有被篡改"混为一谈，在首次引入
+    基线机制时可能放行一个实际已经被篡改过的磁盘状态，否决，改为
+    显式的、被记录的"采纳当前磁盘状态为初始基线"操作。
 
 ## 安全影响
 
@@ -524,12 +847,17 @@ wiring、生产环境启用、真实生产凭据、真实 Xray reload、部署�
   或者运维的改动会覆盖 renderer 的期望态输出——**两个方向都可能导致
   配置意外偏离数据库期望态**，这正是需要 drift detection 的直接原因，
   优先级应视为 Phase 2B 的一部分，不是可以延后的次要项。
-- Decision 3 选定候选 A 之后，`GatewayRouteBinding.gateway_principal`
-  会开始存储 accounting username（此前存储的是 Webshare 出口租户
-  ID）——如果不做既有数据 reconciliation，会造成"新开通的订阅路由
-  正确、旧订阅路由错误"这种不一致状态，且没有任何自动检测机制会
-  发现它，直到某个客户报告连不上——这是本轮新增 reconciliation
-  migration 决定的直接动机。
+- **（第三次修订更正，原表述已被推翻）** 第二版这里描述的风险
+  （"不做既有数据 reconciliation 会导致新旧订阅路由不一致"）建立在
+  候选 A 是正确方案这个前提上，这个前提已被本轮 exact-source 发现
+  推翻。**真实风险比第二版描述的更严重**：候选 A 写入的
+  `gateway_principal = request.username` 从一开始就不是 Xray 实际
+  匹配的值——如果 Phase 2B 在 Decision 3 BLOCKED 状态下仍然实现了
+  候选 A，会导致**新开通的订阅路由规则从渲染出来那一刻起就永远不会
+  命中**（不是"和旧订阅不一致"，而是"新旧订阅的路由可能都是错的"），
+  且同样没有自动检测机制会发现它，直到某个客户报告连不上。这是本轮
+  把 Decision 3 改为 `BLOCKED`、并在"约束"一节明确禁止在此之前实现
+  候选 A 的直接动机。
 - accounting health 决定（H1）修正后，`/admin/accounting/health`
   会真正检查 Marzban（而不是无关的 subscription transport）——在此
   之前，这个端点给运维的信号是误导性的（显示"健康"可能只是因为
@@ -538,11 +866,18 @@ wiring、生产环境启用、真实生产凭据、真实 Xray reload、部署�
 
 ## 重新评估条件
 
-当 Phase 2B 实际实现候选 A 时，如果发现 `GatewayRouteBinding.
-gateway_principal` 在其它未被本次研究覆盖的代码路径里被依赖为
-"Webshare 出口租户 ID"这个旧语义，需要重新评估候选 A 的改动范围和
-reconciliation migration 的影响范围。如果 Phase 2B 实现 drift
-detection 时发现 Marzban 的 `PUT /api/core/config` 在实际部署里从未
-被运维使用过（例如权限层面已经天然不可达），可以相应降低 drift
-detection 的实现优先级，但仍然应该保留检测能力，不应该假设"未来也
-永远不会被调用"。
+如果 Phase 2B 实现 drift detection 时发现 Marzban 的 `PUT
+/api/core/config` 在实际部署里从未被运维使用过（例如权限层面已经
+天然不可达），可以相应降低 drift detection 的实现优先级，但仍然
+应该保留检测能力，不应该假设"未来也永远不会被调用"。
+
+**（第三次修订新增）Decision 3 的 `BLOCKED` 状态的解除条件**：以下
+任一情况出现时，应重新打开 Decision 3 的讨论——(1) 未来版本的
+Marzban 在公开 Admin API 里新增了暴露 DB user id 或复合 client
+email 的字段/端点；(2) 项目决定接受"要求 Marzban 部署方额外暴露一个
+只读 DB 连接供本应用查询 `User.id`"这个此前被列为"需要新 ADR 评估"
+的选项，并为此写一份新的 ADR 正式评估其风险（依赖未公开 schema、
+版本升级兼容性）；(3) 决定改用 Marzban 官方文档中记录的、本轮尚未
+核实到的其它公开机制（例如未来核实到某个当前遗漏的端点确实返回
+该值）。在这些条件被满足并有新的 exact-source 证据之前，不应该
+重新尝试实现候选 A/B/C 中的任何一个。
