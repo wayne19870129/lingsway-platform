@@ -410,8 +410,11 @@ if self.app_env == "production" and self.accounting_provider == "marzban":
 修订：独立审查又指出并核实了三处 Major——铁律第 1 条与静态模板边界不清、
 `docs/10` 对 Reality 来源的描述仍不准确、`GatewayRouteBinding.
 gateway_principal` 设计意图判断错误 + `Subscription.accounting_user_id`
-持久化时机晚于渲染发生——已全部修正，完整证据见 ADR-014 的"A2"节和
-"事实三"节）
+持久化时机晚于渲染发生——已全部修正；同日第四次修订：独立审查指出 A2
+把 Reality `dest`/`serverNames` 留成"暂不强制归类"这个中间状态本身和
+A2 自己的通用规则矛盾，已收敛为明确结论（运维部署配置，唯一来源为
+环境变量/`Settings`，不再允许从模板读取），完整证据见 ADR-014 的"A2"节
+和"事实三"节）
 
 按用户要求，阶段二先只回答一个问题："数据库能不能完整表达应用负责管理的
 Xray desired state"，不做 registry wiring、不做 provider 实现、不碰
@@ -464,17 +467,26 @@ Xray reload。完整分析和证据记录在新 ADR：
   render()`（provider 抽象层的实现）完全没有用到这些信息，只产出没有
   连接细节的空壳 outbound。
 - **Reality `privateKey` 和 `shortIds` 都没有持久化位置，且按
-  `AGENTS.md` 铁律第 1 条的严格解读，这是当前不合规的现状，不是可以
-  接受的"模板归属"**（已扩充两次：第一版只记录了 privateKey；第二次
-  修订补上 shortIds；本次第三次修订新增 ADR-014"A2"节，明确区分"可变
-  desired state"（必须有 DB/Secret canonical source）、"代码级固定安全
-  不变量"（允许硬编码）、"静态模板"（严格限定为不因客户/部署内容变化的
-  纯基础设施骨架，即 inbound protocol/listen/port）三类概念——Reality
-  `privateKey`/`shortIds` 属于第一类，不是第三类，目前却只活在无状态
-  模板里，是需要 Phase 2B 解决的不合规现状）：`_reality_settings()`
+  `AGENTS.md` 铁律第 1 条的严格解读，这是当前不合规的现状，需要 Phase
+  2B 挪进数据库/`Secret`**（已扩充两次：第一版只记录了 privateKey；第二
+  次修订补上 shortIds；第三次修订新增 ADR-014"A2"节区分"可变 desired
+  state"/"代码级固定安全不变量"/"静态模板"三类概念）：`_reality_settings()`
   每次从静态模板文件生成新的 privateKey/shortIds，理论上每次渲染都可能
   轮换、破坏存量客户连接（ADR-014"事实五"，这是静态阅读代码即可确认的
   缺陷，不是 UNVERIFIED）。
+- **（本轮第四次修订新增）Reality `dest`/`serverNames` 的归属已收敛为
+  第四类：运维部署配置，唯一来源应为环境变量/`Settings`，不再允许从
+  模板文件读取**——第三次修订曾把这两个字段用"暂不强制归类"搁置，独立
+  审查指出这和 A2 自己"凡是会因部署变化而影响候选配置的内容都必须有
+  canonical source"的通用规则自相矛盾。核实判据：`dest`/`serverNames`
+  是运维手动选定的 Reality 伪装身份参数（伪装成哪个域名/SNI），不随
+  客户下单/退订变化，性质上和 `protocol`/`listen`/`port`、以及本仓库
+  已有的 `SITE_DOMAIN`/`API_DOMAIN`（ADR-006）一致——都是"运维经环境
+  变量配置、不进数据库"的先例；和 `privateKey`/`shortIds`（系统生成、
+  需要追踪轮换）的区别是它们不是系统生成的、不需要轮换/审计机制。当前
+  实现"模板优先、env 兜底"两个来源并存本身是一个真实风险（模板和 env
+  值不一致时会悄悄用错值），Phase 2B 需要把来源收窄为只读环境变量，
+  移除模板读取路径。
 - **（已更正）`TrafficRule` 不是死代码**：`ops/forwarder/
   render_mihomo_config.py` 确实 import 并查询 `TrafficRule`（enabled
   过滤），`_render_traffic_rules()` 把它们渲染成 Mihomo 的 `rules`
@@ -505,7 +517,7 @@ Xray reload。完整分析和证据记录在新 ADR：
 | 类型 | 是否需要 | 说明 |
 |---|---|---|
 | DTO change（`DesiredRoutingState`/新增 DTO） | **需要** | 至少要能表达 outbound 连接细节（host/port/protocol/凭据引用）+ 路由匹配键；inbound/client 是否需要取决于 ADR-014 收窄后的 `UNVERIFIED` 问题的答案 |
-| DB model/schema change | **可能需要**，具体列留给 Phase 2B（**"`GatewayRouteBinding` 补 username 字段"这一条候选仍然不需要**） | 候选：Reality `privateKey`/`shortIds` 的持久化位置（新列或 `Secret` 表条目，方向已由 ADR-014"A2"确定，不再是 UNVERIFIED）；如果确认 Marzban 不会自己动态管理 client，需要新表存 client 认证材料 |
+| DB model/schema change | **可能需要**，具体列留给 Phase 2B（**"`GatewayRouteBinding` 补 username 字段"这一条候选仍然不需要**；**Reality `dest`/`serverNames` 明确不需要 schema，只需环境变量，见下**） | 候选：Reality `privateKey`/`shortIds` 的持久化位置（新列或 `Secret` 表条目，方向已由 ADR-014"A2"确定，不再是 UNVERIFIED）；如果确认 Marzban 不会自己动态管理 client，需要新表存 client 认证材料 |
 | 编排/时序 change（**本轮新增，不是 schema，是代码/编排层面**） | **需要** | `gateway_principal` 当前写入值和模型/测试契约期望值不一致，`accounting_user_id` 持久化时机晚于 `APPLY_GATEWAY` 渲染时刻——Phase 2B 必须先在 ADR-014 事实三的候选 A/B/C 中选定收敛方向，这不是"顺便决定的细节" |
 | query/adapter change | **需要** | 期望态查询逻辑需要参照 `render_xray_routes.py::_active_routes()` 已经跑通的 JOIN 逻辑，而不是从零设计；`SqlAlchemyProvisioningState.desired_routing_state()` 现有实现需要重新评估是否要挪到这条新数据流里 |
 | Xray renderer change | **需要** | `XrayFileProvider.render()` 需要能产出完整 outbound（不只是 tag），且要先解决 inbounds 是否属于它职责范围这个前提问题 |
@@ -531,7 +543,10 @@ Xray reload。完整分析和证据记录在新 ADR：
    ①的答案决定要不要加 inbound/client 的位置。
 3. 为 Reality `privateKey`/`shortIds` 和（如果需要）client 认证材料
    设计持久化位置，走 `Secret` 表的加密存储机制（方向已定，见 ADR-014
-   "A2"）。
+   "A2"）；同时把 `render_xray_routes.py` 读取 `dest`/`serverNames` 的
+   逻辑从"模板优先、env 兜底"改成"只读环境变量/`Settings`"，移除模板
+   作为这两个字段的来源（方向已定，见 ADR-014"A2"第 4 类，不需要
+   schema 改动）。
 4. 重写 preservation/校验逻辑为"候选与本次期望态一致 + 安全不变量"，
    替换掉现在"候选不能比运行时当前配置少任何东西"的旧语义。
 5. 为①~④分别补齐契约测试，覆盖合法删除、Reality 材料稳定性、

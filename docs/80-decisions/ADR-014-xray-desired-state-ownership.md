@@ -6,7 +6,10 @@
   错误；2026-09-11 第三次修订：新增"A2"明确铁律第 1 条与静态模板的边界，
   修正 `docs/10-deploy-new-server.md` 里仍不准确的 Reality 来源描述，
   更正 `GatewayRouteBinding.gateway_principal` 的设计意图判断，补充
-  `Subscription.accounting_user_id` 持久化时机晚于渲染发生这一时序缺口）
+  `Subscription.accounting_user_id` 持久化时机晚于渲染发生这一时序缺口；
+  2026-09-11 第四次修订：收敛 Reality `dest`/`serverNames` 的最终归属
+  （运维部署配置，唯一来源为环境变量/`Settings`，不再允许从模板读取），
+  移除 A2 里"暂不强制归类"这个自相矛盾的中间状态）
 - 决策范围: TASK-T16 Phase 2A（只读盘点 + 契约决策，不实现代码）
 
 ## Context
@@ -397,31 +400,37 @@ short ID**，两者都是 Reality 协议里客户端配置需要固定下来的�
 | 应用/数据库拥有，**但持久化时机和字段一致性都还有缺口，不能当成已经解决** | Xray `"user"` 路由匹配键 | `Subscription.accounting_user_id`（有 canonical source，但在 `APPLY_GATEWAY` 渲染时可能还未写入）；`GatewayRouteBinding.gateway_principal`（模型/测试契约期望是 accounting principal，当前 writer 实际写入 Webshare tenant id，两者不一致） | 事实三（含第二轮补充） |
 | 应用拥有，但**不来自数据库行数据**（固定不变量，允许硬编码） | private BLOCK 首条规则、tcp/udp BLOCK 兜底、禁止 DIRECT | 渲染器代码本身 | `AGENTS.md` 铁律第 2 条要求"一律"，属于应用级不变量而非按订阅变化的期望态 |
 | 运维/部署时静态模板拥有，**范围严格限定为不因客户/部署内容而变的固定基础设施骨架**（见下方"A2"，不是数据库之外的第二个可变 desired-state 来源） | inbound 的 protocol/listen/port | `infrastructure/marzban/xray_config.base.json` | 事实一、二、A2 |
-| **不应继续留在静态模板里、按铁律第 1 条的严格解读目前不合规，需要 Phase 2B 挪进数据库/Secret 表** | Reality `privateKey`/`shortIds`（`dest`/`serverNames` 在模板为空时还会退回读 env，同样不是数据库） | 目前：模板为空时由 `_reality_settings()` 现场生成/由 env 提供；应该：数据库或 `Secret` 表的持久化 canonical source | 事实五、A2 |
+| **不应继续留在静态模板里、按铁律第 1 条的严格解读目前不合规，需要 Phase 2B 挪进数据库/Secret 表** | Reality `privateKey`/`shortIds` | 目前：模板为空时由 `_reality_settings()` 现场生成，从不持久化；应该：数据库或 `Secret` 表的持久化 canonical source | 事实五、A2 |
+| **运维部署配置，唯一来源应为环境变量/`Settings`，不是数据库，也不该继续允许从模板文件读取**（本轮明确收敛，不再是"暂不归类"） | Reality `dest`/`serverNames` | 目前：模板优先、env 兜底（两个来源并存，不明确）；应该：只从 `XRAY_REALITY_DEST`/`XRAY_REALITY_SERVER_NAME` 这类环境变量/`Settings` 字段读取，Phase 2B 移除模板作为这两个字段的来源 | A2 |
 | 与 Xray desired state 无关，但真实在用（不要混进本 ADR 范围） | Mihomo 动态流量策略 | `TrafficRule` → `ops/forwarder/render_mihomo_config.py` | 事实四 |
 | **尚未确定，需要专门 ADR/TASK 决策或人工核实部署拓扑，不在本 ADR 范围内解决** | Marzban 是否/如何动态管理 `inbounds[].settings.clients`（范围已缩小，见事实二）；Marzban 到底对应 `accounting_provider` 还是 `transport_provider_mode`（ADR-013 与 `config.py` 现有矛盾） | UNVERIFIED / DECISION REQUIRED | 事实二 |
 | 运行时文件（Xray 当前 `config.json`）角色 | 只读——backup / rollback / drift detection / validation / post-reload 校验 | 明确禁止作为 desired state 的第二数据源（铁律第 1 条） | 已在 TASK-T16 前几轮记录 |
 
-### A2. `AGENTS.md` 铁律第 1 条与静态模板的边界（回应独立审查 Major 1）
+### A2. `AGENTS.md` 铁律第 1 条与静态模板的边界（回应独立审查 Major 1，
+本轮又收敛了 `dest`/`serverNames` 这个此前留白的候选）
 
 **上一版把"静态模板拥有 inbound 的 protocol/listen/port/TLS-Reality 参数
 骨架"整体列成一行，容易读成"模板是和数据库并列的第二个 desired-state
 owner"，这和铁律第 1 条（"配置渲染一律从数据库全量生成，禁止增量拼接"）
-表面上冲突——独立审查指出后核实确认这个混淆是真实存在的，需要把三类
-概念明确分开，而不是笼统地说"模板也是一种归属"：**
+表面上冲突——独立审查指出后核实确认这个混淆是真实存在的，需要把四类
+概念明确分开，而不是笼统地说"模板也是一种归属"。第二次修订已经区分出
+前三类，但把 Reality `dest`/`serverNames` 用"暂不强制归类"搁置，被
+独立审查指出这个中间状态本身就是自相矛盾——同一个 ADR 一边说"会因部署/
+客户/服务器身份变化而影响候选配置的内容都必须有 DB/Secret canonical
+source"，一边又把符合这个定义的 `dest`/`serverNames` 排除在外。本轮
+补上第四类，给出单一、明确的结论，不再留白：**
 
 1. **可变 desired state（必须有数据库/Secret canonical source，不允许
-   活在无状态模板里）**——凡是会因部署、客户、凭据、服务器身份变化而
-   影响候选配置的内容都属于这一类。已确认属于这一类、且已经有数据库
-   canonical source 的：路由规则、outbound 连接细节。**已确认属于这一
-   类、但目前没有数据库/Secret canonical source 的（这是不合规现状，
-   不是可以接受的模板归属）**：Reality `privateKey`/`shortIds`——这两个
-   值是服务器身份材料，理论上每套部署应该固定，属于"可变但应该稳定"的
-   desired state，不是"永远不变、可以硬编码在模板里"的基础设施骨架；
-   `dest`/`serverNames` 在模板为空时也会退回读环境变量，同样不是来自
-   数据库，本 ADR 记录这一点但暂不强制归类（是否需要挪进数据库，留给
-   Phase 2B 评估，因为它们本身變动频率可能确实接近"部署时固定"而非
-   "按客户变化"）。
+   活在无状态模板里）**——凡是会因**客户/订阅/业务事件**变化而影响候选
+   配置的内容属于这一类。已确认属于这一类、且已经有数据库 canonical
+   source 的：路由规则、outbound 连接细节。**已确认属于这一类、但目前
+   没有数据库/Secret canonical source 的（这是不合规现状，不是可以
+   接受的模板归属）**：Reality `privateKey`/`shortIds`——这两个值由
+   系统自己生成（`_x25519_private_key()`/`secrets.token_hex(8)`），
+   不是运维手填的固定配置，理论上每套部署应该固定、可追踪、可轮换、
+   可审计，性质上更接近需要持久化状态的系统生成材料，而不是运维一次性
+   录入的部署参数——这是把它们和 `dest`/`serverNames` 区分开、放进不同
+   类别的关键判据（见下方第 4 类）。
 2. **代码级固定安全不变量（允许硬编码在渲染器代码里，不是数据源问题）**
    ——private BLOCK 首条规则、tcp/udp BLOCK 兜底、禁止 DIRECT。这些不
    随客户/部署变化，`AGENTS.md` 铁律第 2 条本身要求"一律"，硬编码是
@@ -431,19 +440,71 @@ owner"，这和铁律第 1 条（"配置渲染一律从数据库全量生成，�
    ——本 ADR **不**把整个 `xray_config.base.json` 都当作合法的、和数据库
    并列的 desired-state 来源；模板真正应该保留的内容收窄为
    **inbound 的 protocol/listen/port** 这类纯粹的基础设施接线信息（同一
-   套部署里几乎不会因为哪个客户下单而改变），不包括 Reality 身份材料。
+   套部署里几乎不会因为哪个客户下单而改变），不包括任何 Reality 字段
+   （包括 `dest`/`serverNames`——本轮之前的版本还允许它们从模板读取，
+   本轮收窄为不再允许，理由见下方第 4 类）。
+4. **（本轮新增，收敛第一次修订遗留的留白）运维部署配置——不是可变
+   desired state，不是数据库来源，也不该继续允许从模板文件读取，唯一
+   canonical source 应为环境变量/`Settings`**：Reality `dest`/
+   `serverNames`。判据：这两个值是运维在搭建某一套 Xray Reality 伪装
+   身份时**一次性手动选定**的参数（伪装成哪个目标域名/哪些 SNI），不是
+   系统生成、也不会随客户下单/退订变化——变化频率和触发方式和
+   `protocol`/`listen`/`port`、以及本仓库已有先例 `SITE_DOMAIN`/
+   `API_DOMAIN`/`SUBSCRIPTION_DOMAIN`（ADR-006，同样是"影响渲染结果但
+   由运维经环境变量配置，不进数据库"的先例）一致，因此不落进铁律第 1 条
+   针对的"业务期望态"范畴；但它们目前的实现（模板优先、env 兜底）比
+   `protocol`/`listen`/`port`（只从模板读）更含糊，本轮予以收敛：
+   **唯一 canonical source 定为 `XRAY_REALITY_DEST`/
+   `XRAY_REALITY_SERVER_NAME` 这类环境变量/`Settings` 字段，Phase 2B
+   移除模板作为这两个字段的读取来源**，不再允许模板和 env 两个源并存。
 
-**本 ADR 的决定是：不对 `AGENTS.md` 铁律第 1 条做例外覆盖**——不采用
-"模板作为 desired-state 的一个合法来源，需要写覆盖范围/版本管理/漂移
-检测"这条路径。理由：Reality `privateKey`/`shortIds` 一旦被承认为
-"模板可以合法拥有的内容"，就需要一整套模板版本管理、漂移检测、DB/模板
-冲突时优先级判定的机制（用户在本轮审查里列出的那些验收项），这套机制
-目前完全不存在，而且这些值本质上是**应用需要能追踪、轮换、审计的服务器
-身份材料**，更适合走已有的 `Secret` 表机制，而不是新开一套"模板管理"
-体系。因此这里选择更简单的路径：**维持数据库/Secret 是唯一可变
-desired-state 来源这条铁律不变，把 Reality 身份材料的持久化缺口如实
-记录为"当前不合规、Phase 2B 必须解决"，而不是把模板拔高成一个新的、
-需要额外治理机制的 desired-state owner**。
+**本 ADR 的决定是：不对 `AGENTS.md` 铁律第 1 条做例外覆盖，且不允许
+任何 Reality 字段继续从静态模板读取**——不采用"模板作为 desired-state
+的一个合法来源，需要写覆盖范围/版本管理/漂移检测"这条路径。理由：
+Reality `privateKey`/`shortIds` 一旦被承认为"模板可以合法拥有的内容"，
+就需要一整套模板版本管理、漂移检测、DB/模板冲突时优先级判定的机制，这套
+机制目前完全不存在，而且这两个值本质上是**应用需要能追踪、轮换、审计的
+系统生成材料**，更适合走已有的 `Secret` 表机制，而不是新开一套"模板
+管理"体系；`dest`/`serverNames` 虽然不是敏感材料，但它们是运维手填的
+部署参数，和数据库期望态的性质不同，也不需要新建模板治理机制——直接
+类比已有的 `SITE_DOMAIN` 等环境变量配置模式即可，不需要额外机制。
+
+以下逐项回答本轮审查要求的验收清单（针对 `dest`/`serverNames` 归为
+"运维部署配置"这个结论）：
+
+- **为什么不属于铁律第 1 条的 desired state**：铁律第 1 条约束的是随
+  客户/订阅/业务事件变化的期望态（路由、outbound），`dest`/
+  `serverNames` 不随这些事件变化，变化触发方式和运维改
+  `SITE_DOMAIN`（ADR-006）一致。
+- **authoritative source**：`XRAY_REALITY_DEST`/`XRAY_REALITY_SERVER_NAME`
+  环境变量（读取方式待 Phase 2B 决定是否正式收进 `Settings` 类，本 ADR
+  只定"必须是环境变量，不是模板文件"这个边界）。
+- **运维如何修改**：编辑目标机 `.env`/`/etc/lingsway/*.conf` 并重新执行
+  渲染（`ops.gateway.render_xray_routes`），与修改 `SITE_DOMAIN` 等现有
+  环境变量的流程一致，不需要新机制。
+- **版本化**：不需要应用层版本化机制，和其它环境变量一样，由运维自己的
+  变更记录/部署清单（`inventory.yml` 等）追踪。
+- **审计**：不是敏感材料，部署时的常规变更记录已经足够，不需要新增
+  专门的审计表；这一点和 `privateKey`/`shortIds`（需要走 `Secret` 机制
+  因而自带审计能力）不同。
+- **漂移检测**：Phase 2B 的验证步骤（类比 `70_verify.sh`）可以断言渲染
+  出的候选配置里的 `dest`/`serverNames` 与当前环境变量一致；这是 Phase
+  2B 的实现细节，本 ADR 只要求这个检测点存在。
+- **数据库与运维配置冲突时谁优先**：不会发生冲突——按本决定，
+  `dest`/`serverNames` 永远不来自数据库，只有"环境变量缺失"这一种失败
+  模式。
+- **缺失时是否 fail-closed**：是，现状已经如此
+  （`_reality_settings()` 在两者都为空时 `raise XrayRenderError`），
+  Phase 2B 把来源从"模板或 env"收窄为"只有 env"之后，这个 fail-closed
+  行为不变。
+- **Phase 2B renderer 如何读取且仍满足项目铁律**：`render_xray_routes.py`
+  今后读取 `dest`/`serverNames` 时只查环境变量/`Settings`，不再读
+  `base_config` 里的这两个字段；`base_config`（模板）继续只提供
+  `protocol`/`listen`/`port` 这类结构骨架。这样一来，模板不再是任何
+  Reality 字段的数据来源，数据库继续是路由规则/outbound 这些真正业务
+  desired state 的唯一来源，`privateKey`/`shortIds` 走 `Secret`，
+  `dest`/`serverNames` 走环境变量——四类各自唯一，不再有任何字段可以
+  从两个不同来源读到不同的值。
 
 这不代表模板本身要被移除——protocol/listen/port 这类真正固定的基础
 设施接线信息继续留在模板里是合理的（这类内容变化时通常伴随一次有意识
@@ -469,11 +530,17 @@ EgressBinding/Secret (凭据引用)            ─┘
 ```
 
 不允许在这条链路的任何一环读取当前运行时 `config.json` 来补齐缺失字段。
-静态模板文件仅限于 A2 收窄后的固定基础设施骨架（inbound
-protocol/listen/port）可以作为 renderer 的一个**输入**（不是数据库，
-但也不是"当前运行时状态"，是部署时配置）；Reality 身份材料
-（`privateKey`/`shortIds`）**不属于**这个允许范围，按 A2 的决定必须挪进
-数据库/Secret 表，不能继续以"模板输入"的名义留在无状态文件里。
+按 A2 收敛后的结论，renderer 的输入分三个互不重叠的来源，每类字段只有
+唯一 canonical source：
+
+- 静态模板文件——仅限 inbound `protocol`/`listen`/`port` 这类固定基础
+  设施骨架，不再提供任何 Reality 字段。
+- 环境变量/`Settings`——仅限 Reality `dest`/`serverNames` 这类运维一次性
+  录入的部署参数（A2 第 4 类），Phase 2B 移除模板作为这两个字段的
+  读取来源。
+- 数据库/`Secret` 表——路由规则、outbound 连接细节、路由匹配键（均已有
+  数据流，见上）以及 Reality `privateKey`/`shortIds`（A2 第 1 类，目前
+  尚未实现，是 Phase 2B 的持久化目标）。
 
 ### C. 合法删除语义
 
@@ -551,6 +618,10 @@ canonical source；但本轮新增了两项和"字段一致性/写入时机"相�
 - Reality `privateKey`/`shortIds` 需要一个持久化位置（数据库列或 Secret
   表条目），不能只靠静态模板文件（事实五、A2——A2 明确了这是按铁律第 1
   条严格解读目前不合规的现状，不是可以接受的模板归属）。
+- **（本轮明确，不再是候选）Reality `dest`/`serverNames` 不需要任何
+  数据库 schema**——A2 第 4 类已经决定它们的 canonical source 是环境
+  变量/`Settings`，Phase 2B 只需要把 renderer 的读取来源从"模板或 env"
+  收窄为"只读 env"，不涉及数据库改动。
 - 如果事实二最终确认 Marzban 不会自己动态管理 client（即缺失机制这个
   分支成立），需要一张新表或对 `GatewayRouteBinding` 的扩展来持久化
   client UUID/密码等认证材料，并通过 `Secret` 机制加密存储。
@@ -591,7 +662,9 @@ canonical source；但本轮新增了两项和"字段一致性/写入时机"相�
    该在编排的哪一步读。
 6. 静态模板（`xray_config.base.json`）今后只承载 A2 里收窄后的固定
    基础设施骨架（inbound protocol/listen/port），不得把新的、会随部署/
-   客户变化的内容悄悄塞回模板来"绕开"这条边界。
+   客户变化的内容悄悄塞回模板来"绕开"这条边界；Reality `dest`/
+   `serverNames`/`privateKey`/`shortIds` 四个字段一律不得继续从模板
+   读取（前两者改读环境变量/`Settings`，后两者改读数据库/`Secret`）。
 
 ## 考虑过的替代方案
 
@@ -623,6 +696,14 @@ canonical source；但本轮新增了两项和"字段一致性/写入时机"相�
   这不是"模板管理方式的选择问题"，而是"这两个值按铁律第 1 条本来就不
   应该只活在模板里"，优先级应视为需要尽快解决，不是可以无限期搁置的
   设计讨论。
+- **（本轮新增）Reality `dest`/`serverNames` 目前"模板优先、env 兜底"
+  的双来源实现本身是一个较低但真实的风险**：如果某次部署的模板文件和
+  当前环境变量的值不一致（例如运维只改了 env 却忘了模板也曾经手填过
+  值），渲染结果会悄悄使用模板里的旧值而不是 env 里的新值，且没有任何
+  报错或提示——这不是本 ADR 之前分析出的"轮换导致失效"那类风险，而是
+  "配置来源不唯一导致悄悄用错值"的风险。A2 第 4 类的决定（唯一来源收窄
+  为 env）直接消除这个风险，Phase 2B 实现时应确保移除模板读取路径，
+  不能只是"多一个来源判断优先级"。
 - 事实三已更正：route-match 用户名有一个明确的持久化来源
   （`Subscription.accounting_user_id`），但**本轮（第三次修订）发现这个
   来源的持久化时机晚于 `APPLY_GATEWAY` 渲染发生的时刻**，且
