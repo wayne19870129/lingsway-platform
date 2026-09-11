@@ -786,3 +786,102 @@ Phase 2B 本身开始之前更不适用。
   ADR-015"ADR-014 Phase 2B gate 与本 ADR 的关系"一节）；下一步应该是
   一个专门解决 Decision 3 / route identity architecture 的任务，而
   不是任何形式的 Phase 2B 实现 PR。
+
+## 阶段二 B1：Decision 3 / route identity architecture unblock
+（2026-09-11，PR #56 合并后的独立后续任务，docs/ADR-only，不实现代码）
+
+`docs/80-decisions/ADR-016-route-identity-architecture-unblock.md`
+（新建）完成了这个专项研究，**supersede** 本文档和 ADR-015 里 Decision
+3 的 `BLOCKED` 结论。本节只摘录结论，完整推导/exact-source 证据/
+候选比较见 ADR-016。
+
+**Marzban 版本调研**：核实精确 pinned tag `v0.8.4`（commit
+`7f396db3e703d71a28060bc9ce4a532ec64cb1f4`）与当前 `master` 分支
+HEAD 两者的 `app/models/user.py`（`UserResponse` 家族）、
+`app/xray/operations.py`（复合 email 构造公式）、官方 webhook
+payload（`app/utils/notification.py`）——三者交叉验证，**从 v0.8.4
+到当前 master，Marzban 官方公开受支持的 API/webhook 均未暴露 DB
+`id` 或复合 client email，纯版本升级不能解决这个问题**。
+
+**Decision 3：从 `BLOCKED` 改为 `SELECTED`**——选定 Candidate B：
+为 pinned Marzban 镜像维护一个最小化 source patch。**第三轮更正**：
+补丁机制不是此前写的 `model_validator(mode="before")`（这个描述
+未经验证，且方向不完全正确——会丢失其它字段的 `from_attributes`
+提取能力），而是"新增一个 `exclude=True` 的 `id: int` 字段（照旧
+通过 `from_attributes` 从 ORM 对象提取，不影响任何其它字段）+ 一个
+`@computed_field` 计算属性"。**第四轮更正**：验证证据从沙箱环境的
+`pydantic==2.13.5`+手工模拟升级为 pinned Marzban 精确依赖版本
+`pydantic==2.10.4`/`fastapi==0.115.2`，用真正的 FastAPI
+`TestClient` 对两条路径发起真实 HTTP 请求（不是重复调用
+`model_validate()` 模拟）：`POST /api/user`（对应 `add_user`）和
+`GET /api/user/{username}`（对应 `get_user`，真正经过 FastAPI
+`response_model` 序列化）产出完全一致的结果，现有字段全部正确
+保留，`id` 本身正确从输出中排除。让 `routing_principal: str` 字段
+（值 = `f"{marzban_db_user_id}.{username}"`，与 Marzban 自己
+`operations.py` 内部计算公式逐字节一致）在本仓库实际依赖的
+`POST /api/user`（`create_user`）和 `GET /api/user/{username}`
+（`get_user`）两条路径上可靠可用——两者的响应构造均已 exact-source
+核实持有带 `id` 的原始 ORM 对象，详见 ADR-016 "exact-source patch
+contract" 小节；`list_users`/webhook 等其它复用 `UserResponse` 的
+路径不在本方案承诺范围内。
+真实 Marzban-backed `AccountingProvider` 读取这个字段，
+`AccountUserDTO` 新增同名字段，`CREATE_ACCOUNTING_USER` 保留返回值
+并传给 `APPLY_GATEWAY`，`GatewayRouteBinding.gateway_principal` 的
+最终语义正式定为"Xray routing principal"。`accounting_user_id`
+维持现状（accounting username），两者是不同 bounded context 的
+独立标识符。Candidate A（纯升级）、Candidate C（只读 DB 集成）、
+消除 per-user email 依赖的替代 Xray 拓扑均已评估并否决，理由见
+ADR-016 Part C/D。
+
+**既有数据 reconciliation：从 `BLOCKED` 改为 `CONFIRMED` 可行，且
+明确不是 Alembic migration**——因为 `routing_principal` 是 Marzban
+已有数据的纯衍生值，reconciliation 只需对每个历史 active binding
+调用一次打了补丁的 `GET /api/user/{username}`，不存在"本地 DB
+算不出目标值"的结构性障碍；但因为这个流程依赖外部 Marzban API
+调用（网络可用性/admin token/限流），**独立审查更正**：不能实现为
+Alembic revision（会把数据库 schema 升级绑定在一个非事务性外部
+系统上，`AGENTS.md` 铁律第 7 条针对的是纯数据库确定性 reconciliation，
+不适用于这种场景）——改为一个**独立的、显式触发的受控 reconciliation
+工具/作业**：全量只读查询 + preflight 完成后，**第五轮更正（第三、
+四轮的修复均不成立）**：独立审查核实 `GatewayRouteBinding` 真实
+索引后指出，第四轮"`SELECT ... FOR UPDATE` 依赖索引范围 next-key
+lock 挡住 phantom insert"的前提与真实 schema 不符——这张表没有
+支撑 `enabled = TRUE AND released_at IS NULL` 这个复合条件的索引。
+更正为 **MySQL named advisory lock**（`GET_LOCK()`/
+`RELEASE_LOCK()`，命名空间隔离、覆盖数据库名）作为跨进程互斥的
+唯一正确性来源：`ensure_gateway_route_binding()`、
+`release_egress()`、未来的 reconciliation 工具全部必须获取同一把
+命名锁才能修改 `GatewayRouteBinding`；锁的获取/释放必须覆盖完整
+写事务（同一物理连接持有，commit/rollback 不自动释放锁，需要
+显式 `RELEASE_LOCK()`）；`GET_LOCK()` 返回 `0`/`NULL` 一律 fail
+closed。既有数据 reconciliation 拆成两阶段：Phase A 不持锁的只读
+外部 preflight（避免 Marzban 慢请求期间持有全表锁），Phase B 持锁
+后重新查询、与 Phase A 快照严格比较、通过后才在单一事务内批量
+UPDATE。conditional UPDATE + rowcount 校验降级为纵深防御；人工
+维护窗口降级为可选运维措施，不再是 correctness 的必要条件——真正
+的互斥保证来自"所有 writer 都遵守同一把命名锁"这件事本身。完整
+设计（含锁的边界说明和 Phase 2B 验收测试清单）见 ADR-016。
+
+**Phase 2B gate**：`ADR-014` 第 5 条"选定收敛方向"的前提条件现在
+已满足，门槛本身解除。**但这不等于可以立即开始实现**——真正的
+Phase 2B 实现 PR（Candidate B 补丁本身及其契约测试、真实 Marzban
+adapter、DTO/编排改动、独立的 reconciliation 工具/作业、
+`XrayFileProvider.apply()` 异常兜底加固、ADR-015 Decision 4 矩阵
+其余 `YES` 条目）仍需单独走完整实现/测试/审查流程，是本任务之后的
+下一步，不在本次 docs-only 任务范围内。
+
+### 本阶段（2B1）验收
+
+- 新增 `docs/80-decisions/ADR-016-route-identity-architecture-unblock.md`，
+  ADR-015 补一段 supersede 补记（不重写原 Decision 3 内容，保留
+  作为历史记录），修改本文档，`backend/**`/`ops/**`/
+  `infrastructure/**`/`deploy/**`/`frontend/**`/`.github/**` 等代码
+  目录零改动，无新增 migration/schema 改动。
+- 只读检索了 Marzban 官方公开仓库精确 `v0.8.4` tag 与 `master` 分支
+  当前 HEAD 的源码/文档，未连接任何真实 Marzban 实例，未使用任何
+  真实凭据，未读取生产 SQLite/MySQL。
+- 没有调用任何真实 provider 的网络请求。
+- 没有 reload 或调用 Xray/Mihomo，没有修改生产数据库。
+- Decision 3 已从 `BLOCKED` 推进为 `SELECTED`（Candidate B），Phase
+  2B 的门槛条件已满足，但 Phase 2B 实现本身仍未开始，是下一步的
+  独立任务。
