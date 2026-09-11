@@ -786,3 +786,63 @@ Phase 2B 本身开始之前更不适用。
   ADR-015"ADR-014 Phase 2B gate 与本 ADR 的关系"一节）；下一步应该是
   一个专门解决 Decision 3 / route identity architecture 的任务，而
   不是任何形式的 Phase 2B 实现 PR。
+
+## 阶段二 B1：Decision 3 / route identity architecture unblock
+（2026-09-11，PR #56 合并后的独立后续任务，docs/ADR-only，不实现代码）
+
+`docs/80-decisions/ADR-016-route-identity-architecture-unblock.md`
+（新建）完成了这个专项研究，**supersede** 本文档和 ADR-015 里 Decision
+3 的 `BLOCKED` 结论。本节只摘录结论，完整推导/exact-source 证据/
+候选比较见 ADR-016。
+
+**Marzban 版本调研**：核实精确 pinned tag `v0.8.4`（commit
+`7f396db3e703d71a28060bc9ce4a532ec64cb1f4`）与当前 `master` 分支
+HEAD 两者的 `app/models/user.py`（`UserResponse` 家族）、
+`app/xray/operations.py`（复合 email 构造公式）、官方 webhook
+payload（`app/utils/notification.py`）——三者交叉验证，**从 v0.8.4
+到当前 master，Marzban 官方公开受支持的 API/webhook 均未暴露 DB
+`id` 或复合 client email，纯版本升级不能解决这个问题**。
+
+**Decision 3：从 `BLOCKED` 改为 `SELECTED`**——选定 Candidate B：
+为 pinned Marzban 镜像维护一个最小化 source patch，让
+`UserResponse` 新增 `routing_principal: str` 字段（值 =
+`f"{marzban_db_user_id}.{username}"`，与 Marzban 自己
+`operations.py` 内部计算公式逐字节一致）；真实 Marzban-backed
+`AccountingProvider` 读取这个字段，`AccountUserDTO` 新增同名字段，
+`CREATE_ACCOUNTING_USER` 保留返回值并传给 `APPLY_GATEWAY`，
+`GatewayRouteBinding.gateway_principal` 的最终语义正式定为"Xray
+routing principal"。`accounting_user_id` 维持现状（accounting
+username），两者是不同 bounded context 的独立标识符。Candidate A
+（纯升级）、Candidate C（只读 DB 集成）、消除 per-user email 依赖的
+替代 Xray 拓扑均已评估并否决，理由见 ADR-016 Part C/D。
+
+**既有数据 reconciliation：从 `BLOCKED` 改为 `CONFIRMED` 可行**——
+因为 `routing_principal` 是 Marzban 已有数据的纯衍生值，reconciliation
+只需对每个历史 active binding 调用一次打了补丁的 `GET /api/user/
+{username}`，不存在"本地 DB 算不出目标值"的结构性障碍；具体设计
+仍然遵守 ADR-015 已确定的全量 preflight/任何异常整体中止的
+fail-closed 通用要求。
+
+**Phase 2B gate**：`ADR-014` 第 5 条"选定收敛方向"的前提条件现在
+已满足，门槛本身解除。**但这不等于可以立即开始实现**——真正的
+Phase 2B 实现 PR（Candidate B 补丁本身、真实 Marzban adapter、
+DTO/编排改动、reconciliation migration、`XrayFileProvider.apply()`
+异常兜底加固、ADR-015 Decision 4 矩阵其余 `YES` 条目）仍需单独走
+完整实现/测试/审查流程，是本任务之后的下一步，不在本次 docs-only
+任务范围内。
+
+### 本阶段（2B1）验收
+
+- 新增 `docs/80-decisions/ADR-016-route-identity-architecture-unblock.md`，
+  ADR-015 补一段 supersede 补记（不重写原 Decision 3 内容，保留
+  作为历史记录），修改本文档，`backend/**`/`ops/**`/
+  `infrastructure/**`/`deploy/**`/`frontend/**`/`.github/**` 等代码
+  目录零改动，无新增 migration/schema 改动。
+- 只读检索了 Marzban 官方公开仓库精确 `v0.8.4` tag 与 `master` 分支
+  当前 HEAD 的源码/文档，未连接任何真实 Marzban 实例，未使用任何
+  真实凭据，未读取生产 SQLite/MySQL。
+- 没有调用任何真实 provider 的网络请求。
+- 没有 reload 或调用 Xray/Mihomo，没有修改生产数据库。
+- Decision 3 已从 `BLOCKED` 推进为 `SELECTED`（Candidate B），Phase
+  2B 的门槛条件已满足，但 Phase 2B 实现本身仍未开始，是下一步的
+  独立任务。

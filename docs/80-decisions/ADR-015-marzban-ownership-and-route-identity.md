@@ -1,6 +1,15 @@
 # ADR-015: 关闭 Phase 2B 前置决策——Marzban 运行时归属、provider 分类、
 route identity 收敛方案
 
+> **2026-09-11 补记**：本 ADR 的 **Decision 3**（route identity 收敛
+> 方案，`BLOCKED`）及其"既有数据收敛"结论已被
+> `docs/80-decisions/ADR-016-route-identity-architecture-unblock.md`
+> **supersede**——ADR-016 选定 Candidate B（Marzban `UserResponse`
+> 补丁暴露 `routing_principal` 字段），把 Decision 3 从 `BLOCKED`
+> 推进为 `SELECTED`。本 ADR 的 Part A（drift detection 三态模型/
+> 共享文件 writer guard）、Part B（provider classification =
+> `ACCOUNTING`、accounting health = H1）不受影响，继续有效。
+
 - 状态: 已接受（Part C 的 Decision 3/既有数据收敛截至第三次修订为
   `BLOCKED`，见下方——本 ADR 整体状态仍是"已接受"，指"这些研究结论
   已被接受为当前权威记录"，不代表 Decision 3 已经有一个可以直接实现
