@@ -7,7 +7,18 @@
   + `@computed_field`"，不是此前写的 `model_validator(mode=
   "before")`；reconciliation 工具的"全量快照 → 外部查询 → 稍后
   单事务写入"流程之间存在 TOCTOU 窗口，本轮加入"进入写事务后必须
-  重新查询并与快照逐行比较，任何不一致立即整体回滚"的强制校验步骤）
+  重新查询并与快照逐行比较，任何不一致立即整体回滚"的强制校验步骤。
+  同日第四次修订：独立审查指出第三轮的 TOCTOU 修复仍不完整——普通
+  `SELECT` 重新查询不加锁，无法阻止"比较完成后、UPDATE/COMMIT 前"
+  的并发修改或 phantom insert；本轮改为要求 `SELECT ... FOR UPDATE`
+  行锁 + 带原始值条件的 UPDATE + rowcount 校验三层机制，并把此前
+  写成"可选"的人工维护窗口改为强制前置条件。同时处理一条 Minor：
+  Candidate B 的 PoC 此前用的是沙箱环境唯一可用的 `pydantic==
+  2.13.5`，且第二条路径只是重复调用 `model_validate()` 模拟 FastAPI
+  行为，不是真正的 FastAPI 序列化；本轮改为在 pinned Marzban 精确
+  依赖版本 `pydantic==2.10.4`/`fastapi==0.115.2` 下，用真正的
+  FastAPI `TestClient` 对两条路径发起真实 HTTP 请求重新验证，结论
+  不变但证据强度提升。）
 - 决策范围: TASK-T16 route-identity architecture research (docs/ADR-only,
   不实现代码)。本 ADR 是 `ADR-015-marzban-ownership-and-route-identity.md`
   Decision 3（`BLOCKED`）的专项后续研究，**supersede** ADR-015 的
@@ -262,11 +273,25 @@ dict，会丢失其余字段依赖 `from_attributes` 从 ORM 对象上做属性
 `routing_principal` 变成一个可读属性"，这在最初的文字描述里没有
 交代清楚，是一个真实的、当时未闭合的实现缺口。
 
-**本轮实际执行了一个独立、不改动本仓库任何代码的最小 Pydantic v2
-PoC**（不属于本 PR 的 diff，只是研究过程中用于验证机制是否可行的
-临时脚本，验证环境：`pydantic==2.13.5`）证明了正确、可行的机制：
+**本轮实际执行了两版独立、不改动本仓库任何代码的最小 PoC**（均不
+属于本 PR 的 diff，只是研究过程中用于验证机制是否可行的临时脚本）：
+
+- **第一版**：环境是 `pydantic==2.13.5`（当时沙箱环境唯一可用的
+  版本），第二条路径（`get_user`）用再次调用 `model_validate()` 模拟
+  FastAPI 的自动 response-model 校验，不是真正经过 FastAPI 序列化。
+  **独立审查第四轮指出**：这个环境和 pinned Marzban v0.8.4 实际
+  锁定的依赖版本（`requirements.txt`：`pydantic==2.10.4`、
+  `fastapi==0.115.2`）不一致，且"第二条路径"的验证方式过于间接——
+  这是一条正确的 Minor，本轮已处理。
+- **第二版（本轮新增，替换第一版作为权威证据）**：改用 pinned
+  Marzban 精确依赖版本 `pydantic==2.10.4`/`fastapi==0.115.2`，并且
+  两条路径都通过真正的 FastAPI `TestClient` 发起真实 HTTP 请求，
+  让框架自己完成 response-model 序列化（不是手工再调用一次
+  `model_validate`）：
 
 ```python
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from pydantic import BaseModel, ConfigDict, computed_field, Field
 
 class UserResponsePatched(BaseModel):
@@ -275,7 +300,9 @@ class UserResponsePatched(BaseModel):
                                                        # 完全一致
     username: str
     status: str
-    # 其余现有字段照旧声明（used_traffic、data_limit、expire 等）...
+    used_traffic: int
+    data_limit: int | None = None
+    expire: int | None = None
 
     # 补丁的核心：把 id 声明成一个正常字段，让它像其它字段一样通过
     # from_attributes 从 ORM 对象上自动提取；exclude=True 只影响
@@ -286,27 +313,44 @@ class UserResponsePatched(BaseModel):
     @property
     def routing_principal(self) -> str:
         return f"{self.id}.{self.username}"
+
+app = FastAPI()
+
+@app.post("/api/user", response_model=UserResponsePatched)
+def add_user():
+    return UserResponsePatched.model_validate(dbuser)  # 对应 add_user
+
+@app.get("/api/user/{username}", response_model=UserResponsePatched)
+def get_user(username: str):
+    return dbuser  # 对应 get_user：直接返回 ORM 对象，交给 FastAPI
+                   # 的 response_model 自动做真正的序列化
 ```
 
-**实际运行结果**（针对一个模拟 `id=42, username="sub-123"` 的
-ORM 对象，分别用 `UserResponse.model_validate(dbuser)`——对应
-`add_user` 的显式调用路径——和同一次 `model_validate` 调用模拟
-FastAPI 对 `get_user` 返回值做的自动 response-model 校验）：
+**实际运行结果**（`pydantic==2.10.4`/`fastapi==0.115.2`，通过
+`TestClient` 对一个模拟 `id=42, username="sub-123"` 的 ORM 对象发起
+真实 HTTP 请求）：
 
 ```
-{'username': 'sub-123', 'status': 'active', 'used_traffic': 12345,
- 'data_limit': None, 'expire': None, 'routing_principal': '42.sub-123'}
+POST /api/user  -> 200 {'username': 'sub-123', 'status': 'active',
+  'used_traffic': 12345, 'data_limit': None, 'expire': None,
+  'routing_principal': '42.sub-123'}
+GET /api/user/sub-123 -> 200 {'username': 'sub-123', 'status': 'active',
+  'used_traffic': 12345, 'data_limit': None, 'expire': None,
+  'routing_principal': '42.sub-123'}
 ```
 
-两条路径产出完全一致的结果；`id` 字段本身确认**没有**出现在序列化
-输出里（`exclude=True` 生效）；`username`/`status`/`used_traffic`/
-`data_limit`/`expire` 等现有字段全部正确保留，证明这个补丁点**不会
-破坏任何现有字段的提取**——这就是独立审查要求的"至少证明两条构造
-方式均返回完整原字段及正确 `routing_principal`"这项验证。**修正后
-的补丁机制是"新增一个 `exclude=True` 的 `id` 字段 + 一个
-`@computed_field` 计算属性"，不是最初描述的 `model_validator
-(mode="before")`**——这是本轮对 Candidate B 技术方案的实质性更正，
-不只是补充证据。
+两条路径产出完全一致的结果，且这一次 `GET` 路径是**真正**经过
+FastAPI 的 `response_model` 序列化管线，不是手工模拟；`id` 字段本身
+确认**没有**出现在序列化输出里（`exclude=True` 生效）；
+`username`/`status`/`used_traffic`/`data_limit`/`expire` 等现有
+字段全部正确保留，证明这个补丁点**不会破坏任何现有字段的提取**——
+这就是独立审查要求的"至少证明两条构造方式均返回完整原字段及正确
+`routing_principal`，且需要在 pinned 依赖版本下、用真正的 FastAPI
+序列化路径验证"这项要求。**修正后的补丁机制是"新增一个
+`exclude=True` 的 `id` 字段 + 一个 `@computed_field` 计算属性"，
+不是最初描述的 `model_validator(mode="before")`**——这是第三轮对
+Candidate B 技术方案的实质性更正，本轮（第四轮）只是把验证环境和
+验证方式都换成更贴近真实运行时的版本，结论不变。
 
 **范围收窄（采纳独立审查的建议，不无必要扩大暴露面）**：本 ADR
 **只承诺**这个字段在 `POST /api/user` 和 `GET /api/user/{username}`
@@ -514,50 +558,74 @@ provisioning 请求时才 fail closed。
    字段缺失）都记录下来但不中止查询循环本身；查询阶段全部完成后，
    如果**存在任何**失败记录，**整个流程中止，不进入第 4 步，不做
    任何 UPDATE**——不允许"跳过失败的行，更新其它行"。
-4. **（本轮新增，修复独立审查指出的 TOCTOU 缺口）** 第 1 步的全量
-   快照和第 2 步的外部查询之间可能经过相当长时间（受限流/超时
-   影响），期间可能有新的 provisioning/release 发生，导致某个
-   binding 被新增、释放、更换 `subscription_id`/`gateway_principal`，
-   或者一个原本不在快照里的新 binding 变成了 active——**如果直接
-   按第 1 步的旧快照做批量 UPDATE，可能覆盖已经变化/已经释放的行，
-   也可能漏收敛快照之后新出现的 active binding，"全部成功或零写入"
-   和"全量收敛"这两个安全承诺都不成立**。修复方向：**外部 HTTP
-   查询阶段（第 2/3 步）全程不持有任何数据库事务/长锁**；进入
-   第 5 步的单一写事务后，**必须先在事务内按同样的过滤条件
-   （`enabled = True AND released_at IS NULL`）重新查询一次当前
-   实际的 active binding 集合，把这个重新查询的结果和第 1 步的
-   快照逐行比较**——如果重新查询的集合和快照集合不完全一致（任何
-   行消失、任何行的 `subscription_id`/`enabled`/`released_at`/
-   当前 `gateway_principal` 发生变化、或出现快照里没有的新 active
-   行），**整个事务立即回滚，不做任何 UPDATE，整个工具运行判定为
-   中止**，需要人工决定是否在没有新变化的时间窗口重新运行整个流程
-   （不是只重跑差异部分）。**不允许在外部 HTTP 调用期间持有数据库
-   锁**——重新校验必须是"进入写事务后的一次快速重新查询+比较"，
-   不是"从查询阶段开始就锁着相关行"。
-5. 只有第 4 步的重新校验确认快照与当前状态完全一致后，才在**同一个
-   事务内**批量 UPDATE 所有行的 `gateway_principal`——这是流程中
-   唯一的写操作，要么全部成功要么全部不生效。
+4. **（第三轮新增，第四轮独立审查指出仍未真正闭合，本轮再次更正）**
+   第 1 步的全量快照和第 2 步的外部查询之间可能经过相当长时间
+   （受限流/超时影响），期间可能有新的 provisioning/release 发生。
+   **第三轮的修复不够**：独立审查第四轮指出，进入写事务后做一次
+   普通 `SELECT` 重新查询并比较，**不能防止"比较完成之后、UPDATE/
+   COMMIT 之前"这个窗口内发生的并发修改或 phantom insert**——普通
+   `SELECT` 不加锁，不能阻止另一个事务在这之后修改/释放已经比较过
+   的行，也不能阻止一个全新的 active binding 在这个窗口内被提交，
+   而这次批量 UPDATE 仍然会"成功"，工具会错误地宣称"全量收敛"。
+
+   **更正后的强制机制**（不再依赖"事务内重新查询+比较"单独兜底，
+   必须同时具备锁 + 条件更新两层保护）：
+
+   a. **行锁**：进入写事务后，对目标行集合执行 `SELECT ... FOR
+      UPDATE`（而不是普通 `SELECT`），过滤条件与第 1 步全量快照
+      相同（`enabled = True AND released_at IS NULL`）。在 MySQL
+      8.4/InnoDB 的 REPEATABLE READ（本仓库默认隔离级别）下，对一个
+      有索引支撑的等值/范围条件做 `SELECT ... FOR UPDATE` 会施加
+      next-key lock，**在这个事务提交或回滚之前，阻塞其它事务插入
+      落在同一索引范围内、会被这次查询匹配到的新行**（即挡住这个
+      条件下的 phantom insert），同时锁住已经匹配到的现有行，阻止
+      并发修改/释放。
+   b. **条件更新 + rowcount 校验**：批量 UPDATE 必须带上"原始值"
+      条件（例如 `WHERE id = :id AND enabled = 1 AND released_at
+      IS NULL AND gateway_principal = :snapshot_old_value`），而不是
+      只按主键无条件更新；每一行 UPDATE 后必须核对受影响行数
+      （rowcount）等于预期的 1——如果任何一行的 rowcount 不是 1
+      （说明这一行在锁定之后、这次 UPDATE 执行之前已经被别的方式
+      改变，理论上因为 a 的行锁不应该发生，但仍要求作为第二层
+      防御显式校验），**整个事务回滚，不做任何写入**。
+   c. **强制的人工维护窗口作为前置条件，不是可选运维优化**：
+      第三轮把维护窗口写成"建议""可选"，独立审查第四轮指出这是
+      错误的——仅凭 a/b 两层数据库机制在理论上是充分的（InnoDB 的
+      next-key lock 确实能挡住匹配范围内的 phantom insert），但要求
+      Phase 2B 的实现完全依赖"实现者把 WHERE 条件、索引覆盖范围、
+      隔离级别全部配置正确"这个假设本身有风险——**本轮把维护窗口
+      改为强制前置条件**：运行本工具期间，所有会修改
+      `GatewayRouteBinding`（`enabled`/`released_at`/
+      `gateway_principal`/新建行）的 provisioning/release 代码路径
+      必须暂停（例如通过一个应用层的功能开关/维护标志位阻止
+      `ensure_gateway_route_binding()`/release 逻辑执行，而不仅仅是
+      文档提醒运维"手动注意"）——a/b 两层机制在此基础上作为**纵深
+      防御**，用于捕获维护窗口本身存在漏洞（例如某个遗漏的写入
+      路径未被暂停）的情况，而不是唯一防线。
+   d. **加锁顺序与超时**：如果同一次运行需要对多行加锁，必须按照
+      固定顺序（例如按主键升序）获取行锁，避免多个并发运行之间
+      产生死锁；数据库事务必须设置合理的锁等待超时（沿用现有
+      连接池/ORM 配置的默认超时即可，不需要新的机制），超时后
+      视为本次运行失败、回滚、不做任何写入，允许人工判断后重跑。
+5. 只有第 4 步的行锁 + 重新校验 + 条件更新全部通过后，才在**同一个
+   事务内**完成批量 UPDATE——这是流程中唯一的写操作，要么全部成功
+   要么全部不生效。
 6. 冲突检测：批量更新前检测目标 `routing_principal` 值之间、以及
    和 `active_gateway_principal` 唯一约束的潜在冲突，冲突同样导致
-   整体中止、不做任何 UPDATE；这项检测必须基于第 4 步重新校验后的
-   同一个行集合，不能用第 1 步的旧快照做冲突判断。
-7. **建议同时要求一个人工维护窗口**（例如在运行本工具期间暂停新的
-   provisioning/release 流程，或至少提高告警敏感度），作为降低
-   第 4 步频繁触发中止的运维手段——但第 4 步的重新校验是**强制的
-   正确性保证**，维护窗口只是"减少中止发生频率"的可选运维优化，
-   两者不能互相替代：即使有维护窗口，仍然必须执行第 4 步。
-8. 工具必须**可安全重跑**：重复执行时，已经等于目标值的行不产生
+   整体中止、不做任何 UPDATE；这项检测必须基于第 4 步加锁后重新
+   校验的同一个行集合，不能用第 1 步的旧快照做冲突判断。
+7. 工具必须**可安全重跑**：重复执行时，已经等于目标值的行不产生
    无意义写入；如果 Marzban 一侧数据在两次执行之间发生变化（正常
-   业务变化），重跑会按新查询结果再次收敛，且同样受第 4 步的重新
-   校验保护——这是"独立显式触发的工具"而不是"一次性 migration"的
-   直接好处，不需要为"重复执行"这件事发明特殊语义。
-9. 必须有**审计**（记录每次运行的时间、操作者、处理的行数、
-   成功/中止结果，包括因为第 4 步重新校验失败而中止的次数和原因）
+   业务变化），重跑会按新查询结果再次收敛，且同样受第 4 步的行锁+
+   条件更新保护——这是"独立显式触发的工具"而不是"一次性 migration"
+   的直接好处，不需要为"重复执行"这件事发明特殊语义。
+8. 必须有**审计**（记录每次运行的时间、操作者、处理的行数、
+   成功/中止结果，包括因为第 4 步加锁/校验失败而中止的次数和原因）
    和**人工批准边界**（例如要求显式的 `--confirm`/审批流程触发，
    不作为部署流程的自动一环，不在 Alembic `upgrade` 或应用启动时
    被动触发）。
-10. 凭据注入方式沿用现有 `AccountingProvider` 的 admin token 配置
-    路径，不新增独立的凭据存储机制。
+9. 凭据注入方式沿用现有 `AccountingProvider` 的 admin token 配置
+   路径，不新增独立的凭据存储机制。
 
 **这依赖 Candidate B 的补丁已经部署并对存量用户生效**——补丁本身
 不需要 Marzban 重新创建用户（`routing_principal` 是从已有

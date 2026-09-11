@@ -809,11 +809,14 @@ payload（`app/utils/notification.py`）——三者交叉验证，**从 v0.8.4
 未经验证，且方向不完全正确——会丢失其它字段的 `from_attributes`
 提取能力），而是"新增一个 `exclude=True` 的 `id: int` 字段（照旧
 通过 `from_attributes` 从 ORM 对象提取，不影响任何其它字段）+ 一个
-`@computed_field` 计算属性"，本轮已用实际 Pydantic v2（`2.13.5`）
-PoC 验证：对同一个模拟 ORM 对象，`UserResponse.model_validate
-(dbuser)`（对应 `add_user`）和模拟 FastAPI 自动 response-model
-校验（对应 `get_user`）产出完全一致的结果，现有字段全部正确保留，
-`id` 本身正确从输出中排除。让 `routing_principal: str` 字段
+`@computed_field` 计算属性"。**第四轮更正**：验证证据从沙箱环境的
+`pydantic==2.13.5`+手工模拟升级为 pinned Marzban 精确依赖版本
+`pydantic==2.10.4`/`fastapi==0.115.2`，用真正的 FastAPI
+`TestClient` 对两条路径发起真实 HTTP 请求（不是重复调用
+`model_validate()` 模拟）：`POST /api/user`（对应 `add_user`）和
+`GET /api/user/{username}`（对应 `get_user`，真正经过 FastAPI
+`response_model` 序列化）产出完全一致的结果，现有字段全部正确
+保留，`id` 本身正确从输出中排除。让 `routing_principal: str` 字段
 （值 = `f"{marzban_db_user_id}.{username}"`，与 Marzban 自己
 `operations.py` 内部计算公式逐字节一致）在本仓库实际依赖的
 `POST /api/user`（`create_user`）和 `GET /api/user/{username}`
@@ -839,14 +842,20 @@ ADR-016 Part C/D。
 Alembic revision（会把数据库 schema 升级绑定在一个非事务性外部
 系统上，`AGENTS.md` 铁律第 7 条针对的是纯数据库确定性 reconciliation，
 不适用于这种场景）——改为一个**独立的、显式触发的受控 reconciliation
-工具/作业**：全量只读查询 + preflight 完成后，**第三轮新增强制
-步骤**：进入单一数据库写事务后，必须先按同样过滤条件重新查询一次
-当前 active binding 集合，与查询阶段的旧快照逐行比较，任何行消失/
-变化/新增不一致都导致整体回滚、零写入（修复"全量快照与外部查询
-之间可能发生并发 provisioning/release"这个 TOCTOU 缺口，外部 HTTP
-查询阶段全程不持有数据库事务/锁）；校验通过后才在同一事务内批量
-UPDATE；具备可安全重跑、超时/限流、审计、人工批准边界，凭据沿用
-现有 `AccountingProvider` 配置路径。完整设计见 ADR-016。
+工具/作业**：全量只读查询 + preflight 完成后，**第四轮更正（第三轮
+的修复不完整）**：独立审查指出"进入写事务后普通 SELECT 重新查询+
+比较"不能防止"比较完成后、UPDATE/COMMIT 前"这个窗口内的并发修改或
+phantom insert（普通 SELECT 不加锁）。更正为三层强制机制：①
+`SELECT ... FOR UPDATE` 行锁（MySQL 8.4/InnoDB REPEATABLE READ 下
+对索引范围的 next-key lock 能挡住匹配条件的 phantom insert，同时
+锁住已匹配的现有行）；②带原始值条件的 UPDATE + rowcount 校验
+（`WHERE ... AND gateway_principal = :snapshot_old_value`，任何一行
+rowcount 不为 1 就整体回滚）；③**人工维护窗口从"可选建议"改为强制
+前置条件**——运行期间所有会修改 `GatewayRouteBinding` 的
+provisioning/release 代码路径必须暂停，①②作为纵深防御而不是唯一
+防线。批量 UPDATE 收拢在同一个事务内，具备可安全重跑、超时/限流、
+审计、人工批准边界，凭据沿用现有 `AccountingProvider` 配置路径。
+完整设计见 ADR-016。
 
 **Phase 2B gate**：`ADR-014` 第 5 条"选定收敛方向"的前提条件现在
 已满足，门槛本身解除。**但这不等于可以立即开始实现**——真正的
