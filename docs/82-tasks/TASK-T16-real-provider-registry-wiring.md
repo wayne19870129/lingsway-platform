@@ -804,32 +804,45 @@ payload（`app/utils/notification.py`）——三者交叉验证，**从 v0.8.4
 `id` 或复合 client email，纯版本升级不能解决这个问题**。
 
 **Decision 3：从 `BLOCKED` 改为 `SELECTED`**——选定 Candidate B：
-为 pinned Marzban 镜像维护一个最小化 source patch，让
-`UserResponse` 新增 `routing_principal: str` 字段（值 =
-`f"{marzban_db_user_id}.{username}"`，与 Marzban 自己
-`operations.py` 内部计算公式逐字节一致）；真实 Marzban-backed
-`AccountingProvider` 读取这个字段，`AccountUserDTO` 新增同名字段，
-`CREATE_ACCOUNTING_USER` 保留返回值并传给 `APPLY_GATEWAY`，
-`GatewayRouteBinding.gateway_principal` 的最终语义正式定为"Xray
-routing principal"。`accounting_user_id` 维持现状（accounting
-username），两者是不同 bounded context 的独立标识符。Candidate A
-（纯升级）、Candidate C（只读 DB 集成）、消除 per-user email 依赖的
-替代 Xray 拓扑均已评估并否决，理由见 ADR-016 Part C/D。
+为 pinned Marzban 镜像维护一个最小化 source patch（`UserResponse`
+上的 `model_validator(mode="before")`，从原始 ORM 对象计算），让
+`routing_principal: str` 字段（值 = `f"{marzban_db_user_id}.
+{username}"`，与 Marzban 自己 `operations.py` 内部计算公式逐字节
+一致）在本仓库实际依赖的 `POST /api/user`（`create_user`）和
+`GET /api/user/{username}`（`get_user`）两条路径上可靠可用——
+两者的响应构造均已 exact-source 核实持有带 `id` 的原始 ORM 对象，
+详见 ADR-016 "exact-source patch contract" 小节；`list_users`/
+webhook 等其它复用 `UserResponse` 的路径不在本方案承诺范围内。
+真实 Marzban-backed `AccountingProvider` 读取这个字段，
+`AccountUserDTO` 新增同名字段，`CREATE_ACCOUNTING_USER` 保留返回值
+并传给 `APPLY_GATEWAY`，`GatewayRouteBinding.gateway_principal` 的
+最终语义正式定为"Xray routing principal"。`accounting_user_id`
+维持现状（accounting username），两者是不同 bounded context 的
+独立标识符。Candidate A（纯升级）、Candidate C（只读 DB 集成）、
+消除 per-user email 依赖的替代 Xray 拓扑均已评估并否决，理由见
+ADR-016 Part C/D。
 
-**既有数据 reconciliation：从 `BLOCKED` 改为 `CONFIRMED` 可行**——
-因为 `routing_principal` 是 Marzban 已有数据的纯衍生值，reconciliation
-只需对每个历史 active binding 调用一次打了补丁的 `GET /api/user/
-{username}`，不存在"本地 DB 算不出目标值"的结构性障碍；具体设计
-仍然遵守 ADR-015 已确定的全量 preflight/任何异常整体中止的
-fail-closed 通用要求。
+**既有数据 reconciliation：从 `BLOCKED` 改为 `CONFIRMED` 可行，且
+明确不是 Alembic migration**——因为 `routing_principal` 是 Marzban
+已有数据的纯衍生值，reconciliation 只需对每个历史 active binding
+调用一次打了补丁的 `GET /api/user/{username}`，不存在"本地 DB
+算不出目标值"的结构性障碍；但因为这个流程依赖外部 Marzban API
+调用（网络可用性/admin token/限流），**独立审查更正**：不能实现为
+Alembic revision（会把数据库 schema 升级绑定在一个非事务性外部
+系统上，`AGENTS.md` 铁律第 7 条针对的是纯数据库确定性 reconciliation，
+不适用于这种场景）——改为一个**独立的、显式触发的受控 reconciliation
+工具/作业**：全量只读查询 + preflight 完成后，在单一数据库事务内
+批量 UPDATE；任何查询/字段/冲突失败均整体中止、零写入；具备可安全
+重跑、超时/限流、审计、人工批准边界，凭据沿用现有
+`AccountingProvider` 配置路径。完整设计见 ADR-016。
 
 **Phase 2B gate**：`ADR-014` 第 5 条"选定收敛方向"的前提条件现在
 已满足，门槛本身解除。**但这不等于可以立即开始实现**——真正的
-Phase 2B 实现 PR（Candidate B 补丁本身、真实 Marzban adapter、
-DTO/编排改动、reconciliation migration、`XrayFileProvider.apply()`
-异常兜底加固、ADR-015 Decision 4 矩阵其余 `YES` 条目）仍需单独走
-完整实现/测试/审查流程，是本任务之后的下一步，不在本次 docs-only
-任务范围内。
+Phase 2B 实现 PR（Candidate B 补丁本身及其契约测试、真实 Marzban
+adapter、DTO/编排改动、独立的 reconciliation 工具/作业、
+`XrayFileProvider.apply()` 异常兜底加固、ADR-015 Decision 4 矩阵
+其余 `YES` 条目）仍需单独走完整实现/测试/审查流程，是本任务之后的
+下一步，不在本次 docs-only 任务范围内。
 
 ### 本阶段（2B1）验收
 

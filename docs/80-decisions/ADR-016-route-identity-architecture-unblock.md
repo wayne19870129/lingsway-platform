@@ -220,6 +220,61 @@ routing_principal: str  # = f"{dbuser.id}.{dbuser.username}"，与
 补丁不构成"重写/长期分叉整个项目"的理由，用 patch-on-build 的方式
 可以持续基于官方镜像增量更新，維护成本远低于维护一份完整分支。
 
+#### Candidate B 的 exact-source patch contract（补充核实，闭合"补丁点
+是否真的能拿到 `dbuser.id`"这个此前未经证明的假设）
+
+独立审查指出：此前的表述只说"给 `UserResponse` 加一个字段"，没有
+证明本仓库实际依赖的两条路径——`POST /api/user`（`add_user`）和
+`GET /api/user/{username}`（`get_user`）——在响应构造的那一刻是否
+真的还持有带 `id` 的 ORM 对象，也没有说清楚 `list_users`/webhook
+是否是这个补丁必须覆盖的范围。逐一核实 `v0.8.4` 精确源码
+`app/routers/user.py`：
+
+- **`add_user`**（`POST /api/user`）：响应构造是
+  `user = UserResponse.model_validate(dbuser)`——**显式**把带
+  `id` 属性的 ORM 对象 `dbuser` 传给 `UserResponse` 的校验/序列化
+  入口。
+- **`get_user`**（`GET /api/user/{username}`）：端点函数体是
+  `return dbuser`——**不显式构造** `UserResponse`，依赖 FastAPI
+  的 `response_model=UserResponse` 自动对返回的 ORM 对象做
+  `model_validate`（等价于 Pydantic v2 `from_attributes` 模式）。
+
+**两条路径虽然构造方式不同（一个显式调用 `model_validate`，一个靠
+FastAPI 自动序列化），但两者在进入 `UserResponse` 校验管线的那一刻
+持有的都是同一个带 `id` 属性的 ORM 对象**，不是已经丢失 `id` 的
+其它中间表示。这意味着一个单点补丁是可行的：在 `UserResponse` 上
+新增一个 `model_validator(mode="before")`（Pydantic v2 校验管线里
+在字段级校验**之前**运行、可以看到原始输入对象的钩子），从传入的
+`dbuser` 上读取 `.id`/`.username`，计算
+`f"{id}.{username}"`，把结果注入待校验的数据里，成为
+`routing_principal` 字段的来源——这个钩子在 `model_validate()`
+被显式调用（`add_user`）和被 FastAPI 自动调用（`get_user`）两种
+场景下都会执行，不需要在每个 endpoint 单独重复这段逻辑，满足"单点
+最小补丁"的要求。
+
+**范围收窄（采纳独立审查的建议，不无必要扩大暴露面）**：本 ADR
+**只承诺**这个字段在 `POST /api/user` 和 `GET /api/user/{username}`
+这两条本仓库实际依赖的路径上可靠可用——这是 Candidate B 被判定
+`SELECTED` 所需要、且已经用 exact-source 证明的最小契约。因为补丁
+挂在 `UserResponse` 类本身而不是某个 endpoint 的局部逻辑，`GET
+/api/users`（`list_users`）和官方 webhook（复用同一个
+`UserResponse`/`SubscriptionUserResponse` schema）**在实现落地后
+大概率也会连带获得这个字段**，但本 ADR **不对这两条路径做任何承诺
+或依赖**——Phase 2B 的契约测试只需要覆盖前两条路径；如果实现阶段
+发现 `list`/webhook 路径由于某种原因没有连带生效（例如它们在校验
+管线的更早阶段就已经丢弃了原始 ORM 对象），**不构成本方案失败**，
+因为本仓库的数据流从未依赖它们携带这个字段。
+
+**Phase 2B 落地前必须补齐的契约测试**（记录方向，不在本 ADR 实现）：
+针对打了补丁的 Marzban 镜像，至少验证 `POST /api/user` 和 `GET
+/api/user/{username}` 两条路径对同一个测试用户返回的
+`routing_principal` 值相等，且都等于用测试用户的 DB id（补丁部署
+环境下可以从测试环境的 Marzban 只读查询一次性获得，不代表本仓库
+运行时依赖这个查询）拼接用户名的预期结果——这是"Decision 3 已解除"
+这个结论在 Phase 2B 阶段唯一需要验证的可观测契约，而不是本 ADR
+阶段的必需前提（本 ADR 阶段是 docs-only 研究，契约测试属于 Phase
+2B 实现范围）。
+
 ### Candidate C — 只读 Marzban DB 集成
 
 **结论：`REJECTED`（本轮有 Candidate B 更优方案，不需要接受 Candidate
@@ -280,10 +335,15 @@ C 的额外风险）**。逐项分析：
 ## Decision 3: SELECTED — Candidate B
 
 **最终方案**：为 pinned Marzban 镜像维护一个最小化 source patch，
-让 `UserResponse`（进而 `create_user`/`get_user`/`list_users` 等
-所有复用这个 schema 的响应）新增一个 `routing_principal: str` 字段，
-值等于 `f"{marzban_db_user_id}.{username}"`（与 `operations.py`
-现有内部计算公式逐字节一致）。真实的 Marzban-backed
+给 `UserResponse` 新增一个 `routing_principal: str` 字段（通过
+`model_validator(mode="before")` 从原始 ORM 对象计算，见下方
+"exact-source patch contract"），值等于
+`f"{marzban_db_user_id}.{username}"`（与 `operations.py` 现有内部
+计算公式逐字节一致）。**本 ADR 只对本仓库实际依赖的两条路径——
+`POST /api/user`（`create_user`）和 `GET /api/user/{username}`
+（`get_user`）——承诺这个字段可靠可用**，`list_users`/webhook 等
+其它复用同一 schema 的路径可能连带受益，但不是本方案的承诺范围
+（理由见下方 patch contract 小节）。真实的 Marzban-backed
 `AccountingProvider` 实现读取这个字段，本仓库的编排/持久化层把它
 当作 `GatewayRouteBinding.gateway_principal` 唯一合法的写入来源。
 
@@ -347,7 +407,8 @@ create_user()` 返回的 `AccountUserDTO.routing_principal` 是
 CI 检查的直接原因：让这类失败尽量在部署前被发现，而不是在每次
 provisioning 请求时才 fail closed。
 
-### 既有数据 reconciliation（本轮相比 ADR-015 有实质性变化）
+### 既有数据 reconciliation（本轮相比 ADR-015 有实质性变化；**独立
+审查更正**：不得实现为 Alembic migration）
 
 **`CONFIRMED` 可行，不再是 `BLOCKED`**——这是本 ADR 相比 ADR-015 的
 关键推进：因为 `routing_principal` 是 Marzban 自己数据库里已经
@@ -360,30 +421,59 @@ provisioning 请求时才 fail closed。
 从未持久化过它"的判断不同——本方案不需要本仓库持久化过 id，只需要
 在 reconciliation 时临时查询一次）。
 
-**Reconciliation 设计方向**（沿用 ADR-015 已确定的通用 fail-closed
-要求，具体目标值来源本轮补全）：
+**独立审查纠正的错误（本轮更正）**：此前版本把这个流程叫作
+"reconciliation migration"，暗示应该用 Alembic revision 实现。
+**这个框架本身是错的**，理由：
+
+- Alembic revision 在 `alembic upgrade` 成功后会被记录为已应用，
+  正常情况下不会重复执行；而这里的流程依赖一个非本仓库控制的外部
+  系统（Marzban 的网络可用性、admin token 有效性、限流状态），
+  数据库 schema 升级不应该被绑定在一个可能因为网络抖动/Marzban
+  临时不可用而失败的外部依赖上。
+- `AGENTS.md` 铁律第 7 条对 reconciliation migration 的"新增、
+  幂等"要求，针对的是**纯数据库、确定性**的 schema/数据修复；这里
+  不存在 schema 变化（`GatewayRouteBinding.gateway_principal` 是
+  已有列），也不是纯数据库操作——把一个依赖外部 HTTP 调用、外部
+  凭据的流程强行塞进 Alembic revision 语义，既不符合铁律第 7 条的
+  适用场景，也会让数据库事务边界和外部系统的失败模式混在一起，
+  无法安全回滚已经发生的外部交互。
+- **本方案没有 schema 变化，因此明确：不使用 Alembic migration**。
+
+**更正后的设计：独立的、显式触发的受控 reconciliation 工具/作业**
+（不是 migration，具体实现细节留 Phase 2B，这里只定方向和安全约束）：
 
 1. 全量枚举 `GatewayRouteBinding.enabled = True AND released_at
    IS NULL` 的行，通过 `subscription_id` JOIN `Subscription` 拿到
-   `accounting_user_id`（accounting username）。
+   `accounting_user_id`（accounting username）——**这一步是纯只读
+   数据库查询**。
 2. 对每一行调用一次打了补丁的 Marzban `GET /api/user/{username}`
    （只读，admin token 鉴权，不修改任何 Marzban 状态），取
-   `routing_principal`。
+   `routing_principal`——**这一步是只读外部 API 调用，必须有明确的
+   超时和限流策略**（避免对 Marzban 造成瞬时负载），且不在数据库
+   事务内进行。
 3. **全量 preflight**：先对所有行完成第 2 步查询，任何一行查询
    失败（网络错误、用户在 Marzban 侧不存在、`routing_principal`
-   字段缺失）都记录下来但不中止查询循环本身（查询是只读操作，
-   不涉及写入顺序问题）；查询阶段全部完成后，如果**存在任何**
-   失败记录，整个 migration **中止，不做任何 UPDATE**——不允许
-   "跳过失败的行，更新其它行"。
-4. 全部行查询成功后，检测目标 `routing_principal` 值之间、以及和
-   `active_gateway_principal` 唯一约束的潜在冲突，冲突同样导致
+   字段缺失）都记录下来但不中止查询循环本身；查询阶段全部完成后，
+   如果**存在任何**失败记录，**整个流程中止，不进入第 4 步，不做
+   任何 UPDATE**——不允许"跳过失败的行，更新其它行"。
+4. 全部行查询成功、且第 5 步的冲突检测也通过之后，**在单一数据库
+   事务内批量 UPDATE 所有行的 `gateway_principal`**——这是流程中
+   唯一的写操作，且被收拢到一个事务里，要么全部成功要么全部不生效，
+   不依赖任何外部系统参与这一步。
+5. 冲突检测：批量更新前检测目标 `routing_principal` 值之间、以及
+   和 `active_gateway_principal` 唯一约束的潜在冲突，冲突同样导致
    整体中止、不做任何 UPDATE。
-5. 全部校验通过后，一次性批量 UPDATE 所有行的 `gateway_principal`
-   为查询到的 `routing_principal`。
-6. migration 必须幂等：重复执行时，已经等于目标值的行不产生
+6. 工具必须**可安全重跑**：重复执行时，已经等于目标值的行不产生
    无意义写入；如果 Marzban 一侧数据在两次执行之间发生变化（正常
-   业务变化，不是异常），第二次执行应该按新查询结果再次收敛，这
-   仍然符合"相同输入产生相同结果"的幂等定义。
+   业务变化），重跑会按新查询结果再次收敛——这是"独立显式触发的
+   工具"而不是"一次性 migration"的直接好处，不需要为"重复执行"
+   这件事发明特殊语义。
+7. 必须有**审计**（记录每次运行的时间、操作者、处理的行数、
+   成功/中止结果）和**人工批准边界**（例如要求显式的
+   `--confirm`/审批流程触发，不作为部署流程的自动一环，不在
+   Alembic `upgrade` 或应用启动时被动触发）。
+8. 凭据注入方式沿用现有 `AccountingProvider` 的 admin token 配置
+   路径，不新增独立的凭据存储机制。
 
 **这依赖 Candidate B 的补丁已经部署并对存量用户生效**——补丁本身
 不需要 Marzban 重新创建用户（`routing_principal` 是从已有
@@ -396,17 +486,24 @@ provisioning 请求时才 fail closed。
   只是写入的值语义变化（从"Webshare 租户 id"/错误的 accounting
   username 变成正确的 Xray routing principal），沿用现有列。
 - **`AccountUserDTO`**：这是一个 dataclass DTO，不是 DB 表，新增
-  `routing_principal` 字段不涉及 migration。
+  `routing_principal` 字段不涉及任何 schema/migration 改动。
 - **不需要新表存储 Marzban DB user id**——因为方案不要求本仓库
   持久化这个 id，只在 reconciliation 时临时查询、且真实 provider
   每次 `create_user()` 时都能直接拿到，不需要缓存。
+- **没有任何 schema 变化，因此不需要新增 Alembic revision**——
+  既有数据的收敛通过下方"独立的、显式触发的受控 reconciliation
+  工具/作业"完成，不是数据库 migration 的一部分；这一点是本轮
+  相比第一版的明确更正。
 
 ### Failure / fail-closed 语义汇总
 
 - 补丁失效/字段缺失 → `APPLY_GATEWAY` fail closed（见上）。
-- Reconciliation 查询任一行失败 → 整体 migration 中止，不做任何
-  UPDATE（同 ADR-015 已确定的通用规则）。
-- Reconciliation 目标值冲突（唯一约束）→ 整体 migration 中止。
+- Reconciliation 工具查询任一行失败 → 整个工具运行中止，不进入
+  批量 UPDATE 步骤，不做任何写入（同 ADR-015 已确定的通用 fail-closed
+  规则；本轮更正：这是一个独立工具的运行失败，不是"migration
+  中止"）。
+- Reconciliation 目标值冲突（唯一约束）→ 同样中止整个工具运行，不做
+  任何写入。
 - Marzban 镜像升级导致补丁无法干净应用 → Phase 2B 要求的 CI 检查
   必须在这种情况下 fail closed，阻止发布新镜像，而不是静默跳过
   打补丁、让 `routing_principal` 字段从响应里消失。
@@ -422,12 +519,13 @@ provisioning 请求时才 fail closed。
 - **但这不等于"可以立即开始 Phase 2B 实现"**——Phase 2B 实现 PR
   仍然需要单独走完整的实现/测试/审查流程，包括：真正编写并验证
   Candidate B 的 source patch、真实 Marzban-backed
-  `AccountingProvider` 实现、`AccountUserDTO`/编排改动、
-  reconciliation migration、`XrayFileProvider.apply()` 的异常
-  兜底加固（ADR-015 已记录的独立缺口，不受本 ADR 影响，仍然是
-  Phase 2B 的前提）、以及 ADR-015 Decision 4 矩阵里其余 `YES`
-  条目。本 ADR 只解除"能不能开始规划 Phase 2B 实现 PR"这个闸门，
-  不代表这些实现工作已经完成或可以跳过验证直接上线。
+  `AccountingProvider` 实现、`AccountUserDTO`/编排改动、独立的
+  reconciliation 工具/作业（**不是** Alembic migration，见上方
+  更正）、`XrayFileProvider.apply()` 的异常兜底加固（ADR-015 已
+  记录的独立缺口，不受本 ADR 影响，仍然是 Phase 2B 的前提）、以及
+  ADR-015 Decision 4 矩阵里其余 `YES` 条目。本 ADR 只解除"能不能
+  开始规划 Phase 2B 实现 PR"这个闸门，不代表这些实现工作已经完成
+  或可以跳过验证直接上线。
 
 ## 安全影响
 
@@ -437,7 +535,7 @@ provisioning 请求时才 fail closed。
   CI 校验，防止补丁静默失效后系统退化为使用错误的 fallback 值
   （本 ADR 已经在"provider/API 不返回 principal 时怎么办"一节明确
   禁止这种 fallback）。
-- Reconciliation migration 需要一次性对所有历史 active binding 发起
+- Reconciliation 工具需要一次性对所有历史 active binding 发起
   只读 Marzban API 调用，这些调用使用现有 admin 凭据、走现有鉴权
   路径，不引入新的凭据类型，但需要在 Phase 2B 实现时评估调用频率/
   限流，避免对 Marzban 造成过大瞬时负载（具体节流策略留 Phase 2B
