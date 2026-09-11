@@ -915,3 +915,17 @@ adapter、DTO/编排改动、独立的 reconciliation 工具/作业、
   MySQL 并发测试结果见本 PR 描述。仍未开始：Candidate B 补丁本身、
   真实 Marzban adapter、DTO/编排改动、独立 reconciliation 工具、
   ADR-015 Decision 4 矩阵其余 `YES` 条目——均为后续独立 PR。
+
+  **已知遗留问题（Work 独立审查发现，本轮已记录、未展开架构重构）**：
+  provisioning 路径的命名锁当前从 `ProvisioningService.provision()`
+  开始前就获取，持锁跨越 egress/accounting/gateway/notify 等多个外部
+  调用，`DEFAULT_LOCK_TIMEOUT_SECONDS = 30` 只是一个占位默认值，不是
+  基于真实 provider 调用延迟推导出的预算——当前测试用的是近乎瞬时
+  返回的 mock provider，而真实 Webshare transport 单次调用已文档化
+  超时 20 秒、外加限流/重试等待，可能远超这个假设。**在真实（非
+  mock）provider 接入之前，必须重新评估锁的持有跨度与超时值**；
+  如果要在不改变 provisioning saga 事务/补偿语义的前提下安全缩小
+  锁的持有跨度，需要先给出具体设计（例如把锁的获取点从
+  `provision()` 整体前移到 `APPLY_GATEWAY` 步骤内部，这需要修改
+  `ProvisioningService.provision()` 本身的控制流），本轮不做这个
+  架构改动，留给下一个 Phase 2B 实现 PR 作为已知 blocker 处理。

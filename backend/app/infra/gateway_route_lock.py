@@ -27,12 +27,17 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import Session
 
-#: How long GET_LOCK() blocks waiting for the lock before giving up. Chosen
-#: to comfortably exceed one provisioning saga's external-call budget
-#: (egress/accounting/gateway/notify calls all happen while a provisioning
-#: writer holds this lock) while still bounding how long a queued writer
-#: is blocked before it gets a clear, actionable fail-closed error instead
-#: of hanging indefinitely.
+#: How long GET_LOCK() blocks waiting for the lock before giving up.
+#:
+#: This is a placeholder default, not a value derived from a measured
+#: provisioning-saga latency budget: the provisioning writer currently
+#: holds this lock across the mock egress/accounting/gateway/notify calls
+#: exercised by tests, which are effectively instantaneous. Those providers
+#: are mocks -- e.g. the real Webshare transport documents a 20s per-call
+#: timeout before its own rate-limit/retry waits, well past this default.
+#: TASK-T16 records that the lock's hold span and this timeout must be
+#: re-evaluated once real (non-mock) provider wiring lands; until then,
+#: treat 30s as an easily-replaced placeholder, not a validated budget.
 DEFAULT_LOCK_TIMEOUT_SECONDS = 30
 
 #: MySQL's documented GET_LOCK() name length limit (in bytes/characters).
@@ -87,7 +92,26 @@ def _get_lock(connection: Connection, name: str, timeout_seconds: int) -> None:
 
 
 def _release_lock(connection: Connection, name: str) -> None:
-    connection.execute(text("SELECT RELEASE_LOCK(:name)"), {"name": name})
+    try:
+        result = connection.execute(
+            text("SELECT RELEASE_LOCK(:name)"), {"name": name}
+        ).scalar()
+    except Exception:
+        # We cannot confirm the lock was actually released on this
+        # connection (e.g. the connection dropped mid-call). Discard it
+        # rather than let a connection that may still be perceived by the
+        # server as holding this lock go back into the pool as if nothing
+        # happened; the caller still closes it right after this.
+        connection.invalidate()
+        raise
+    if result != 1:
+        # 1 = released by us, as expected. 0 = we did not hold the lock (it
+        # was already released, timed out, or held by someone else) and
+        # NULL = the named lock did not exist -- neither confirms a clean
+        # release, so the connection's lock state is unverified: invalidate
+        # it instead of silently returning what might be a compromised
+        # connection to the pool for reuse.
+        connection.invalidate()
 
 
 @contextmanager

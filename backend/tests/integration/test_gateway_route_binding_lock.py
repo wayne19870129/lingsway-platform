@@ -23,8 +23,10 @@ from __future__ import annotations
 import os
 import threading
 from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any
+from unittest import mock
 
 import pytest
 from sqlalchemy import func, select
@@ -432,16 +434,19 @@ def test_provisioning_writer_blocks_release_writer(engine: Engine) -> None:
 
     checkpoint = threading.Event()
     contender_done = threading.Event()
-    contender_result: dict[str, Any] = {}
+    contender_errors: list[BaseException] = []
 
     def contend_release() -> None:
         checkpoint.wait(timeout=5)
+        # The real production writer, not a stand-in for it: if
+        # release_egress() ever stopped acquiring the named lock, this call
+        # would return almost immediately instead of blocking below, and
+        # the "still not done" assertion in the main thread would fail.
         with Session(engine) as session:
             try:
-                with gateway_route_binding_write(session, timeout_seconds=1):
-                    contender_result["acquired"] = True
-            except GatewayRouteBindingLockError:
-                contender_result["acquired"] = False
+                release_egress(session, subscription_id, datetime.now(UTC))
+            except BaseException as exc:  # noqa: BLE001 - captured for assertion, not swallowed
+                contender_errors.append(exc)
         contender_done.set()
 
     contender_thread = threading.Thread(target=contend_release)
@@ -451,18 +456,30 @@ def test_provisioning_writer_blocks_release_writer(engine: Engine) -> None:
         state = SqlAlchemyProvisioningState(db, subscription_id)
         dto = EgressEndpointDTO(str(endpoint_id), "proxy.example.invalid", 1080)
         with state.gateway_route_binding_lock():
-            state.ensure_gateway_route_binding("marzban-user-provvsrel", dto)
+            # The checkpoint fires *before* any GatewayRouteBinding mutation
+            # or flush happens -- deliberately, so no InnoDB row lock exists
+            # yet. If it fired after ensure_gateway_route_binding()'s own
+            # flush instead, release_egress()'s with_for_update() SELECT on
+            # that same row would block on the row lock alone, and this
+            # test would keep passing even if the *named* lock wiring were
+            # removed from either writer -- it would no longer be testing
+            # the thing ADR-016 actually requires.
             checkpoint.set()
-            assert contender_done.wait(timeout=10)
-            assert contender_result["acquired"] is False
+            # release_egress() is blocked on its own real GET_LOCK() call
+            # (default timeout) right now, purely by the named lock -- it
+            # must not have finished yet.
+            assert not contender_done.wait(timeout=1)
+            state.ensure_gateway_route_binding("marzban-user-provvsrel", dto)
             db.commit()
-    contender_thread.join()
+    contender_thread.join(timeout=15)
 
-    # release_egress() must be able to proceed once the provisioning writer
-    # has released the lock, and it must use the same lock namespace (an
-    # unrelated lock would have let the contender through above).
+    # release_egress() must have been able to proceed once the provisioning
+    # writer released the lock, and it did so through the same lock
+    # namespace (an unrelated lock would have let it through immediately,
+    # above, instead of blocking).
+    assert contender_done.is_set(), "release_egress() never completed"
+    assert contender_errors == []
     with Session(engine) as db:
-        release_egress(db, subscription_id, datetime.now(UTC))
         binding = db.scalar(
             select(GatewayRouteBinding).where(
                 GatewayRouteBinding.subscription_id == subscription_id
@@ -489,52 +506,84 @@ def test_release_writer_blocks_provisioning_writer(engine: Engine) -> None:
         )
         seed_db.commit()
         subscription_id = subscription.id
+        endpoint_id = endpoint.id
 
-    checkpoint = threading.Event()
+    # release_egress() has no caller-visible pause point, so proving a
+    # concurrent contender is genuinely blocked while it holds the lock
+    # (rather than just "happened to run later") needs a deterministic
+    # synchronization point. Patch the *module-level name*
+    # accounting_sync.gateway_route_binding_write resolves at call time --
+    # not the implementation itself, which still runs for real -- with a
+    # thin wrapper that pauses right after the real GET_LOCK() succeeds and
+    # before release_egress()'s own body (its mutation and commit) runs.
+    # If release_egress() ever stopped calling gateway_route_binding_write()
+    # at all, this patched name would simply never be invoked, `ready`
+    # would never be set, and this test would fail on the `ready.wait()`
+    # assertion below -- so this also directly guards against that writer
+    # silently losing its lock wiring.
+    ready = threading.Event()
+    proceed = threading.Event()
+
+    @contextmanager
+    def paused_lock(session: Session, **kwargs: object) -> Iterator[None]:
+        with gateway_route_binding_write(session, **kwargs):  # type: ignore[arg-type]
+            ready.set()
+            assert proceed.wait(timeout=15), "test harness never signalled proceed"
+            yield
+
+    holder_errors: list[BaseException] = []
+
+    def hold_release() -> None:
+        with (
+            mock.patch(
+                "backend.app.workers.accounting_sync.gateway_route_binding_write",
+                paused_lock,
+            ),
+            Session(engine) as session,
+        ):
+            try:
+                release_egress(session, subscription_id, datetime.now(UTC))
+            except BaseException as exc:  # noqa: BLE001 - captured for assertion
+                holder_errors.append(exc)
+
+    holder_thread = threading.Thread(target=hold_release)
+    holder_thread.start()
+    assert ready.wait(timeout=5), "release_egress() never acquired the named lock"
+
     contender_done = threading.Event()
-    contender_result: dict[str, Any] = {}
+    contender_errors: list[BaseException] = []
 
     def contend_provisioning() -> None:
-        checkpoint.wait(timeout=5)
+        # The real production provisioning writer, not a stand-in: if
+        # ensure_gateway_route_binding()/gateway_route_binding_lock() ever
+        # stopped acquiring the same named lock, this would succeed
+        # immediately instead of blocking, and the "still not done"
+        # assertion below would fail.
         with Session(engine) as session:
+            state = SqlAlchemyProvisioningState(session, subscription_id)
+            dto = EgressEndpointDTO(str(endpoint_id), "proxy.example.invalid", 1080)
             try:
-                with gateway_route_binding_write(session, timeout_seconds=1):
-                    contender_result["acquired"] = True
-            except GatewayRouteBindingLockError:
-                contender_result["acquired"] = False
+                with state.gateway_route_binding_lock():
+                    state.ensure_gateway_route_binding("marzban-user-relvsprov-2", dto)
+                    session.commit()
+            except BaseException as exc:  # noqa: BLE001 - captured for assertion
+                contender_errors.append(exc)
         contender_done.set()
 
     contender_thread = threading.Thread(target=contend_provisioning)
     contender_thread.start()
 
-    # Reproduce release_egress()'s own locking, but hold the checkpoint open
-    # before its commit so the contender's attempt lands squarely inside the
-    # protected window.
-    with Session(engine) as db, gateway_route_binding_write(db):
-        db.scalar(
-            select(Subscription).where(Subscription.id == subscription_id).with_for_update()
-        )
-        binding = db.scalar(
-            select(EgressBinding).where(
-                EgressBinding.subscription_id == subscription_id,
-                EgressBinding.released_at.is_(None),
-            )
-        )
-        assert binding is not None
-        binding.released_at = datetime.now(UTC)
-        gateway_binding = db.scalar(
-            select(GatewayRouteBinding).where(
-                GatewayRouteBinding.subscription_id == subscription_id
-            )
-        )
-        assert gateway_binding is not None
-        gateway_binding.enabled = False
-        gateway_binding.released_at = datetime.now(UTC)
-        checkpoint.set()
-        assert contender_done.wait(timeout=10)
-        assert contender_result["acquired"] is False
-        db.commit()
-    contender_thread.join()
+    # release_egress() is paused (lock held, nothing committed yet) --
+    # the real provisioning writer must not have gotten in yet.
+    assert not contender_done.wait(timeout=1)
+
+    proceed.set()
+    holder_thread.join(timeout=15)
+    contender_thread.join(timeout=15)
+
+    assert holder_errors == []
+    assert contender_errors == []
+    assert contender_done.is_set()
 
 
 # ---------------------------------------------------------------------------
@@ -590,3 +639,149 @@ def test_lock_failure_leaves_zero_partial_writes(engine: Engine) -> None:
 
     with Session(engine) as db:
         assert _gateway_row_count(db, subscription_id) == 0
+
+
+# ---------------------------------------------------------------------------
+# Major 1 regression (Work review round 2): release_egress() must roll back
+# -- and only release the lock after that rollback completes -- if it fails
+# after mutating but before its own commit() confirms.
+# ---------------------------------------------------------------------------
+
+
+def test_release_egress_failure_after_mutation_rolls_back_before_releasing_lock(
+    engine: Engine,
+) -> None:
+    with Session(engine) as seed_db:
+        subscription, endpoint = _seed_subscription(
+            seed_db, suffix="RELROLLBACK", with_egress_binding=True
+        )
+        seed_db.add(
+            GatewayRouteBinding(
+                subscription_id=subscription.id,
+                egress_id=endpoint.id,
+                gateway_principal="marzban-user-relrollback",
+                outbound_tag="egress-relrollback",
+                enabled=True,
+            )
+        )
+        seed_db.commit()
+        subscription_id = subscription.id
+
+    contender_done = threading.Event()
+    contender_result: dict[str, Any] = {}
+
+    def contend() -> None:
+        with Session(engine) as session:
+            try:
+                # Generous timeout: this must succeed once (and only once)
+                # release_egress()'s own rollback + lock release completes,
+                # not fail with a short timeout -- a short timeout here
+                # would only prove "we didn't wait long enough", not that
+                # the lock was actually held throughout.
+                with gateway_route_binding_write(session, timeout_seconds=15):
+                    contender_result["acquired"] = True
+            except GatewayRouteBindingLockError:
+                contender_result["acquired"] = False
+        contender_done.set()
+
+    with Session(engine) as db:
+        # Simulate release_egress() mutating GatewayRouteBinding/EgressBinding
+        # successfully, and then its own db.commit() call failing --
+        # "after mutation, before transaction finalization actually
+        # confirms" per the review's scenario.
+        def failing_commit() -> None:
+            raise RuntimeError("simulated commit failure")
+
+        db.commit = failing_commit  # type: ignore[method-assign]
+
+        contender_thread = threading.Thread(target=contend)
+        contender_thread.start()
+
+        with pytest.raises(RuntimeError, match="simulated commit failure"):
+            release_egress(db, subscription_id, datetime.now(UTC))
+
+    contender_thread.join(timeout=20)
+
+    # The contender could only have gotten in after release_egress()'s
+    # `with gateway_route_binding_write(db):` block actually exited --
+    # which only happens after its except-branch db.rollback() has already
+    # run (that rollback is inside the same `with` block, so the lock's
+    # `finally` cannot release before it, by construction).
+    assert contender_done.is_set()
+    assert contender_result["acquired"] is True
+
+    with Session(engine) as verify_db:
+        binding = verify_db.scalar(
+            select(EgressBinding).where(EgressBinding.subscription_id == subscription_id)
+        )
+        assert binding is not None
+        assert binding.released_at is None, "rollback must have undone the mutation"
+        gateway_binding = verify_db.scalar(
+            select(GatewayRouteBinding).where(
+                GatewayRouteBinding.subscription_id == subscription_id
+            )
+        )
+        assert gateway_binding is not None
+        assert gateway_binding.enabled is True
+        assert gateway_binding.released_at is None
+
+
+# ---------------------------------------------------------------------------
+# Minor: RELEASE_LOCK()'s own return value must be validated, not ignored.
+# ---------------------------------------------------------------------------
+
+
+class _RecordingLockConnection:
+    """Stands in for the dedicated lock Connection; never touches a real DB."""
+
+    engine = _FakeEngine()
+
+    def __init__(self, get_lock_return: object, release_lock_return: object) -> None:
+        self._get_lock_return = get_lock_return
+        self._release_lock_return = release_lock_return
+        self.invalidated = False
+        self.closed = False
+
+    def execution_options(self, **_kwargs: object) -> _RecordingLockConnection:
+        return self
+
+    def execute(self, statement: object, _params: object | None = None) -> _FakeScalarResult:
+        sql = str(statement)
+        if "GET_LOCK" in sql:
+            return _FakeScalarResult(self._get_lock_return)
+        if "RELEASE_LOCK" in sql:
+            return _FakeScalarResult(self._release_lock_return)
+        return _FakeScalarResult(None)
+
+    def invalidate(self) -> None:
+        self.invalidated = True
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_release_lock_not_confirmed_invalidates_the_connection() -> None:
+    """Injected contract test: if RELEASE_LOCK() doesn't return 1, the
+    connection's lock state is unverified and it must not be silently
+    returned to the pool as healthy -- it must be invalidated instead."""
+    connection = _RecordingLockConnection(get_lock_return=1, release_lock_return=0)
+    session = _FakeSession(connection)
+
+    with gateway_route_binding_write(session):  # type: ignore[arg-type]
+        pass
+
+    assert connection.invalidated is True
+    assert connection.closed is True
+
+
+def test_release_lock_success_does_not_invalidate_the_connection() -> None:
+    """Control case for the above: a confirmed RELEASE_LOCK() (returns 1)
+    must not needlessly discard a perfectly healthy connection."""
+    connection = _RecordingLockConnection(get_lock_return=1, release_lock_return=1)
+    session = _FakeSession(connection)
+
+    with gateway_route_binding_write(session):  # type: ignore[arg-type]
+        pass
+
+    assert connection.invalidated is False
+    assert connection.closed is True

@@ -374,35 +374,51 @@ def release_egress(db: Session, subscription_id: int, now: datetime | None = Non
     """
     now = now or datetime.now(UTC)
     with gateway_route_binding_write(db):
-        db.scalar(
-            select(Subscription).where(Subscription.id == subscription_id).with_for_update()
-        )
-        binding = db.scalar(
-            select(EgressBinding)
-            .where(
-                EgressBinding.subscription_id == subscription_id,
-                EgressBinding.released_at.is_(None),
+        # Any exception here -- including db.commit() itself raising --
+        # must be rolled back while the named lock is still held: releasing
+        # it before the rollback completes would let a concurrent writer
+        # observe (or race against) a transaction we haven't actually
+        # finalized yet. The early "nothing to release" return is the same
+        # rule applied to a no-op outcome: the with_for_update() reads above
+        # still opened a transaction, so it must be explicitly finalized
+        # (rolled back -- nothing was mutated) before this function returns,
+        # never left open for the context manager to silently paper over.
+        try:
+            db.scalar(
+                select(Subscription).where(Subscription.id == subscription_id).with_for_update()
             )
-            .with_for_update()
-        )
-        if binding is None:
-            return
-        egress = db.scalar(
-            select(EgressEndpoint).where(EgressEndpoint.id == binding.egress_id).with_for_update()
-        )
-        binding.released_at = now
-        gateway_binding = db.scalar(
-            select(GatewayRouteBinding)
-            .where(
-                GatewayRouteBinding.subscription_id == subscription_id,
-                GatewayRouteBinding.released_at.is_(None),
+            binding = db.scalar(
+                select(EgressBinding)
+                .where(
+                    EgressBinding.subscription_id == subscription_id,
+                    EgressBinding.released_at.is_(None),
+                )
+                .with_for_update()
             )
-            .with_for_update()
-        )
-        if gateway_binding is not None:
-            gateway_binding.enabled = False
-            gateway_binding.released_at = now
-        if egress is not None:
-            egress.current_count = 0
-            egress.status = "QUARANTINED"
-        db.commit()
+            if binding is None:
+                db.rollback()
+                return
+            egress = db.scalar(
+                select(EgressEndpoint)
+                .where(EgressEndpoint.id == binding.egress_id)
+                .with_for_update()
+            )
+            binding.released_at = now
+            gateway_binding = db.scalar(
+                select(GatewayRouteBinding)
+                .where(
+                    GatewayRouteBinding.subscription_id == subscription_id,
+                    GatewayRouteBinding.released_at.is_(None),
+                )
+                .with_for_update()
+            )
+            if gateway_binding is not None:
+                gateway_binding.enabled = False
+                gateway_binding.released_at = now
+            if egress is not None:
+                egress.current_count = 0
+                egress.status = "QUARANTINED"
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
