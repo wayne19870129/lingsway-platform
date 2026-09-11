@@ -24,7 +24,23 @@ route identity 收敛方案
   当作漂移判定，会把正常的业务驱动配置变更误判为漂移，本轮引入
   `last_applied_state`/`current_disk_state`/`new_db_desired_state`
   三态模型并重新定义比对逻辑。以上三处新发现全部记入下方对应小节，
-  第一版/第二版内容除被明确替换的部分外保持不动。）
+  第一版/第二版内容除被明确替换的部分外保持不动。2026-09-11 第三次
+  修订第二轮：针对 head `0d4b1aaf1cc4cbeb83ce57bee714a596cf5dee4b`
+  的独立审查又提出三个新 Major——(1) drift baseline 的 fingerprint
+  scope 只覆盖 `outbounds`/`routing`，漏掉 Marzban `PUT
+  /api/core/config` 能写的 `inbounds`/Reality 等其它字段，本轮改为
+  覆盖整份 repo-owned 配置对象并要求显式 include/exclude 清单；(2)
+  基线提交时机没有对齐 `XrayFileProvider.apply()` 真实的九步
+  backup/validate/install/reload/health/rollback 流程，本轮改为只在
+  `ApplyResult(True, ...)` 成功返回后提交，并补齐 rollback 成功/
+  rollback 自身失败/baseline 持久化失败三种场景各自的处理规则；(3)
+  `ADR-014` 第 5 条把"选定 route identity 收敛方向"设为**整个** Phase
+  2B 的前置门槛，与本 ADR 第三次修订第一轮"Decision 3 BLOCKED 期间
+  仍可以先做部分 Phase 2B"的结论直接冲突且未显式声明 supersede，本轮
+  采纳独立审查建议的更保守路径：不 supersede ADR-014 第 5 条，
+  Decision 3 解锁之前不启动任何 Phase 2B 代码实现，下一步改为专门
+  解决 route identity 的任务。同时一并处理一条 Minor：PR 标题需要
+  反映"记录了一个 BLOCKED"而不是"关闭了所有前置决策"。）
 - 决策范围: TASK-T16 Phase 2B0（只读研究 + ADR/TASK 决策，不实现代码）
 - 前置: `docs/80-decisions/ADR-014-xray-desired-state-ownership.md`
   （Phase 2A，已接受，本 ADR 不重新讨论其中已 Accepted 的 Reality
@@ -219,9 +235,45 @@ inbound_tag, email=email, timeout=30)`。这两者都**不调用
   时**的配置内容（或其指纹/hash），代表"上一次被这个仓库自己确认过
   的、合法的磁盘状态"。
 - **(B) `current_disk_state`**——现在读取磁盘上 `xray_config.json`
-  实际的 `outbounds`/`routing` 内容（或其指纹/hash）。
+  的实际内容（或其指纹/hash）。**（第三次修订的第二轮独立审查指出
+  并核实：这里的 scope 定义有严重缺口，第一稿把它写成只覆盖
+  `outbounds`/`routing`，本轮更正为下方"保护范围（第三次修订第二轮
+  更正）"一节的定义。**
 - **(C) `new_db_desired_state`**——现在从数据库计算出的、renderer
   即将渲染的新期望态（或其指纹/hash）。
+
+#### 保护范围（第三次修订第二轮更正，修复本轮 Major 1）
+
+**第一稿的错误**：把 `current_disk_state`/`last_applied_state` 都
+定义成"只包含 `outbounds`/`routing` 部分"。这个 scope 太窄——Marzban
+的 `PUT /api/core/config` 写的是**整个 payload**，不是只写
+`outbounds`/`routing`。如果一次未授权写入只改了 `inbounds`
+（协议/`listen`/端口）或 Reality 相关字段，而没有改 `outbounds`/
+`routing`，按第一稿的 scope，`current_disk_state == last_applied_
+state` 仍然成立，drift 检测会报告"无漂移"——**恰好漏掉这个机制本来
+就是为了检测的那种双 writer 场景**，这是一个会让 drift detection
+名不副实的真实缺口。
+
+**更正后的定义**：`current_disk_state`/`last_applied_state` 必须覆盖
+**整个本仓库拥有的、写入共享 Xray 配置文件的对象**（不只是
+`outbounds`/`routing`，也包括 `inbounds`（协议/`listen`/端口/
+`settings.clients` 骨架部分——不含 Marzban 通过 gRPC Handler API 增量
+维护的运行时 client 列表，那部分活在 Xray 进程内存里，不落盘，见 Part
+A 第 6 点）、Reality 相关字段、以及 renderer 实际写入的其它任何顶层
+字段），逐字段核对/白名单化，而不是只挑两个字段比较。**如果未来需要
+排除某个字段不纳入指纹**（例如某个已知会被 Marzban 运行时正常改写、
+不代表未授权修改的字段），必须显式列出该字段并写明排除理由，不能
+默认排除任何字段。
+- **canonicalization**：`current_disk_state`/`last_applied_state`
+  的指纹计算必须用同一套确定性序列化规则（例如递归排序 key 后再
+  hash），格式/空白/key 顺序的差异不应该被判定为漂移——只有语义内容
+  的差异才算。
+- **无法解析时 fail closed**：如果磁盘上的文件不是合法 JSON（无法
+  解析），不能当作"和上次一样"处理，必须视为一种漂移信号并 fail
+  closed。
+- **一致性要求**：基线（`last_applied_state`）和当前磁盘读取
+  （`current_disk_state`）必须使用**完全相同**的 canonicalization
+  scope 和序列化规则计算指纹，否则两者不可比较。
 
 **正确的比对逻辑**：
 
@@ -285,11 +337,64 @@ scope 限定为这一份共享文件的持久化机制"）。**这意味着 Deci
 - **文件缺失时**：视为需要 renderer 正常渲染并写入（不是漂移，因为
   没有"被别人动过"这件事可比较），写入后建立新的 `last_applied_
   state`。
-- **基线更新时机**：`last_applied_state` **只应该在 renderer 确认
-  成功把候选配置写入磁盘之后才更新**，不能在候选配置生成/校验通过
-  但尚未实际写盘之前提前更新——如果提前更新，一旦实际写盘失败，
-  基线会指向一个从未真正落地的状态，下一次 drift 检测会用错误的
-  基线做比较。
+- **基线更新时机（第三次修订第二轮更正，修复本轮 Major 2）**：
+  **第一稿的错误**：写的是"renderer 确认成功把候选配置写入磁盘之后
+  才更新"——这句话没有对齐既有的九步安全 reload/rollback 契约
+  （`backend/app/providers/gateway/xray_file.py::XrayFileProvider.
+  apply()`），核实其实现后确认真实流程是：`backup()` → `validate()`
+  → `install()`（写盘）→ `reload()` → `health()` + post-reload
+  preservation 校验；两者都通过才返回 `ApplyResult(True, ...)`；任一
+  失败会 `restore(backup)` 还原磁盘、再次 `reload()`、再跑一次
+  `health()` 做 `rollback_reverified`。**"磁盘写入成功"不等于"配置
+  已经生效"**——如果 `last_applied_state` 在 `install()` 刚写盘那一刻
+  就更新，而随后的 health/preservation 检查失败触发了
+  `restore(backup)`，磁盘会被还原回旧配置，但 `last_applied_state`
+  已经错误地指向了那个被回滚掉的候选配置，下一次 drift 检测会误报
+  未授权漂移。
+
+  **更正后的规则**：`last_applied_state` 表示 **last known-good
+  successfully applied config**，不是 **last file write attempt**，
+  只应该在 `apply()` 整个九步流程成功返回 `ApplyResult(True, ...)`
+  （`install()`+`reload()`+post-reload 校验+`health()` 全部通过）
+  之后才提交更新。
+
+  **rollback/baseline 矩阵（本轮按独立审查要求逐场景明确）**：
+
+  - **场景 A：candidate apply 后（reload/health/preservation 任一）
+    失败，rollback（`restore(backup)`+`reload()`）成功**——磁盘已经
+    恢复到 apply 之前的已知良好配置。`last_applied_state` **保持
+    apply 之前的旧基线不变，不推进到失败的 candidate**——因为整个
+    流程从未成功产出一个 `ApplyResult(True, ...)`，本来就不该被推进；
+    这也不需要"回滚基线"这个动作，只是"从未更新过"。
+  - **场景 B：`restore(backup)` 本身把文件复制回去了，但随后的
+    `reload()`/`rollback_reverified` 健康检查失败**——系统这时已经
+    不能再声称处于"已知良好"状态：既不能确认磁盘上的旧配置正在被
+    Xray 正确运行（reload/health 都可能已经出问题），也不该假装
+    rollback 完全成功。**必须 fail closed**：把 `last_applied_state`
+    标记为**未知/degraded**（不是简单"保持旧值"，因为旧值所代表的
+    "已生效"状态本身现在也存疑），下一次 drift 检测在基线未知时必须
+    直接 fail closed 并告警，要求人工介入确认真实运行状态，不能假设
+    磁盘或运行时任一侧当前是可信的。
+  - **场景 C：Xray 侧已经成功走完 apply()（即已经产出
+    `ApplyResult(True, ...)`），但把这个结果落成 `last_applied_state`
+    持久化记录（写数据库/持久化存储）这一步本身失败**（例如 DB 写入
+    异常）——这时 Xray 运行时的真实状态是"已经应用了新 candidate"
+    （场景描述里的"B"，指运行时已经生效的新状态，不要与上面 drift
+    矩阵的场景 B 混淆），但基线记录还停留在旧值，两者不一致。**不允许
+    对外继续同时声称"baseline=旧值"且"runtime=新值"是正常状态**——
+    必须二选一并明确记录选哪个：①**立即把 Xray 运行时回滚回旧配置**
+    （调用等价于 `restore(backup)`+`reload()`+health 复核的路径），
+    让运行时状态与仍然有效的旧基线重新一致；②**接受运行时已经是新
+    状态，把系统标记为 unknown/fail-closed**，直到基线持久化重试
+    成功、或人工确认并手动修复基线记录为止，期间 drift 检测必须
+    fail closed，不能静默假设基线迟早会追上。本 ADR 不替 Phase 2B
+    选定①或②，但要求 Phase 2B 实现时必须明确选一个并写进代码/文档，
+    不能把这个不一致状态放任不处理。
+
+  如果 Phase 2B 决定这里的语义特意只是"renderer 上一次写盘的字面
+  内容"而不是"上一次成功 apply 的配置"，必须明确改名以避免歧义，并
+  单独写清楚它在上述三个场景下的行为，不能含糊地沿用"last applied"
+  这个已经暗示"已生效"语义的名字。
 - **基线的定位**：`last_applied_state` **只是完整性元数据（用于
   检测"有没有被意外改动"），永远不是配置数据的 source of truth**——
   真正的期望态 source of truth 仍然是数据库（ADR-014 已确立），
@@ -716,8 +821,71 @@ ownership 结论（inbound protocol/listen/port → 静态模板；Reality
 DB/Secret；routing/outbounds/route identity → DB；运行时 config →
 只读校验/回滚/漂移来源）的证据，本 ADR 不重新打开这些问题。
 
+## ADR-014 Phase 2B gate 与本 ADR 的关系（第三次修订第二轮新增，修复
+本轮 Major 3）
+
+**冲突**：`ADR-014` 的"约束"第 5 条明确写着——**"Phase 2B 开始前，
+必须先在事实三的候选 A/B/C 中选定 `gateway_principal`/
+`accounting_user_id` 的收敛方向……这不是可以在写 DTO 的过程中顺便
+决定的细节"**——这是对**整个 Phase 2B**（不是只对 route identity
+相关的那部分代码）设的前置门槛。本 ADR 第三次修订第一轮的"Decision
+4 implementation matrix"/"Phase 2B implementation handoff"两节曾经
+写"Decision 3 `BLOCKED` 的同时，非 route-identity 的其它 `YES` 条目
+（Reality Settings/Secret、accounting health、drift detection 等）
+可以先行实现"——**这和 ADR-014 的第 5 条门槛直接冲突，且本 ADR 当时
+没有显式声明 supersede 这一条**，导致两份都处于"已接受"状态的 ADR
+对"Decision 3 BLOCKED 期间能不能开始 Phase 2B"给出了不同的答案，是
+一个真实的治理缺口，不是文字表述问题。
+
+**本轮采纳的解决方案：保持 Phase 2B 整体 gated，不 supersede ADR-014
+第 5 条**——按独立审查建议的更保守路径：这是一个涉及真实生产
+provider（Marzban）和 Xray 运行时配置的高风险改动序列，本仓库一贯的
+序列是"契约收敛 → 测试护栏 → 实现 → opt-in → 隔离验证 → 人工生产
+批准"；在 route identity（本次改动序列里最核心的契约问题）仍然
+`BLOCKED` 的情况下开始实现 DTO/schema/renderer 的其它部分，一旦
+Decision 3 解锁后发现需要的改动和已经落地的部分冲突（例如 DTO 形状、
+渲染器的字段假设），会造成返工，代价高于"等 Decision 3 解锁后再一次性
+实现"。
+
+**具体规则**：
+
+1. `ADR-014` 第 5 条继续完整有效，本 ADR **不 supersede** 它——在
+   Decision 3（route identity 收敛方向）解锁之前，**不得开始任何
+   Phase 2B 代码实现**，包括下方 Decision 4 矩阵里标 `YES` 的条目
+   （Reality Settings/Secret、accounting health、drift detection、
+   preservation/validation、共享文件 writer guard 等）——这些条目
+   在下方矩阵里标 `YES` 表示"设计方向已经确定、不再是 UNVERIFIED"，
+   **不表示"可以现在开始写代码"**，两者是不同的问题，第三次修订第
+   一轮把两者混为一谈，本轮更正。
+2. **PR #56（本 ADR 所在的 Phase 2B0 研究）可以作为"blocker-discovery
+   / blocker-record"合并**——它本身不实现任何代码，记录的是"哪些前置
+   问题已经关闭、哪个还 BLOCKED"这个诚实的研究结论，合并它不等于
+   授权开始 Phase 2B 实现。
+3. **下一步不是 Phase 2B 实现 PR，而是一个专门解决 Decision 3 /
+   route identity architecture 的任务**——目标是让 Decision 3 从
+   `BLOCKED` 变成一个有 exact-source 支持的、可实现的结论（见 Part C
+   "BLOCKED 解除条件"一节列出的几种可能路径：Marzban 未来版本新增
+   支持、新写一份 ADR 评估"要求 Marzban 部署方暴露只读 DB 连接"这个
+   选项、或核实到当前遗漏的其它公开机制）。
+4. **只有 Decision 3 解锁之后，才能启动真正的 Phase 2B 实现 PR**，
+   届时下方 Decision 4 矩阵里所有 `YES`/一并解锁的 `BLOCKED` 条目
+   才能一起开始实现——矩阵本身仍然有价值，作为"Decision 3 解锁后
+   Phase 2B 需要做哪些事"的范围记录，但不是"现在就能开始做哪些事"
+   的授权清单。
+
+**如果未来项目决定不采纳这个更保守的路径**，需要走另一条路：新写一份
+明确的 ADR 修订（可以是本 ADR 的后续修订，也可以是新 ADR），显式写
+`本 ADR supersede ADR-014 第 5 条关于"Phase 2B 开始前必须先选定
+route identity 收敛方向"的门槛`，并逐项证明允许先实施的每一类工作
+（Settings/Secret/health/drift baseline/preservation）都和 route
+identity **完全解耦**——不能像第三次修订第一轮那样，两份 ADR 各写
+各的规则、不显式互相引用地并存。本轮不采纳这条路径，只记录它作为
+"如果未来要推翻本轮结论"的显式选项。
+
 ## Decision 4：Phase 2B implementation matrix（第三次修订：按独立
-审查要求，允许 `BLOCKED`/`DECISION_REQUIRED`，不强行归为 YES/NO）
+审查要求，允许 `BLOCKED`/`DECISION_REQUIRED`；第二轮更正：本表格是
+"Decision 3 解锁后 Phase 2B 的范围记录"，不是"现在可以开始实现"的
+授权——见上方"ADR-014 Phase 2B gate 与本 ADR 的关系"一节）
 
 | 改动类型 | 需要？ | 说明 |
 |---|---|---|
@@ -739,26 +907,28 @@ DB/Secret；routing/outbounds/route identity → DB；运行时 config →
 | **drift-detection 首次运行 (bootstrap) 策略** | **YES（本轮新增独立条目）** | 无基线时需要一次显式的"采纳当前磁盘状态为初始基线"操作并记录，不能静默假设"无基线=无漂移"；文件缺失时按正常渲染处理；基线只在实际写盘成功后更新，不在校验通过但未写盘时更新 |
 | tests | **部分 YES，部分 BLOCKED** | 可以现在写：`accounting.health_check()` 契约测试、drift-detection 三态模型的单元测试（含 bootstrap/文件缺失/基线更新时机场景）、既有数据 reconciliation 的通用 fail-closed 行为测试（不依赖具体目标值，只测试"任何一行无法解析就整体不写入"这个不变量）；不能现在写：`gateway_principal` 最终值的契约测试（因为最终值本身 `BLOCKED`） |
 
-## Phase 2B implementation handoff（第三次修订：收窄为"确定可以实现
-的部分"，route identity 相关部分明确排除）
+## Phase 2B implementation handoff（第三次修订第二轮更正：整体维持
+`ADR-014` 第 5 条的 gate，本 ADR 不 supersede 它——不是"部分可以先做"）
 
-**可以实现的部分**（上表标 `YES` 的条目）：ADR-014 已定方向的
-Reality Settings/Secret 部分、accounting health 契约（H1）、drift
-detection 的三态模型与其新基线持久化与 bootstrap 策略、preservation/
-validation 重写、共享文件 writer guard（不依赖 route identity 具体
-值的部分）。
+**第一轮的错误**：写了"可以实现的部分（Reality Settings/Secret、
+accounting health、drift detection 等）"和"明确排除的部分（route
+identity 相关）"，暗示 Decision 3 `BLOCKED` 期间仍可以启动前者的
+代码实现。**这个结论已被本轮 Major 3 推翻**：`ADR-014` 第 5 条的
+门槛适用于**整个 Phase 2B**，本 ADR 没有（也不打算，见上方"ADR-014
+Phase 2B gate 与本 ADR 的关系"一节）显式 supersede 它，因此不能一边
+维持这条门槛一边又说"部分工作可以先做"。
 
-**明确排除、不得在本轮 Decision 3 解决之前实现**：`gateway_principal`
-的任何写入逻辑改动、`routing.rules[].user` 的渲染逻辑改动、既有数据
-reconciliation migration 的具体实现、`AccountUserDTO`/编排数据流的
-改动——这些全部 contingent on Decision 3，在 Decision 3 找到一个
-exact-source 支持的、可实现的答案之前，实现它们只会把一个已知错误的
-值（accounting username）继续写进生产数据和渲染出的 Xray 配置里，
-不会真正解决路由匹配问题，也会让"这个字段该存什么"的语义在
-reconciliation 之后需要再改一次。
+**更正后的规则**：**在 Decision 3 解锁之前，不启动任何 Phase 2B 代码
+实现**，无论该项在 Decision 4 矩阵里标的是 `YES` 还是 `BLOCKED`。
+下一步是一个专门解决 Decision 3 / route identity architecture 的
+任务，不是 Phase 2B 实现 PR——具体见上方"ADR-014 Phase 2B gate 与
+本 ADR 的关系"一节的规则 3。Decision 4 矩阵保留作为"Decision 3 解锁
+后 Phase 2B 的范围记录"，供那时候的实现 PR 参照，不是当前的实施
+授权。
 
 以上仍然**不包括**：`registry.py` 的真实 opt-in wiring、生产环境
-启用、真实生产凭据、真实 Xray reload、部署——这些仍然属于 Phase 2C。
+启用、真实生产凭据、真实 Xray reload、部署——这些仍然属于 Phase 2C，
+在 Phase 2B 本身开始之前更不适用。
 
 ## 约束
 
@@ -794,6 +964,24 @@ reconciliation 之后需要再改一次。
 8. **（第三次修订新增）** 既有数据 reconciliation 的 NULL/未匹配行
    处理必须是"全量 preflight → 检测到任何异常整体中止，不做任何
    UPDATE"，不允许"跳过并记录、继续处理其它行"这种部分成功的模式。
+9. **（第三次修订第二轮新增）** drift baseline 的 fingerprint 必须
+   覆盖整份本仓库拥有的、写入共享 Xray 配置文件的对象（不只是
+   `outbounds`/`routing`），任何排除字段必须显式列出并说明理由；
+   `last_applied_state`/`current_disk_state` 必须使用完全相同的
+   canonicalization 规则；无法解析的 JSON 必须 fail closed，不能
+   当作"和上次一样"处理。
+10. **（第三次修订第二轮新增）** `last_applied_state` 只能在
+    `XrayFileProvider.apply()`（或其等价实现）整个九步流程成功返回
+    `ApplyResult(True, ...)` 之后才提交更新；rollback 成功时基线保持
+    不变；rollback 自身失败时基线必须标记未知并 fail closed；Xray
+    运行时已生效但基线持久化失败时，必须在"回滚运行时"或"标记系统
+    unknown/fail-closed"之间明确选一个，不允许放任 baseline 和
+    runtime 长期不一致却不做任何标记。
+11. **（第三次修订第二轮新增）** 本 ADR 不 supersede `ADR-014` 第 5
+    条关于"Phase 2B 开始前必须先选定 route identity 收敛方向"的门槛；
+    在 Decision 3 从 `BLOCKED` 解锁之前，不得启动任何 Phase 2B 代码
+    实现（无论 Decision 4 矩阵里标 `YES` 还是 `BLOCKED`）；下一步是
+    专门解决 route identity 的任务，不是 Phase 2B 实现 PR。
 
 ## 考虑过的替代方案
 

@@ -625,7 +625,19 @@ API，Phase 2B 必须实现 **drift detection**——**第三次修订：算法�
 才是未授权漂移，fail closed 并告警；`new_db_desired_state !=
 last_applied_state` 且磁盘未被动过，是正常业务变更，应正常渲染，
 不得当作漂移拒绝（第二版把这两者混为一谈，会把正常业务变更误判为
-漂移，已废止）。基线持久化不复用 `TransportVersion`/`EgressVersion`
+漂移，已废止）。**第三次修订第二轮更正两处**：①`current_disk_state`/
+`last_applied_state` 的 fingerprint scope 必须覆盖**整份 repo-owned
+的共享配置对象**（不只是 `outbounds`/`routing`——第一轮的 scope 太窄，
+无法检测 Marzban `PUT /api/core/config` 只改 `inbounds`/Reality 字段
+的未授权写入），任何排除字段需显式列出理由，两者 canonicalization
+规则必须一致，无法解析的 JSON 必须 fail closed；②`last_applied_state`
+只能在 `XrayFileProvider.apply()` 整个九步流程成功返回
+`ApplyResult(True, ...)` 之后才提交（不是"写盘成功那一刻"），并区分
+rollback 成功（基线保持不变）、rollback 自身失败（基线标记未知、
+fail closed）、Xray 已生效但基线持久化失败（必须在"回滚运行时"或
+"标记 unknown/fail-closed"之间明确选一个）三种场景，完整规则见
+ADR-015 Part A"drift detection 三态模型"及"last-applied 基线的持久化
+位置"两节。基线持久化不复用 `TransportVersion`/`EgressVersion`
 （grep 确认零引用且 bounded context 不匹配），需要新的、scope 限定
 为共享 Xray 配置文件的持久化机制；首次运行需要显式 bootstrap 策略，
 不得静默假设"无基线=无漂移"。不允许"DB renderer + Marzban
@@ -713,21 +725,28 @@ ownership 结论的证据，维持原结论不变，不重新讨论。
 | **共享 `XRAY_JSON` writer guard / drift policy** | **YES，算法已重写**（三态模型；新基线持久化；显式 bootstrap 策略） |
 | tests | **部分 YES，部分 BLOCKED**（可写：`accounting.health_check()` 契约、drift-detection 三态模型单测（含 bootstrap/文件缺失/基线更新时机）、既有数据 reconciliation 通用 fail-closed 不变量测试；不可写：`gateway_principal` 最终值契约测试） |
 
-### Phase 2B implementation handoff（第三次修订：收窄为确定可实现
-的部分）
+### Phase 2B implementation handoff（第三次修订第二轮更正：整体维持
+`ADR-014` 第 5 条门槛，不是"部分可以先做"）
 
-**可以实现**：ADR-014 已定方向的 Reality Settings/Secret 部分、
-accounting health 契约（H1）、drift detection 三态模型与新基线
-持久化与 bootstrap 策略、preservation/validation 重写、共享文件
-writer guard（不依赖 route identity 具体值的部分）。
+**第一轮的错误，本轮推翻**：曾经写"Reality Settings/Secret、
+accounting health、drift detection 等部分可以先实现，只排除 route
+identity 相关部分"——这和 `ADR-014`"约束"第 5 条（"Phase 2B 开始前
+必须先选定 route identity 收敛方向……这不是可以在写 DTO 的过程中顺便
+决定的细节"）直接冲突，而 ADR-015 当时没有显式 supersede 这一条，
+导致两份已接受的 ADR 对"能不能开始"给出不同答案。
 
-**明确排除，不得在 Decision 3 解决之前实现**：`gateway_principal`
-的任何写入逻辑改动、`routing.rules[].user` 渲染逻辑改动、既有数据
-reconciliation migration 的具体实现、`AccountUserDTO`/编排数据流
-改动——理由见 ADR-015 Part C 第三次修订。
+**更正后的规则**：本 ADR 不 supersede `ADR-014` 第 5 条，**在 Decision
+3 从 `BLOCKED` 解锁之前，不启动任何 Phase 2B 代码实现**——无论 Decision
+4 矩阵里标的是 `YES` 还是 `BLOCKED`。PR #56（本阶段 2B0）可以作为
+"记录了一个有证据支持的 blocker"合并，但合并它不代表授权开始 Phase
+2B 实现。**下一步是一个专门解决 Decision 3 / route identity
+architecture 的任务**，不是 Phase 2B 实现 PR；Decision 4 矩阵保留
+作为"Decision 3 解锁后 Phase 2B 的范围记录"，供那时候的实现 PR 参照。
+完整推理见 ADR-015"ADR-014 Phase 2B gate 与本 ADR 的关系"一节。
 
 以上仍不包括：`registry.py` 的真实 opt-in wiring、生产环境启用、
-真实生产凭据、真实 Xray reload、部署。这些仍然属于 Phase 2C。
+真实生产凭据、真实 Xray reload、部署。这些仍然属于 Phase 2C，在
+Phase 2B 本身开始之前更不适用。
 
 ### 本阶段（2B0）验收
 
@@ -745,7 +764,10 @@ reconciliation migration 的具体实现、`AccountUserDTO`/编排数据流
   遗留问题）**，既有数据 reconciliation 同样 `BLOCKED`（contingent on
   Decision 3）——第二版"三个前置决策全部关闭"的表述已不再准确，
   已更正为诚实反映当前状态：2 个已关闭 + 1 个有证据支持的 BLOCKED。
-- 下一步：等待下一轮独立审查；在 Decision 3 的 `BLOCKED` 状态解除
-  （见 ADR-015"重新评估条件"）之前，不得开始 route identity 相关的
-  Phase 2B 代码实现；上表标 `YES` 的其它条目可以在获得明确指示后
-  按 Phase 2B 实现 PR 的流程单独推进。
+- **（第三次修订第二轮更正）** 下一步：等待下一轮独立审查；本 ADR
+  不 supersede `ADR-014` 第 5 条，在 Decision 3 的 `BLOCKED` 状态解除
+  之前，**不得开始任何 Phase 2B 代码实现**（不只是 route identity
+  相关部分——第一轮"其它 `YES` 条目可以单独推进"的表述已被推翻，见
+  ADR-015"ADR-014 Phase 2B gate 与本 ADR 的关系"一节）；下一步应该是
+  一个专门解决 Decision 3 / route identity architecture 的任务，而
+  不是任何形式的 Phase 2B 实现 PR。
