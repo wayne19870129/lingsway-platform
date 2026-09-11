@@ -16,10 +16,17 @@ from enum import Enum
 from pathlib import Path
 
 import pytest
+from _pinned_upstream import PinnedUpstreamFetchError, fetch_pinned_upstream_user_py
 
 PATCH_DIR = Path(__file__).resolve().parent.parent
-VENDORED_UPSTREAM_USER_PY = PATCH_DIR / "vendor" / "upstream" / "app" / "models" / "user.py"
 APPLY_SCRIPT = PATCH_DIR / "apply_patch.sh"
+
+
+def _fetch_pinned_upstream_user_py_or_fail() -> bytes:
+    try:
+        return fetch_pinned_upstream_user_py()
+    except PinnedUpstreamFetchError as exc:
+        pytest.fail(str(exc))
 
 _STUB_MODULE_NAMES = (
     "app",
@@ -160,15 +167,13 @@ def _import_user_module(target: Path, *, module_name: str) -> Iterator[types.Mod
 
 @pytest.fixture
 def patched_user_response_module(tmp_path: Path) -> Iterator[types.ModuleType]:
-    """Apply the real patch to a fresh copy of the vendored pinned source
-    (via apply_patch.sh, not a hand-edit) and import the result."""
-    if not VENDORED_UPSTREAM_USER_PY.is_file():
-        pytest.fail(f"vendored upstream fixture missing: {VENDORED_UPSTREAM_USER_PY}")
-
+    """Apply the real patch to a fresh copy of the fetched-and-verified
+    pinned source (via apply_patch.sh, not a hand-edit) and import the
+    result."""
     source_root = tmp_path / "marzban-source"
     target = source_root / "app" / "models" / "user.py"
     target.parent.mkdir(parents=True)
-    target.write_bytes(VENDORED_UPSTREAM_USER_PY.read_bytes())
+    target.write_bytes(_fetch_pinned_upstream_user_py_or_fail())
 
     result = subprocess.run(
         [str(APPLY_SCRIPT), str(source_root)],
@@ -177,9 +182,9 @@ def patched_user_response_module(tmp_path: Path) -> Iterator[types.ModuleType]:
     )
     if result.returncode != 0:
         pytest.fail(
-            "apply_patch.sh failed to apply the patch to the vendored "
-            f"pinned source (this should never happen unless the vendored "
-            f"fixture itself drifted from the patch):\n{result.stdout}\n{result.stderr}"
+            "apply_patch.sh failed to apply the patch to the fetched "
+            f"pinned source (this should never happen unless the pinned "
+            f"upstream commit itself drifted from the patch):\n{result.stdout}\n{result.stderr}"
         )
 
     yield from _import_user_module(target, module_name="lingsway_marzban_patched_user_module")
@@ -187,15 +192,13 @@ def patched_user_response_module(tmp_path: Path) -> Iterator[types.ModuleType]:
 
 @pytest.fixture
 def unpatched_user_response_module(tmp_path: Path) -> Iterator[types.ModuleType]:
-    """Import the vendored pinned source as-is, with the patch NOT applied
-    -- used to prove that unpatched source is correctly NOT contract-ready
-    (no routing_principal, no importable `id` field on UserResponse)."""
-    if not VENDORED_UPSTREAM_USER_PY.is_file():
-        pytest.fail(f"vendored upstream fixture missing: {VENDORED_UPSTREAM_USER_PY}")
-
+    """Import the fetched-and-verified pinned source as-is, with the patch
+    NOT applied -- used to prove that unpatched source is correctly NOT
+    contract-ready (no routing_principal, no importable `id` field on
+    UserResponse)."""
     source_root = tmp_path / "marzban-source-unpatched"
     target = source_root / "app" / "models" / "user.py"
     target.parent.mkdir(parents=True)
-    target.write_bytes(VENDORED_UPSTREAM_USER_PY.read_bytes())
+    target.write_bytes(_fetch_pinned_upstream_user_py_or_fail())
 
     yield from _import_user_module(target, module_name="lingsway_marzban_unpatched_user_module")

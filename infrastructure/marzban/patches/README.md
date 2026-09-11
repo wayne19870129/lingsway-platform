@@ -13,9 +13,12 @@ not implement a real Marzban `AccountingProvider`. See
 ## Pinned upstream
 
 - Project: [`Gozargah/Marzban`](https://github.com/Gozargah/Marzban)
-  (AGPL-3.0-only; see `Gozargah/Marzban`'s own `LICENSE` file — this patch
-  and the vendored fixture below remain subject to that license and are
-  **not** relicensed by this repository).
+  (AGPL-3.0-only; see `Gozargah/Marzban`'s own `LICENSE` file). This
+  repository's own root `LICENSE` is a blanket proprietary/all-rights-
+  reserved declaration with no carve-out for third-party code, so this
+  patch set deliberately does **not** commit a copy of Marzban's
+  AGPL-3.0-licensed source into the repository — see "Upstream source:
+  fetched, not vendored" below.
 - Pinned tag: `v0.8.4`
 - Pinned commit: `7f396db3e703d71a28060bc9ce4a532ec64cb1f4`
 - Verified (this PR, exact-source): `app/models/user.py`,
@@ -44,7 +47,7 @@ principal a provisioned account will actually be matched by.
 
 ## The patch
 
-`0001-expose-routing-principal.patch` adds, to `UserResponse` only:
+`0001-expose-routing-principal.patch` adds, to `UserResponse`:
 
 - `id: int = Field(exclude=True)` — a normal field, populated via
   `UserResponse`'s existing `from_attributes=True` config directly off the
@@ -52,17 +55,31 @@ principal a provisioned account will actually be matched by.
   `app/xray/operations.py` already reads), like every other field on the
   class; `exclude=True` only affects serialization, not extraction, so no
   existing field's extraction is touched.
-- a `@computed_field routing_principal` property returning
-  `f"{self.id}.{self.username}"` — byte-for-byte the same formula
-  `operations.py` already uses internally.
+- `routing_principal: str = Field(default="")` plus a
+  `@model_validator(mode="after") def compute_routing_principal(self)`
+  that sets `self.routing_principal = f"{self.id}.{self.username}"` —
+  byte-for-byte the same formula `operations.py` already uses internally.
 
-This is the mechanism ADR-016 settled on after two prior, non-viable
-proposals (a hand-rolled lookalike response model, and a
-`model_validator(mode="before")` that would have silently dropped every
-other field's `from_attributes` extraction) — see ADR-016 Decision 3 for
-the full rejection history. It touches no other class, endpoint, or
-field, and makes no promise about `GET /api/users` or webhook payloads
-that happen to reuse the same schema (see ADR-016's "scope narrowing").
+...and, to `SubscriptionUserResponse(UserResponse)` — the model backing
+the customer-facing `GET /{token}/info` endpoint (`app/routers/
+subscription.py`) — a `routing_principal: str = Field(default="",
+exclude=True)` override, so the DB-id-derived value never reaches a
+subscription-token holder.
+
+The `UserResponse` mechanism is a `model_validator(mode="after")` +
+regular `Field`, not a `@computed_field` property. ADR-016 originally
+recorded a `@computed_field` design; that was corrected during this PR
+after discovering it could not be selectively excluded in a subclass
+under the pinned pydantic 2.10.4 (`ValueError: you can't override a field
+with a computed field`), which is exactly what `SubscriptionUserResponse`
+needs to do. See ADR-016 Decision 3's dated correction for the full
+history, including the two earlier non-viable proposals (a hand-rolled
+lookalike response model, and a `model_validator(mode="before")` that
+would have silently dropped every other field's `from_attributes`
+extraction). This patch touches no other class, endpoint, or field beyond
+the two above, and makes no promise about `GET /api/users` or webhook
+payloads that happen to reuse `UserResponse` (see ADR-016's "scope
+narrowing").
 
 ## How it's applied
 
@@ -80,24 +97,42 @@ actually rebuilds/deploys a patched Marzban image is responsible for
 cloning/extracting the pinned commit and invoking this script as a
 fail-closed build step, and must not proceed past a non-zero exit.
 
-## `vendor/upstream/`
+## Upstream source: fetched, not vendored
 
-`vendor/upstream/app/models/user.py` is a byte-for-byte copy of the
-pinned commit's `app/models/user.py` (verified: `sha256sum` matches what
-was fetched directly from
+This patch set does **not** commit a copy of Marzban's `app/models/
+user.py` into this repository. Marzban is AGPL-3.0-licensed; this
+repository's own root `LICENSE` is a blanket "all rights reserved,
+proprietary and confidential" declaration with no stated carve-out for
+included third-party code, so committing a verbatim copy of an
+AGPL-3.0-licensed file under that declaration would be a real license
+conflict — not something to resolve by inventing an unauthorized legal
+conclusion. Whether and how to formally vendor Marzban source (e.g. with
+a proper `THIRD_PARTY_LICENSES` notice) is left to the repository owner
+or counsel to decide.
+
+Instead, `infrastructure/marzban/patches/tests/_pinned_upstream.py`
+fetches the pinned commit's `app/models/user.py` directly from
 `raw.githubusercontent.com/Gozargah/Marzban/7f396db3e703d71a28060bc9ce4a532ec64cb1f4/app/models/user.py`
-during this PR). It exists solely so `apply_patch.sh` and the contract
-tests below have a real, pinned target to apply the patch to without a
-network call at test time. **Never hand-edit this file** — if the pinned
-commit changes, replace it with a fresh fetch of that exact commit, never
-a manual diff-driven edit, or the drift guard stops meaning anything.
+at test time and verifies its sha256 against the hash recorded during
+this PR's upstream research, before any fixture or drift-guard test uses
+it. Every fetch **fails closed** (`pytest.fail()`/raised exception, never
+a skip or a silent fallback) on a network error or a hash mismatch — an
+unreachable network or a changed/compromised upstream file can never be
+mistaken for the pinned, verified source. This makes the test suite
+non-hermetic (it needs outbound network access at test time; a future PR
+that wants a fully offline test run must resolve the license question
+first, not route around it), and that non-hermetic-ness is a deliberate,
+known tradeoff — the alternative is exactly the licensing risk this
+avoids. `apply_patch.sh` itself is unaffected: it still operates
+generically on whatever `<source-tree-root>` it's pointed at and does not
+know whether that source came from a fetch or a real checkout.
 
 ## Contract tests (`tests/`)
 
 `tests/test_routing_principal_contract.py` actually applies
 `0001-expose-routing-principal.patch` (via `apply_patch.sh`, not a
-hand-applied edit) to a fresh temp copy of the vendored pinned
-`app/models/user.py`, imports the **real, patched** `UserResponse` class
+hand-applied edit) to a fresh temp copy of the fetched-and-verified
+pinned `app/models/user.py`, imports the **real, patched** `UserResponse` class
 from that file, and mounts it behind two FastAPI routes shaped exactly
 like the two real endpoints this repository depends on
 (`POST /api/user`, `GET /api/user/{username}`, both
@@ -119,7 +154,19 @@ never let real `UserResponse` code call
 (`generate_v2ray_links`, `create_subscription_token`) raise loudly if
 invoked, rather than silently returning a plausible-looking fake value —
 so the test harness's own assumptions about which code paths are and
-aren't exercised are self-checking.
+aren't exercised are self-checking. A dedicated test
+(`test_empty_links_and_subscription_url_exercise_real_validation_path`)
+monkeypatches those two stubs with working fakes and supplies empty
+`links`/`subscription_url` to prove the patched model also validates
+correctly through the normal, non-short-circuited path.
+
+`test_subscription_user_response_excludes_routing_principal` proves the
+patch's second hunk: the same, real, patched module's
+`SubscriptionUserResponse` (the model backing the customer-facing `GET
+/{token}/info` endpoint) excludes `routing_principal` from its output
+while `UserResponse` still includes it — this is the regression test for
+the leak this PR's own review process found and fixed (see ADR-016
+Decision 3's dated correction).
 
 Also included: `test_patch_drift_guard.py`, which proves the fail-closed
 contract with real `git apply` runs (not simulated): applying the patch

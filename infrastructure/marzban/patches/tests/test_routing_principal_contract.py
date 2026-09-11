@@ -23,6 +23,7 @@ import types
 from datetime import UTC, datetime
 from typing import Any
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -197,3 +198,76 @@ def test_unpatched_source_is_not_contract_ready(
     for body in (post_body, get_body):
         assert "routing_principal" not in body
         assert "id" not in body
+
+
+def test_subscription_user_response_excludes_routing_principal(
+    patched_user_response_module: types.ModuleType,
+) -> None:
+    """ADR-016 Decision 3 correction: `routing_principal` is only
+    authorized on the Admin API surface (POST /api/user, GET
+    /api/user/{username}, both `response_model=UserResponse`). Marzban's
+    real `SubscriptionUserResponse(UserResponse)` -- used by the
+    customer-facing `GET /{token}/info` endpoint per the pinned
+    `app/routers/subscription.py` -- must NOT inherit it. This proves the
+    patch's second hunk (the `exclude=True` override on
+    `SubscriptionUserResponse`) actually works against the real, patched
+    upstream class, not just in the isolated design spike that motivated
+    it."""
+    module = patched_user_response_module
+    dbuser = _make_dbuser(module, id_=99, username="sub-leak-check")
+
+    admin_response = module.UserResponse.model_validate(dbuser)
+    subscription_response = module.SubscriptionUserResponse.model_validate(dbuser)
+
+    admin_body = admin_response.model_dump(mode="json")
+    subscription_body = subscription_response.model_dump(mode="json")
+
+    # The Admin API surface still gets the field (this must not regress).
+    assert admin_body["routing_principal"] == "99.sub-leak-check"
+    assert "id" not in admin_body
+
+    # The customer-facing subscription surface must not.
+    assert "routing_principal" not in subscription_body
+    assert "id" not in subscription_body
+
+
+def test_empty_links_and_subscription_url_exercise_real_validation_path(
+    patched_user_response_module: types.ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every other test in this file supplies non-empty `links`/
+    `subscription_url` so `validate_links`/`validate_subscription_url`
+    short-circuit without calling the (deliberately assertion-raising)
+    stubbed `generate_v2ray_links`/`create_subscription_token`. This test
+    proves the patched model still validates correctly through the
+    *normal*, non-short-circuited path too, by monkeypatching those two
+    names -- as bound directly in the real upstream module's own
+    namespace via its `from ... import ...` statements -- with working
+    fakes instead of the raising stubs, then supplying an empty
+    `links`/`subscription_url` so the real validator bodies actually run."""
+    module = patched_user_response_module
+
+    monkeypatch.setattr(
+        module,
+        "generate_v2ray_links",
+        lambda *args, **kwargs: ["vless://computed-link"],
+    )
+    monkeypatch.setattr(
+        module,
+        "create_subscription_token",
+        lambda *args, **kwargs: "computed-token",
+    )
+
+    dbuser = _make_dbuser(
+        module,
+        id_=5,
+        username="empty-fields-user",
+        links=[],
+        subscription_url="",
+    )
+
+    response = module.UserResponse.model_validate(dbuser)
+
+    assert response.links == ["vless://computed-link"]
+    assert response.subscription_url.endswith("/computed-token")
+    assert response.routing_principal == "5.empty-fields-user"

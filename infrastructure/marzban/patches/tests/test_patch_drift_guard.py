@@ -9,9 +9,11 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
+from _pinned_upstream import PinnedUpstreamFetchError, fetch_pinned_upstream_user_py
+
 PATCH_DIR = Path(__file__).resolve().parent.parent
 APPLY_SCRIPT = PATCH_DIR / "apply_patch.sh"
-VENDORED_UPSTREAM_USER_PY = PATCH_DIR / "vendor" / "upstream" / "app" / "models" / "user.py"
 
 # The exact context block the patch's second hunk depends on -- copied
 # verbatim from the vendored pinned source so a targeted mutation of it
@@ -37,7 +39,11 @@ def _run(*args: str) -> subprocess.CompletedProcess[str]:
 def _seed_pristine_source(root: Path) -> Path:
     target = root / "app" / "models" / "user.py"
     target.parent.mkdir(parents=True)
-    target.write_bytes(VENDORED_UPSTREAM_USER_PY.read_bytes())
+    try:
+        content = fetch_pinned_upstream_user_py()
+    except PinnedUpstreamFetchError as exc:
+        pytest.fail(str(exc))
+    target.write_bytes(content)
     return target
 
 
@@ -45,15 +51,19 @@ def test_patch_applies_cleanly_to_correct_pinned_source(tmp_path: Path) -> None:
     source_root = tmp_path / "source"
     target = _seed_pristine_source(source_root)
 
+    pristine_bytes = target.read_bytes()
     check_result = _run("--check", str(source_root))
     assert check_result.returncode == 0, check_result.stderr
     # --check must never mutate the source tree.
-    assert VENDORED_UPSTREAM_USER_PY.read_bytes() == target.read_bytes()
+    assert pristine_bytes == target.read_bytes()
 
     apply_result = _run(str(source_root))
     assert apply_result.returncode == 0, apply_result.stderr
-    assert "id: int = Field(exclude=True)" in target.read_text()
-    assert "def routing_principal(self) -> str:" in target.read_text()
+    patched_text = target.read_text()
+    assert "id: int = Field(exclude=True)" in patched_text
+    assert 'routing_principal: str = Field(default="")' in patched_text
+    assert "def compute_routing_principal(self):" in patched_text
+    assert 'routing_principal: str = Field(default="", exclude=True)' in patched_text
 
 
 def test_drift_in_the_patch_dependent_context_fails_closed(tmp_path: Path) -> None:

@@ -1,33 +1,43 @@
 diff --git a/app/models/user.py b/app/models/user.py
-index fa59003..d740d4c 100644
+index fa59003..9a7b84c 100644
 --- a/app/models/user.py
 +++ b/app/models/user.py
-@@ -4,7 +4,7 @@
- from enum import Enum
- from typing import Dict, List, Optional, Union
- 
--from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
- 
- from app import xray
- from app.models.admin import Admin
-@@ -293,6 +293,19 @@
+@@ -293,6 +293,26 @@
      admin: Optional[Admin] = None
      model_config = ConfigDict(from_attributes=True)
  
 +    # Lingsway ADR-016 patch: expose the Xray routing principal that
 +    # Marzban itself already computes internally (app/xray/operations.py:
 +    # f"{dbuser.id}.{dbuser.username}") on the public Admin API response,
-+    # without exposing the raw database id as its own field. See
++    # without exposing the raw database id as its own field. Computed via
++    # a model_validator(mode="after") -- not a @computed_field -- so that
++    # subclasses (SubscriptionUserResponse below) can exclude it the same
++    # way they already exclude other fields, which a @computed_field
++    # cannot be selectively excluded in a subclass for in this pinned
++    # pydantic version. See
 +    # docs/80-decisions/ADR-016-route-identity-architecture-unblock.md
-+    # (Decision 3, Candidate B) in the Lingsway platform repository.
++    # (Decision 3, Candidate B, and its dated correction) in the Lingsway
++    # platform repository.
 +    id: int = Field(exclude=True)
++    routing_principal: str = Field(default="")
 +
-+    @computed_field
-+    @property
-+    def routing_principal(self) -> str:
-+        return f"{self.id}.{self.username}"
++    @model_validator(mode="after")
++    def compute_routing_principal(self):
++        self.routing_principal = f"{self.id}.{self.username}"
++        return self
 +
      @model_validator(mode="after")
      def validate_links(self):
          if not self.links:
+@@ -333,6 +353,11 @@
+     note: str | None = Field(None, exclude=True)
+     inbounds: Dict[ProxyTypes, List[str]] | None = Field(None, exclude=True)
+     auto_delete_in_days: int | None = Field(None, exclude=True)
++    # Lingsway ADR-016 patch: routing_principal carries a DB-id-derived
++    # value that is only authorized for the Admin API surface (POST
++    # /api/user, GET /api/user/{username}) -- this customer-facing
++    # subscription-token response must not inherit it.
++    routing_principal: str = Field(default="", exclude=True)
+     model_config = ConfigDict(from_attributes=True)
+ 
+ 

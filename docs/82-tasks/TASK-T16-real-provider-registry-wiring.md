@@ -934,26 +934,44 @@ adapter、DTO/编排改动、独立的 reconciliation 工具/作业、
   `7f396db3e703d71a28060bc9ce4a532ec64cb1f4`）建立最小化、可重复、
   fail-closed 的 `app/models/user.py::UserResponse.routing_principal`
   source patch，落实上文"最终方案"一节与 ADR-016 Decision 3 定义的
-  机制：新增 `id: int = Field(exclude=True)` 字段 + `@computed_field
-  routing_principal` 计算属性，值为
+  机制（**含本 PR review 过程中的第六次修订更正**）：新增
+  `id: int = Field(exclude=True)` 字段 + 普通字段
+  `routing_principal: str = Field(default="")` +
+  `@model_validator(mode="after")` 方法赋值
   `f"{self.id}.{self.username}"`——与 `app/xray/operations.py` 内部
-  既有公式逐字节一致。新增
+  既有公式逐字节一致；`SubscriptionUserResponse(UserResponse)`（客户
+  可见 `GET /{token}/info` 订阅端点所用模型）新增
+  `routing_principal: str = Field(default="", exclude=True)` 覆盖排除，
+  防止这个源自数据库 id 的字段泄漏到本 ADR 范围之外的响应面（该机制
+  最初用 `@computed_field` 实现，因其在 pinned `pydantic==2.10.4` 下
+  无法被子类选择性排除而改为上述写法，详见 ADR-016 第六次修订）。
+  新增
   `infrastructure/marzban/patches/0001-expose-routing-principal.patch`
   （真实 git 补丁，非伪代码）、`apply_patch.sh`（`--check` 模式为
   fail-closed drift guard，真实 `git apply` 验证，未通过时不产生任何
-  部分修改、不 fallback 到未打补丁源码）、按 exact commit 供测试使用的
-  `vendor/upstream/app/models/user.py`（与上游逐字节一致，只读，不得
-  手工编辑）。契约测试导入真正打了补丁的上游
+  部分修改、不 fallback 到未打补丁源码）。**上游源码不 vendor 进
+  Git**：Marzban 是 AGPL-3.0 协议，本仓库根 `LICENSE` 是不带第三方
+  代码例外条款的专有声明，两者冲突不应由本 PR 自行下法律结论解决；
+  改为测试运行时（`infrastructure/marzban/patches/tests/
+  _pinned_upstream.py`）通过网络抓取 pinned commit 的该文件并校验
+  sha256，抓取失败或哈希不符一律 fail-closed，不 skip、不用陈旧本地
+  副本 fallback——这使契约测试非完全离线（需要出站网络访问 pinned
+  raw.githubusercontent.com），是本次为避免许可证风险刻意接受的
+  已知折衷，是否要以及如何正式 vendor Marzban 源码留给仓库所有者或
+  法务决定。契约测试导入真正打了补丁的上游
   `UserResponse`（`infrastructure/marzban/patches/tests/`，独立于
   `backend/tests/`），通过真实 FastAPI `TestClient` + pinned
   `pydantic==2.10.4`/`fastapi==0.115.2` 验证 `POST /api/user` 与
   `GET /api/user/{username}` 两条路径返回一致的
-  `routing_principal`、raw `id` 不出现在响应体、既有字段不受影响；
-  并验证未打补丁源码不会被误判为 contract-ready。详细结果见本 PR
-  描述。**本 PR 不构建、不部署、不连接任何真实 Marzban 镜像/实例**，
-  Marzban 在生产仍运行官方未打补丁镜像；仍未开始：真实
-  Marzban adapter、`AccountUserDTO.routing_principal`、编排改动、
-  registry wiring、existing-data reconciliation——均为后续独立 PR。
-  Phase 2B3 记录的 provisioning named-lock 持有跨度 /
+  `routing_principal`、raw `id` 不出现在响应体、既有字段不受影响、
+  `SubscriptionUserResponse` 正确排除 `routing_principal`、以及
+  `links`/`subscription_url` 为空时经过真实（非短路）校验路径也能
+  正确计算 `routing_principal`；并验证未打补丁源码不会被误判为
+  contract-ready。详细结果见本 PR 描述。**本 PR 不构建、不部署、不
+  连接任何真实 Marzban 镜像/实例**，Marzban 在生产仍运行官方未打
+  补丁镜像；仍未开始：真实 Marzban adapter、
+  `AccountUserDTO.routing_principal`、编排改动、registry wiring、
+  existing-data reconciliation——均为后续独立 PR。Phase 2B3 记录的
+  provisioning named-lock 持有跨度 /
   `DEFAULT_LOCK_TIMEOUT_SECONDS = 30` blocker **本 PR 未处理，仍然
   存在**，必须在真实 provider wiring 前单独解决。
