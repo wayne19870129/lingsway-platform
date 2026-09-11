@@ -1,7 +1,11 @@
 # TASK-T17 — 官方 Claude Code GitHub Action(`@claude` 触发)
 
-风险等级:medium(新增 CI 触发面 + 仓库写权限授予给 Action,但不涉及生产
-凭据、不涉及部署、不涉及数据库)
+风险等级:medium(T17 最初落地时的评级,新增 CI 触发面 + 仓库写权限授予给
+Action,但不涉及生产凭据、不涉及部署、不涉及数据库)。**这是历史评级,不
+代表当前状态**——`actions: write` 加入之后(见下方),`risk-classify.yml`
+对触碰 `.github/workflows/**` 的 PR 一律落 `risk:high`,Issue #50 的修复
+PR 也确实被打上了 `risk:high`;当前实际风险水平以那个自动分类结果为准,
+这个 `medium` 字段只保留作为 T17 初次实现时的原始记录。
 
 **范围更新(见 `TASK-T18-conditional-auto-merge.md`)**:下面"关于'开 PR'
 这一步"这段描述的是**本任务(T17)范围内**、`@claude` 首次接入时的默认
@@ -62,16 +66,45 @@ PR、自己推的返工 commit 完全不会跑 CI。缓解方式是给这三个�
 这一段全自动。不要把这个仍然存在的人工触发步骤,读成一个完整的
 审查→修复闭环。
 
+### SHA 锁定退化事故(Issue #50)
+
+`claude.yml` 是这个仓库唯一从一开始就把第三方 Action 锁定到完整 commit
+SHA 的工作流;`ci.yml`/`security.yml`/`risk-classify.yml`/
+`deploy-*.yml`/`release.yml` 当时用的都是普通的可变版本标签
+(`actions/checkout@v4` 这类),从未锁定过。`.github/dependabot.yml`
+(在 T18 里新建)只在注释里描述了"锁定到 SHA"这个仓库目标,但没有让
+Dependabot 反过来帮那些本来就没锁定的工作流补上 SHA——Dependabot 对
+已经是 SHA 格式的引用会保留 SHA 格式升级(bump SHA→SHA),但对本来就是
+裸标签的引用,只会bump 标签本身(`@v4` → `@v7`),不会主动改成 SHA 格式。
+结果是 PR #44–#47、#49(Dependabot 自动开的版本升级 PR)把这些本来就没
+锁定的工作流升级成了新的可变标签(`@v7`/`@v9`/`@v3`),而且被直接合并
+进了 `main`,没有人在合并前检查"这是不是把可变标签升级成了另一个可变
+标签"。Issue #50 要求的修复,是把 `.github/workflows/**` 里**全部**
+第三方 Action(不只是 `claude.yml` 里那两个)补上完整 SHA 锁定,并且给
+`dependabot.yml` 加一条人工核查规则,防止同样的事情再发生一次——具体
+SHA 来源和核实方式见对应 PR 描述。
+
 ## 约束
 
 - 只监听 `issue_comment`(`created`)和 `pull_request_review_comment`
   (`created`)两种事件,不额外加 `pull_request_review`、`issues`
   (新建时的 body/title 触发)等官方支持但本次未要求的触发面。
-- 用户是否有仓库写权限、是否是真人(非 bot)由 Action 自带的检查完成
-  (`Who can trigger runs`),不额外实现一遍。
+- 用户是否有仓库写权限由 Action 自带的检查完成(`Who can trigger runs`),
+  不额外实现一遍。是否是真人(非 bot)这一层,`claude.yml` 的 job 级
+  `if:` 额外加了 `github.event.comment.user.type != 'Bot'`——这不是重复
+  实现 Action 自己的检查,而是在 job 启动之前就把 bot 发的评论(CI 状态
+  通知、Work、这个 Action 自己之前的回复)排除掉,避免为一个不可能是真人
+  指令的评论真的跑起一次 job(Issue #50 明确要求"忽略 bot、自身消息",
+  以及降低无谓的 Actions 用量/token 消耗)。
 - 权限声明为完成任务所需的最小集合:`contents: write`、
   `pull-requests: write`、`issues: write`、`id-token: write`、
-  `actions: read`。不加 `deployments`、`packages`、`administration` 等
+  `actions: write`。**`actions: write`(不是最初 T17 落地时的
+  `actions: read`)**——升级原因见上面"为什么 `claude.yml` 需要
+  `actions: write`"一节:`gh workflow run` 需要这个权限才能在推送后手动
+  触发 `ci.yml`/`security.yml`/`risk-classify.yml`。这个变化之前只体现
+  在 `claude.yml` 本身的注释里,没有同步更新这里和下面的验收标准,导致
+  文档和实际代码不一致——Issue #50 的 PR 已经把这两处都改成
+  `actions: write`。不加 `deployments`、`packages`、`administration` 等
   本任务用不到的权限。其中 `id-token: write` 的准确理由是官方文档写明的
   "required for the Claude Code GitHub Action's default GitHub App
   authentication"——是 Action 默认走 GitHub App 身份认证这条路径本身
@@ -95,11 +128,24 @@ PR、自己推的返工 commit 完全不会跑 CI。缓解方式是给这三个�
     这种更细的权限档位。真正的硬性拦截只能来自分支保护规则(要求人工
     批准才能合并),而这个仓库目前(`AGENTS.md` 铁律第 8 条)明确写着
     机械分支保护尚未启用。
-  - 因此本任务只能做到:①提示词层面明确指示 Claude 不得 merge/close/
-    部署;②仓库现有的 `deploy-*.yml` 全部是 `workflow_dispatch` 手动
-    触发或 dry-run,这条新 Action 的权限里不含 `actions: write`,
-    无法自己触发部署 workflow。这两条组合起来是当前能做到的全部,
-    不构成机械意义上的"不可能",验收时必须如实说明。
+  - **这一条已经因为 `actions: write` 的加入而变化,必须重新如实说明**
+    (Work 在 Issue #50 的 PR 审查里指出了这一点,原文这里曾经说
+    "这条新 Action 的权限里不含 `actions: write`,无法自己触发部署
+    workflow",在加入 `actions: write` 之后已经不再成立)。`deploy-auto.yml`
+    /`deploy-gateway.yml`/`deploy-migration.yml` 都有 `workflow_dispatch`
+    触发入口,`actions: write` 技术上确实允许 `claude.yml`(或任何持有
+    这个仓库 `GITHUB_TOKEN` 写权限的工作流)用 `gh workflow run
+    deploy-*.yml` 把它们触发起来——不再是"权限上做不到"。真正的边界现在
+    只剩:①提示词层面明确指示 Claude 不得触发/批准/执行生产部署;②这三个
+    部署工作流当前全部是硬编码的 fail-closed dry-run(`test "$DRY_RUN" =
+    "true"` 强制检查,步骤内容全部是 `echo "[DRY_RUN] would ..."` 占位,
+    没有真正执行 `deploy/lib/*.sh` 或 alembic 迁移的代码路径),所以即使
+    被触发,也不会产生真实的远程副作用——阻挡的不是"触发这个 workflow"
+    这件事,而是"这个 workflow 目前根本没有真正执行部署的代码"。如果
+    将来这些 workflow 接上真实部署逻辑(T7),这条防线就会消失,届时必须
+    重新评估 `claude.yml` 是否还应该保留 `actions: write`,或者需要换成
+    范围更窄的权限模型。这两条组合起来是当前能做到的全部,不构成机械
+    意义上的"不可能",验收时必须如实说明。
 - 认证优先用 `CLAUDE_CODE_OAUTH_TOKEN`(订阅模式);只有在用户明确要求
   或订阅方式不可用时才退回 `ANTHROPIC_API_KEY`。不管哪种,**都不能要求
   用户把 token/key 粘贴进聊天、Issue、PR 或仓库文件**——只能告诉用户
@@ -121,9 +167,32 @@ PR、自己推的返工 commit 完全不会跑 CI。缓解方式是给这三个�
 
 ## 验收标准
 
+**以下几条是 T17 最初(未接入 T18 自动开 PR 能力之前)的验收标准,已经
+被后续实现取代,标记为历史,不代表当前应该怎么验收**(Work 在 Issue #50
+的 PR 审查里指出:仅仅在文档顶部写一句"这是历史记录"不够,后面这些具体
+的验收条目本身如果不改,后来的人还是可能照着旧条目去验收,得到错误结论
+——所以直接在条目上标注,不只是顶部提一句):
+
+- ~~提供一个可直接照做的、无风险的测试 Issue 文案,准确描述预期行为是
+  "Claude 推送一个分支 + 给出创建 PR 的链接",不得写成"会自动出现一个
+  PR"~~。**已过时**:现在 Issue 场景下 Claude 会直接 `gh pr create` 开出
+  非 Draft PR,不再只给链接。测试 Issue 文案应该描述"Claude 会自己开出
+  一个 PR",而不是"给一个链接、需要人点击才创建"。
+- ~~`--append-system-prompt` 必须按事件类型区分:PR 场景下的指令是"推到
+  当前 PR 分支、不要新开 PR";Issue 场景下的指令是"新建分支,让 Action
+  默认流程给出创建 PR 的链接,不要试图绕过去强行调用 API 创建 PR"~~。
+  **已过时**:Issue 场景下的指令现在是"新建分支、推送、然后自己用
+  `gh pr create` 开出非 Draft PR",与上面这条原文直接矛盾。
+- ~~权限声明只包含约束里列出的五项,不多不少~~。**部分过时**:五项本身
+  没变,但其中一项从 `actions: read` 变成了 `actions: write`,约束一节
+  已经同步更新,这条本身仍然成立(五项、不多不少),只是要对照新的五项
+  内容,不是最初那五项。
+
+**当前实际适用的验收标准:**
+
 - `.github/workflows/claude.yml` 通过 `actionlint`/YAML 校验(语法正确、
   触发条件和权限字段拼写正确)。
-- 权限声明只包含约束里列出的五项,不多不少。
+- 权限声明只包含约束里列出的五项(含 `actions: write`),不多不少。
 - 工作流包含 `concurrency` 分组、`timeout-minutes`、`claude_args` 里的
   `--max-turns` 上限。
 - 使用 `secrets.CLAUDE_CODE_OAUTH_TOKEN`,PR 描述里给出了如果要退回
@@ -131,14 +200,39 @@ PR、自己推的返工 commit 完全不会跑 CI。缓解方式是给这三个�
 - PR 描述/验收报告里,给用户的指令包含:精确的 Secret 添加页面路径、
   Secret 名称、如何在本地生成 token(命令)、以及"不要把值发给我"的
   明确提醒。
-- 提供一个可直接照做的、无风险的测试 Issue 文案,准确描述预期行为是
-  "Claude 推送一个分支 + 给出创建 PR 的链接",不得写成"会自动出现一个
-  PR"。由于需要 Secret 已配置、Action 已合并到 `main` 才能真正触发,
+- 测试 Issue 文案准确描述当前行为:Claude 会自己创建一个非 Draft PR,
+  PR 正文包含 Issue/TASK、摘要、验收标准、实际测试结果、已知风险这几个
+  部分。由于需要 Secret 已配置、Action 已合并到 `main` 才能真正触发,
   端到端验证必须由用户在这两步完成后自行确认,报告里不得声称"已验证
   @claude 能工作"这种在本任务 PR 阶段不可能完成的结论。
 - `--append-system-prompt` 必须按事件类型区分:PR 场景下的指令是"推到
-  当前 PR 分支、不要新开 PR";Issue 场景下的指令是"新建分支,让 Action
-  默认流程给出创建 PR 的链接,不要试图绕过去强行调用 API 创建 PR"。
+  当前 PR 分支、不要新开 PR";Issue 场景下的指令是"查找是否已有分支/PR,
+  没有就新建分支、推送、自己用 `gh pr create` 开出非 Draft PR"。
 - `actions/checkout` 与 `anthropics/claude-code-action` 都锁定到具体
   commit SHA,注释保留对应版本号。
+- **`dedup` job 必须在 `claude` job 之前跑,并且按
+  `(目标 Issue/PR 编号, 状态分量, 触发评论文本的归一化哈希)` 这个三段式
+  键去重**(这条在 Issue #50 的 PR 审查里被反复修正过两次:最初只有提示词
+  建议,后来只做了两段式的 `(PR, head SHA)`,现在的三段式和"两种触发场景
+  都覆盖"是最终形态,不是历史上任何一个中间版本):
+  - **状态分量**:PR 评论触发时是 PR 当前的 head SHA;Issue 首次触发时是
+    固定字面量 `"issue"`(因为还没有 PR/head SHA 可用)。
+  - **指令哈希**:触发评论正文先压缩连续空白为单个空格、再去掉首尾空白,
+    然后取 SHA-256 哈希的前 16 位——这样"内容相同、格式不同"的重复指令
+    (多余空格、换行差异)仍然会被判成同一个键,而"内容不同"的指令即使
+    发生在同一个 PR head SHA / 同一个 Issue 上,也会因为哈希不同而不被
+    当成重复。
+  - **两种触发场景都有覆盖**:PR 评论触发时,同一个 PR、同一个 head SHA
+    上重复/等价的 `@claude` 指令会被跳过,新 commit 一推上去(head SHA
+    变了)门禁重新打开;Issue 首次触发时,同一个 Issue 上重复/等价的
+    `@claude` 指令同样会被跳过。**没有"Issue 场景不覆盖"这个例外了**——
+    早期版本曾经因为"还没有 head SHA 可用"而只对 Issue 场景放行
+    `proceed=true`,这一点已经修正:Issue 场景用固定的 `"issue"` 状态
+    分量代替 head SHA,同样能构成一个有效的去重键。
+  - 完成标记(`claude-done:...`)由 `claude` job 自己在**成功完成之后**
+    才写,不是 `dedup` job 在调用 Claude 之前就写——避免任务被取消、
+    超时或失败之后,标记留在那里但工作根本没做完,导致后续所有重试都被
+    永久跳过。真正的"同时并发"重复,交给已有的 `concurrency.
+    cancel-in-progress` 处理(旧的、还没写完成标记的那次 run 会被直接
+    取消)。
 - 不自行合并本任务的 PR。

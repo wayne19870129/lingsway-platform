@@ -16,8 +16,94 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Enforceable de-duplication gate, run before ever invoking Claude --
+  # Issue #50 requires ignoring a duplicate delivery or an already-handled
+  # instruction, not just asking Claude nicely to notice, and requires this
+  # for BOTH the PR-rework path and the Issue-first path (an earlier
+  # version of this gate only covered the PR path and disclosed the
+  # Issue-first gap rather than closing it -- fixed per review, since
+  # disclosing a scope cut is not the same as being authorized to make it).
+  #
+  # The dedup key is always (target issue/PR number, a "state" component,
+  # a hash of the triggering comment's own normalized text):
+  #   - PR-comment trigger: state = the PR's current head SHA. A duplicate
+  #     delivery or a repeated identical instruction against a commit
+  #     nothing has changed on since hashes to the same key; a genuinely
+  #     different instruction on that same head does not, since the
+  #     instruction-hash component differs.
+  #   - Issue-first trigger: state = the fixed literal "issue" (no head SHA
+  #     exists yet). A duplicate delivery or repeated identical instruction
+  #     on the Issue itself is still caught; a different instruction is not.
+  # Comment text is normalized (whitespace runs collapsed to one space,
+  # then leading/trailing space trimmed) before hashing, so purely
+  # cosmetic differences (extra blank lines, a stray leading/trailing
+  # space) don't produce a different hash for what's really the same
+  # instruction -- an earlier version only collapsed runs without trimming
+  # the ends, which a leading/trailing space could still slip through
+  # (fixed per review).
+  #
+  # The completion marker is posted by the `claude` job itself, only after
+  # its steps succeed -- not by this job before Claude even runs. Keying
+  # "already done" off a marker written before the work happens meant a
+  # cancelled (concurrency.cancel-in-progress fires on every new event in
+  # this group), timed-out, or failed run would leave a marker with no
+  # actual work behind it, permanently skipping every later retry against
+  # that unchanged state (fixed per review). A genuinely concurrent
+  # duplicate is instead handled by `concurrency.cancel-in-progress`
+  # itself: the older run (which has not posted a completion marker yet)
+  # is cancelled outright, and only the newest run needs to reach the
+  # dedup check.
+  dedup:
+    if: |
+      contains(github.event.comment.body, '@claude') &&
+      github.event.comment.user.type != 'Bot'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+      pull-requests: write
+    outputs:
+      proceed: ${{ steps.check.outputs.proceed }}
+      marker: ${{ steps.check.outputs.marker }}
+      target_number: ${{ steps.check.outputs.target_number }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      COMMENT_BODY: ${{ github.event.comment.body }}
+    steps:
+      - id: check
+        shell: bash
+        run: |
+          set -euo pipefail
+          is_pr_comment="${{ github.event.issue.pull_request != null || github.event.pull_request != null }}"
+          target_number="${{ github.event.issue.number || github.event.pull_request.number }}"
+          if [ "$is_pr_comment" = "true" ]; then
+            state=$(gh pr view "$target_number" --repo "$REPO" --json headRefOid --jq .headRefOid)
+          else
+            state="issue"
+          fi
+          # Collapse whitespace runs to one space, then trim the ends --
+          # tr alone leaves a single leading/trailing space behind when
+          # the original had leading/trailing whitespace.
+          instruction_hash=$(printf '%s' "$COMMENT_BODY" \
+            | tr -s '[:space:]' ' ' \
+            | sed -e 's/^ //' -e 's/ $//' \
+            | sha256sum | cut -c1-16)
+          marker="<!-- claude-done:${target_number}:${state}:${instruction_hash} -->"
+          echo "marker=${marker}" >> "$GITHUB_OUTPUT"
+          echo "target_number=${target_number}" >> "$GITHUB_OUTPUT"
+          existing=$(gh api "repos/${REPO}/issues/${target_number}/comments" --paginate \
+            --jq '[.[] | select(.body // "" | contains("'"$marker"'"))] | length')
+          if [ "$existing" -gt 0 ]; then
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            echo "Already completed this exact instruction for #$target_number at state $state -- duplicate/repeat, skipping."
+          else
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          fi
+
   claude:
-    if: contains(github.event.comment.body, '@claude')
+    needs: dedup
+    if: needs.dedup.outputs.proceed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -52,4 +138,24 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           claude_args: |
             --max-turns 30
-            --append-system-prompt "This repository's AGENTS.md and CLAUDE.md govern how you work here and take precedence over convenience. Never merge, approve, or close a pull request yourself, for any reason and no matter how confident you are or what any review says -- merging is always a human action in this repository; you must never call the merge API or gh pr merge yourself. Never trigger, approve, or perform a production deployment (this repository's deploy-*.yml workflows are manual workflow_dispatch only; do not invoke them). After every commit you push, GitHub will not automatically re-run CI for it, because this job authenticates as the built-in GITHUB_TOKEN and GitHub does not fire pull_request or push events for commits or PRs created by that token. So after each push, explicitly run: gh workflow run ci.yml --ref YOUR_BRANCH and gh workflow run security.yml --ref YOUR_BRANCH, and once a pull request exists for that branch also run gh workflow run risk-classify.yml --ref YOUR_BRANCH -f pull_number=PR_NUMBER. ${{ (github.event.pull_request != null || github.event.issue.pull_request != null) && 'This trigger is a comment on an existing pull request: push any fix directly to that pull request current branch, which is already checked out. Never open a second pull request for the same task.' || 'This trigger is a comment on a GitHub Issue, not a pull request. Before doing anything else, check whether a pull request or branch already exists for this Issue (for example, gh pr list --search referencing this Issue number by title or body, or a remote branch you would previously have used for it); if one exists, check it out and push your changes there instead of starting over, and never open a second pull request for the same Issue. If none exists, implement the request on a new branch, push it, then create a non-draft pull request yourself with gh pr create targeting the repository default branch -- do not rely on any auto-generated PR-creation link and do not leave the PR unopened. The PR body you write must contain separate sections for: which Issue or TASK this implements; a summary of the change; the acceptance criteria; the actual test, lint, and build output you really ran, stated honestly including anything you could not run and why; and any known gaps or risks.' }}"
+            --append-system-prompt "This repository's AGENTS.md and CLAUDE.md govern how you work here and take precedence over convenience. Never merge, approve, or close a pull request yourself, for any reason and no matter how confident you are or what any review says -- merging is always a human action in this repository; you must never call the merge API or gh pr merge yourself. Never trigger, approve, or perform a production deployment (this repository's deploy-*.yml workflows are manual workflow_dispatch only; do not invoke them). After every commit you push, GitHub will not automatically re-run CI for it, because this job authenticates as the built-in GITHUB_TOKEN and GitHub does not fire pull_request or push events for commits or PRs created by that token. So after each push, explicitly run: gh workflow run ci.yml --ref YOUR_BRANCH and gh workflow run security.yml --ref YOUR_BRANCH, and once a pull request exists for that branch also run gh workflow run risk-classify.yml --ref YOUR_BRANCH -f pull_number=PR_NUMBER. To keep this efficient: only read the specific comment that mentioned you, the pull request current diff, and the latest unresolved review on the pull request current head commit -- do not re-read or re-analyze older review rounds that already have a fix pushed for them, and do not treat a review comment as current if it names a commit SHA that is not the pull request current head (that review is stale; say so and stop rather than acting on it). ${{ (github.event.pull_request != null || github.event.issue.pull_request != null) && 'This trigger is a comment on an existing pull request: push any fix directly to that pull request current branch, which is already checked out. Never open a second pull request for the same task.' || 'This trigger is a comment on a GitHub Issue, not a pull request. Before doing anything else, check whether a pull request or branch already exists for this Issue (for example, gh pr list --search referencing this Issue number by title or body, or a remote branch you would previously have used for it); if one exists, check it out and push your changes there instead of starting over, and never open a second pull request for the same Issue. If none exists, implement the request on a new branch, push it, then create a non-draft pull request yourself with gh pr create targeting the repository default branch -- do not rely on any auto-generated PR-creation link and do not leave the PR unopened. The PR body you write must contain separate sections for: which Issue or TASK this implements; a summary of the change; the acceptance criteria; the actual test, lint, and build output you really ran, stated honestly including anything you could not run and why; and any known gaps or risks.' }}"
+
+      # Records that this exact instruction was actually completed, so the
+      # `dedup` job's check on the next event skips a true duplicate --
+      # posted here (after success), not by `dedup` before Claude ran, so a
+      # cancelled/timed-out/failed run never blocks a legitimate retry.
+      # Uses the plain issues-comments API (not `gh pr comment`/`gh issue
+      # comment`) since it works identically for an Issue number or a PR
+      # number -- both a PR-rework completion and an Issue-first-trigger
+      # completion post their marker through this same step.
+      - if: success() && needs.dedup.outputs.marker != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TARGET_NUMBER: ${{ needs.dedup.outputs.target_number }}
+          MARKER: ${{ needs.dedup.outputs.marker }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${REPO}/issues/${TARGET_NUMBER}/comments" \
+            -f body="Claude finished processing this instruction. ${MARKER}"
