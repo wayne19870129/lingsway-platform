@@ -108,7 +108,36 @@ absent, Docker creates a directory at that path and the container fails before
 its process starts. A deployment must create file-typed runtime paths before
 `compose up`. The checked-in `xray_config.base.json` is intentionally only a
 skeleton: it is not runnable until the database renderer supplies valid
-outbounds, clients, Reality values, and BLOCK routing.
+outbounds and BLOCK routing. (Correction, TASK-T16 Phase 2A / ADR-014,
+fourth revision: an earlier version of this paragraph also credited the
+renderer with supplying "Reality values" and inbound `clients` — neither
+is accurate. The renderer does not supply inbound `clients` at all — it
+inherits whatever `inbounds` the skeleton file already has, unchanged,
+and that skeleton's client list is empty; whether and how a running
+Marzban process populates that shared file's `inbounds.settings.clients`
+at runtime is not established by this repository's code, see ADR-014.
+Reality values are not database-sourced either. **Current behavior**:
+`dest`/`serverNames` come from the skeleton file if present, else from
+the `XRAY_REALITY_DEST`/`XRAY_REALITY_SERVER_NAME` env vars;
+`privateKey`/`shortIds` are generated on the spot by
+`_reality_settings()` whenever the skeleton's fields are empty, and the
+generated values are never written back to the skeleton file, so a
+fresh render can regenerate different values each time. **Target
+contract, per ADR-014 section A2 (not implemented yet)**: these four
+fields split into two different canonical sources, not one. `dest` and
+`serverNames` are operator-set deployment parameters (which domain/SNI
+this gateway's Reality inbound masquerades as) — they don't vary with
+customer/subscription events, so ADR-014 classifies them like
+`SITE_DOMAIN`/`API_DOMAIN` (ADR-006): environment variables/`Settings`
+are their sole canonical source, and Phase 2B must stop reading them
+from the skeleton file at all (today's skeleton-first, env-fallback
+order is itself a latent bug — a stale value left in the skeleton
+silently wins over a corrected env var). `privateKey` and `shortIds`
+are system-generated identity material that must stay stable and
+auditable, so ADR-014 requires them to move to a database/Secret
+canonical source instead. Neither target is implemented yet — do not
+read this paragraph as saying persistence or the env-only Reality
+source is already in place.)
 
 The backend image also previously copied application source without installing
 the dependencies declared in `pyproject.toml`. That allowed image build to
@@ -165,9 +194,12 @@ an explicit `compose.socks.yml` override and is included only when
 
 The Xray skeleton finding was reviewed separately. Adding a guessed outbound
 to `infrastructure/marzban/xray_config.base.json` would hide the fact that
-user routes, existing clients, Reality values, and BLOCK routing must come
-from the database renderer. The correct rule is therefore to render the full
-runtime config before stack-up. `40_stack_up.sh` now requires file-typed
+user routes and BLOCK routing must come from the database renderer (Reality
+values and inbound `clients` are not part of what the renderer sources from
+the database today — see the correction above and ADR-014 for the current
+skeleton/env/generated-on-the-spot behavior and the still-open persistence
+gap). The correct rule is therefore to render the full runtime config
+before stack-up. `40_stack_up.sh` now requires file-typed
 `xray_config.json` and `db.sqlite3`, parses the Xray JSON, and rejects an
 unrendered config with no outbounds or routing rules. It never injects a
 synthetic outbound. A fresh deployment must complete the database-backed
