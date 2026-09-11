@@ -111,16 +111,20 @@ Xray、Mihomo 等任何外部系统——所有"看起来接好的"业务流程�
 实例读这份缓存），这三件事的风险和实现状态可能不一样，不能一次性打包
 评估。
 
-**B 类：本机文件/进程管理器，不涉及第三方账户/账单，但构造它们本身需要
-真实的本机路径、二进制、进程调用、甚至热重载用的本地网络凭据（细节见下
-一节，第一版说这类"只被 registry 的 mock 门挡住、没有其它技术障碍"是
-错的）：**
+**B 类：本机文件/进程管理器，不涉及第三方账户/账单；构造这两个 provider
+对象本身不发生真实 IO，但它们的运行期方法（`install`/`reload`/
+`xray_test`/`health` 等）会真实访问本机文件系统、跑 subprocess、探测
+socket，甚至（Mihomo）发起本地 HTTP 请求带一个真实的 API secret；这两点
+第一版都没分清楚（第一版先说"只被 registry 的 mock 门挡住、没有其它
+技术障碍"，第二版改口说"构造本身就和 registry 的无 IO 承诺冲突"，两个
+说法都不准确，细节和改正见下面"构造 vs. 组装 vs. 运行期"一节）：**
 - `gateway/xray_file.py`——`XrayFileProvider`（九步安全重载）
 - `forwarder/mihomo.py`——`MihomoForwarderProvider`（文件+热重载+回滚）
 
 修正后的结论没有变得比第一版更简单：B 类确实不涉及第三方账户/账单，比
 A 类的"真实外部账户副作用"风险类别不同；但"不涉及外部账户"不等于"没有
-真实副作用"或"接入工作量小"——见下一节的具体依赖清单。
+真实副作用""接入工作量小"，也不等于"构造这些 provider 对象会自动破坏
+`build_registry()` 的无 IO 承诺"——三件事分开评估，见下一节。
 
 ### 逐项盘点表
 
@@ -128,50 +132,97 @@ A 类的"真实外部账户副作用"风险类别不同；但"不涉及外部账
 |---|---|---|---|---|---|---|
 | egress | `egress/webshare.py`（`WebshareProvider`） | **部分**：`list_endpoints()`/`capacity()`/`create_tenant()`/`update_tenant_quota()`/`replace_endpoint()` 都会发真实请求，但响应体全部被丢弃，返回写死的空/零值 DTO（`list_endpoints()` 恒返回 `[]`，`capacity()` 恒返回全零）；`get_tenant_usage()`/`get_credentials()` 直接 `raise NotImplementedError`。写操作有明确的路径白名单守卫（`_guard`），永久拒绝任何 purchase/renew/payment/billing 路径。 | `egress_provider` 只接受 `"mock"` | **没有 `webshare_api_key`（或同类）配置项**——`Settings` 里完全没有为 `WebshareProvider.__init__` 的 `api_key` 参数留位置 | `test_webshare_guard.py`、`test_webshare_procurement.py`：覆盖写操作白名单、限速/429 退避、procurement 只读适配器；**没有测试覆盖真实响应体到 DTO 的映射**（因为这部分还没写） | 否——只在测试文件里手动构造，`registry.py`/其余应用代码里从未 `import WebshareProvider` |
 | accounting | **无**（`accounting/` 目录只有 `mock.py`） | 不适用——**这个 provider 类别完全没有真实实现**，连一个空壳文件都没有 | `accounting_provider` 只接受 `"mock"`；但 `Settings` 里已经有一整组 `marzban_*` 字段（`marzban_base_url`/`marzban_admin_username`/`marzban_admin_password`/`marzban_default_protocol`/`marzban_default_inbounds_json`/`marzban_verify_tls`），`validate_runtime_safety()` 甚至已经在校验"生产环境选了 marzban 但配置还是默认值就报错"——**配置层已经为一个不存在的实现做好了校验，这是意外发现，见下方** | 同上，字段已存在但没有对应实现读取它们 | 无——没有实现就没有测试 | 否——不存在这个类 |
-| gateway | `gateway/xray_file.py`（`XrayFileProvider`） | **部分**（第一版"较完整"的判断已修正）：九步安全重载序列、校验失败/重载失败/健康检查失败的回滚路径都已实现，没有发现 `NotImplementedError`/占位注释；但**独立审查核实出一个真实的自我校验缺口**：`render()` 产出的候选配置不含 `inbounds` 字段，在真实环境（当前配置有 inbound 客户端）下会被自己的 `_preservation_errors()` 判定为"移除了现有 inbound 客户端"而拒绝——见下方"具体实现缺口"一节，这个问题不影响现有测试是因为测试固件两边都没有 `inbounds` | `gateway_provider` 只接受 `"mock"` | 不涉及第三方账户；但**构造 `XrayFileProvider` 需要一个真实的 `XrayRuntime`**（见下方"构造依赖清单"），不是"不需要任何东西就能接进 registry" | `test_safe_reload.py`：9 个测试，覆盖校验失败提前拦截、重载失败完整回滚、缺失路由/用户/出站的各种拒绝场景、Dockerfile 资产完整性；**没有测试覆盖"当前配置存在真实 inbound 客户端"这个场景**，这正是上面缺口没被测试暴露的原因 | 否——`registry.py` 从未 import，只有测试文件直接构造 |
-| forwarder | `forwarder/mihomo.py`（`MihomoForwarderProvider`） | **部分**（第一版"较完整"的判断已修正）：文件安装+热重载+失败回滚，没有发现 `NotImplementedError`/占位注释；但**独立审查核实出一个真实的功能缺口**：`health()` 硬编码恒返回健康，`apply()` 从未调用它做重载后校验，成功判定完全依赖"`install()`/`reload()` 没抛异常"——见下方"具体实现缺口"一节 | `forwarder_provider` 只接受 `"mock"` | 不涉及第三方账户；但**构造 `MihomoForwarderProvider` 需要一个真实的 `MihomoRuntime`**，其本机实现 `LocalMihomoRuntime` 需要一个本地 Mihomo API 的 `api_secret`（见下方"构造依赖清单"）——这是一个真实凭据，只是范围在本机 API 而非第三方账户 | `test_db_adapters.py::test_mihomo_render_failure_restores_exact_pre_operation_state`——**测试描述已改正**：这个测试实际模拟的是 render/install 之后的**重载（reload）失败**并验证精确回滚，不是 render 本身失败（第一版盘点这里的描述不准确，已修正）；**没有测试覆盖 `health()`/重载后校验缺失这个问题** | 否——`registry.py` 从未 import；`MihomoForwarderProvider` 类定义本身是唯一"看到这个类名"的应用代码位置 |
+| gateway | `gateway/xray_file.py`（`XrayFileProvider`） | **部分**（第一版"较完整"的判断已修正）：九步安全重载序列、校验失败/重载失败/健康检查失败的回滚路径都已实现，没有发现 `NotImplementedError`/占位注释；但**独立审查核实出一个真实的自我校验缺口**：`render()` 产出的候选配置不含 `inbounds` 字段，在真实环境（当前配置有 inbound 客户端）下会被自己的 `_preservation_errors()` 判定为"移除了现有 inbound 客户端"而拒绝——见下方"具体实现缺口"一节，这个问题不影响现有测试是因为测试固件两边都没有 `inbounds` | `gateway_provider` 只接受 `"mock"` | 不涉及第三方账户；构造 `XrayFileProvider` 本身只是保存一个 `XrayRuntime` 对象引用，不发生真实 IO（见下方"构造 vs. 组装 vs. 运行期"一节），但要接进 `build_registry()` 仍需要先决定 `Settings` 怎么提供 `config_path`/`backup_dir` 等真实路径值 | `test_safe_reload.py`：9 个测试，覆盖校验失败提前拦截、重载失败完整回滚、缺失路由/用户/出站的各种拒绝场景、Dockerfile 资产完整性；**没有测试覆盖"当前配置存在真实 inbound 客户端"这个场景**，这正是上面缺口没被测试暴露的原因 | 否——`registry.py` 从未 import，只有测试文件直接构造 |
+| forwarder | `forwarder/mihomo.py`（`MihomoForwarderProvider`） | **部分**（第一版"较完整"的判断已修正）：文件安装+热重载+失败回滚，没有发现 `NotImplementedError`/占位注释；但**独立审查核实出一个真实的功能缺口**：`health()` 硬编码恒返回健康，`apply()` 从未调用它做重载后校验，成功判定完全依赖"`install()`/`reload()` 没抛异常"——见下方"具体实现缺口"一节 | `forwarder_provider` 只接受 `"mock"` | 不涉及第三方账户；构造 `MihomoForwarderProvider` 本身只是保存 `render_document`/`MihomoRuntime` 引用，不发生真实 IO；但其本机实现 `LocalMihomoRuntime` 的字段里有一个真实凭据 `api_secret`（本机 Mihomo API 的 Bearer token），且现有的 `local_runtime_from_env()` 工厂函数在组装期就会读 env、解析路径、校验这个凭据非空（见下方"构造 vs. 组装 vs. 运行期"一节）——这是范围在本机 API 而非第三方账户的真实凭据 | `test_db_adapters.py::test_mihomo_render_failure_restores_exact_pre_operation_state`——**测试描述已改正**：这个测试实际模拟的是 render/install 之后的**重载（reload）失败**并验证精确回滚，不是 render 本身失败（第一版盘点这里的描述不准确，已修正）；**没有测试覆盖 `health()`/重载后校验缺失这个问题** | 否——`registry.py` 从未 import；`MihomoForwarderProvider` 类定义本身是唯一"看到这个类名"的应用代码位置 |
 | transport | `transport/subscription.py`（`SubscriptionTransportProvider`） | 未发现 `NotImplementedError`/占位注释（未逐行审计到函数级） | `transport_provider_mode` 只接受 `"mock"` | **需要外部网络访问且涉及敏感信息**：`sync_nodes()` 对订阅 URL（通常带私有 token）发起真实 `httpx` GET 请求，并可选写本地缓存文件——见上面"C 类"说明，第一版把它错误归类为"不需要外部网络凭据" | `test_transport_provider.py`：覆盖订阅解析（Clash YAML / base64 URI 列表）、凭据不泄漏到 metadata、mock transport 下的 `sync_nodes()` 刷新流程 | 否——`registry.py` 从未 import |
 | payment / notify / email / captcha / storage | 无 | 不适用——这五类目前都只有 mock/noop 实现，没有任何真实实现文件或占位文件 | 各自只接受 `"mock"`/`"noop"` | 不适用 | 不适用 | 不适用 |
 
-### `XrayFileProvider` / `MihomoForwarderProvider` 的真实构造依赖清单
+### `XrayFileProvider` / `MihomoForwarderProvider` 的真实契约：构造 vs. 组装 vs. 运行期
 
-第一版盘点说这两个 provider"只被 `registry.py` 的 mock 门挡住，没有其它
-技术障碍"——**这个结论被 Work 审查指出不成立，核实后确认审查是对的，
-改正如下**。`registry.py` 的 `build_registry()` 自己的文档字符串明确
-承诺"不需要网络、Docker、文件系统或 shell 访问就能完成组装"
-（"Build all providers without network, Docker, filesystem, or shell
-access"）。但这两个 provider 的真实构造依赖，直接和这条承诺冲突：
+**这一节是第二次修正版**——上一版说这两个 provider"只被 `registry.py`
+的 mock 门挡住，没有其它技术障碍"被 Work 审查指出不成立，改正后写成了
+"这两个 provider 的构造直接和 `build_registry()`'无网络/无文件系统/无
+shell'的承诺冲突"；这一版结论又被 Work 的独立审查指出**把"构造"
+（construction）和"运行期方法调用"（operation-time）这两件不同的事混为
+一谈**——逐行核实源码后确认这条审查意见是对的，再次改正。要把这件事
+说准确，必须分成三层，而不是笼统地说"构造需要 XX，所以和 registry 的
+承诺冲突"：
 
-- **`XrayFileProvider.__init__(runtime, ...)`** 需要一个实现了
-  `XrayRuntime` 协议（`backup`/`current`/`xray_test`/`install`/`reload`/
-  `health`/`restore`）的对象。本机实现 `LocalXrayRuntime` 需要：
-  `config_path`、`backup_dir`（文件系统路径）、`xray_binary`/
-  `asset_dir`（本机二进制和资源目录，默认写死
-  `/usr/local/bin/xray`/`/usr/local/share/xray`）、
-  `reload_command`（默认 `systemctl reload xray`，需要 shell/subprocess
-  执行权限）；`xray_test()` 用 `subprocess.run` 真的跑一次
-  `xray run -test`；`health()` 用 `socket.create_connection` 探测本机
-  8443 端口。这些全部是真实的文件系统/subprocess/socket 访问，和
-  `build_registry()` 自己"无文件系统无 shell"的承诺矛盾。
-- **`MihomoForwarderProvider.__init__(render_document, runtime)`** 需要
-  一个 `render_document` 回调和一个实现了 `MihomoRuntime` 协议
-  （`backup`/`install`/`reload`/`restore`）的对象。本机实现
-  `LocalMihomoRuntime` 需要：`config_path`、`backup_dir`（文件系统路径）、
-  **`api_url`、`api_secret`**——`reload()` 会真的对本地 Mihomo API 发起
-  一次带 `Authorization: Bearer {api_secret}` 的 HTTP PUT 请求。
-  `api_secret` 是一个真实凭据，只是作用范围是本机 API 而不是第三方账户；
-  当前 `Settings` 里没有任何字段可以配置它。
+**第一层：构造输入（construction inputs）——只是对象和参数，本身不是 IO**
 
-结论：把这两个 provider 接进 `build_registry()`，至少需要先回答几个
-设计问题，不是简单地把 `registry.py` 里那一行 `!= "mock"` 判断删掉就
-可以：①`build_registry()` 是否还要保持"无副作用/无 IO"这条契约——如果
-要保持，这两个 provider 的构造需要挪到别处（比如惰性构造、依赖注入
-在更外层完成）；②`Settings` 需要新增哪些字段来传递
-`config_path`/`backup_dir`/`api_url`/`api_secret` 等路径和凭据；③这些
-新字段（尤其 `api_secret`）要按什么规则管理（参照 `AGENTS.md` 的凭据
-持有范围规则，不能直接写进 `.env`/代码）。**本阶段不在这里替用户做决定，
-只列出问题**——这是"阶段二具体怎么做"需要单独设计的内容，不是本盘点
-能够替代的。
+- `XrayFileProvider.__init__(runtime, *, disable_user=..., alert=...,
+  audit=...)`（`xray_file.py:48-59`）：函数体只有五行属性赋值
+  （`self._runtime = runtime` 等），没有任何文件系统/网络/subprocess
+  调用。
+- `MihomoForwarderProvider.__init__(render_document, runtime)`
+  （`mihomo.py:102-104`）：同样只有两行属性赋值。
+- `LocalXrayRuntime`（`xray_file.py:250-256`）和 `LocalMihomoRuntime`
+  （`mihomo.py:44-50`）都是 `@dataclass(slots=True)`，构造时只是把
+  `config_path`/`backup_dir`/`api_url`/`api_secret` 等值赋给字段，
+  **dataclass 字段赋值本身不访问文件系统、不发网络请求、不 fork
+  subprocess**。
+
+也就是说，只要调用方能拿到这些构造参数（路径字符串、URL、secret 值），
+单纯"构造出一个 `XrayFileProvider`/`MihomoForwarderProvider` 实例"这件事
+本身是纯 Python 对象组装，**和 `build_registry()` 的"无网络/Docker/
+文件系统/shell"承诺并不冲突**。上一版"构造直接与该承诺冲突"的说法不准确，
+已经改正。
+
+**第二层：组装期行为（assembly-time behavior）——只有一个具体例子，且
+只存在于 Mihomo 侧**
+
+- `local_runtime_from_env()`（`mihomo.py:141-155`）会：①读取
+  `MIHOMO_CONFIG_PATH`/`MIHOMO_BACKUP_DIR`/`MIHOMO_API_URL`/
+  `MIHOMO_API_SECRET`/`MIHOMO_RUNTIME_CONFIG_PATH` 等环境变量；②对路径
+  调用 `.resolve()`——这是真实的文件系统调用（会解析符号链接，做
+  `realpath`/`readlink` 系统调用，即使目标文件不存在也会访问文件系统）；
+  ③校验 `MIHOMO_API_SECRET` 非空，为空则 `raise MihomoRuntimeError`。
+  这是一个真实存在的"组装期读 env + 文件系统路径解析 + 配置校验"的例子，
+  但它是一个独立的工厂函数，不是 `LocalMihomoRuntime.__init__` 本身的
+  行为——调用方完全可以绕过 `local_runtime_from_env()`，直接用已经解析好
+  的值构造 `LocalMihomoRuntime(...)`，这样就不会触发这层组装期文件系统
+  访问。
+- Xray 侧**目前没有对应的 `local_runtime_from_env()` 或任何等价工厂
+  函数**——`xray_file.py` 里没有 `from_env`/`local_runtime_from_env`
+  这类构造入口，`LocalXrayRuntime` 只能通过直接传参数构造。
+
+**第三层：运行期副作用（operation-time side effects）——只有真正调用这些
+方法时才发生，和"构造出实例"是两回事**
+
+- `LocalXrayRuntime`：`backup()`/`current()`（读文件）、`xray_test()`
+  （`subprocess.run` 真的跑一次 `xray run -test`）、`install()`（写文件）、
+  `reload()`（`subprocess.run` 执行 `systemctl reload xray`）、`health()`
+  （`socket.create_connection` 探测本机 8443 端口）、`restore()`（读写
+  文件）——这些方法调用才是真实的文件系统/subprocess/socket 访问，不是
+  `LocalXrayRuntime(...)` 这行构造代码本身。
+- `LocalMihomoRuntime`：`backup()`/`install()`/`restore()`（文件读写）、
+  `reload()`（对 `api_url` 发起带 `Authorization: Bearer {api_secret}`
+  的真实 HTTP PUT 请求）——同样只在方法被调用时才发生。
+
+**修正后的结论**：不能说"这两个 provider 的构造需要真实文件系统/shell
+访问，所以和 `build_registry()` 的承诺冲突"；准确的说法是——如果
+`build_registry()` 只是把已经拿到的路径/URL/secret 值传给
+`XrayFileProvider(LocalXrayRuntime(...))`/
+`MihomoForwarderProvider(..., LocalMihomoRuntime(...))` 的构造函数，
+这件事本身不会产生网络/文件系统/subprocess 访问，不违反
+`build_registry()` 现有的文档字符串承诺；真正需要单独评估、且目前唯一
+已知会在组装期做真实文件系统访问的，是 `local_runtime_from_env()`
+这一个具体的工厂函数（如果阶段二决定继续用它来供给
+`LocalMihomoRuntime`）。**本阶段不预先替阶段二决定**"必须用惰性构造""
+必须把 runtime 挪到 registry 外部用依赖注入容器完成"之类的架构方案——
+上一版这么写是在没有区分这三层之前就跳到了结论；现在看，一旦分清"构造
+输入 vs. 组装期行为 vs. 运行期副作用"，`registry.py` 完全有可能在保持
+"构造阶段不做真实 IO"这条更精确的边界的前提下，直接实例化这两个
+provider（只要它拿到的是已经解析好的配置值，而不是自己在组装期调用
+`local_runtime_from_env()` 这类会做文件系统/校验的工厂）；阶段二具体
+怎么设计 `Settings` 传参、要不要保留/替换 `local_runtime_from_env()`
+这类工厂，留给阶段二自己决定。
+
+需要新增哪些 `Settings` 字段来传递
+`config_path`/`backup_dir`/`api_url`/`api_secret` 等路径和凭据，以及
+这些新字段（尤其 `api_secret`）要按什么规则管理（参照 `AGENTS.md` 的
+凭据持有范围规则，不能直接写进 `.env`/代码），仍然是阶段二需要单独设计
+的问题，这里只记录问题存在，不做决定。
 
 ### `XrayFileProvider` / `MihomoForwarderProvider` 的具体实现缺口（独立审查第二轮，已核实）
 
@@ -246,21 +297,45 @@ if self.app_env == "production" and self.accounting_provider == "marzban":
 ### 建议的分阶段接入顺序（本阶段只给建议，不实施）
 
 1. **阶段二（已按独立审查意见调整）：先加固并完成一个本机 provider 的
-   接口契约测试，再以显式 opt-in 方式接入 registry**——上一版建议是
-   "B 类选一个直接接入 registry"，前提是"没有其它技术障碍"；上面两节
-   （构造依赖清单、具体实现缺口）已经确认这个前提不成立：`XrayFileProvider`
-   在有真实 inbound 客户端时会被自己的校验拒绝，`MihomoForwarderProvider`
-   的 `health()`/`apply()` 没有真正的重载后校验。在这些缺口修好、并且有
-   对应的契约测试（例如"候选配置必须保留现有 inbound 客户端""重载后
-   `health()` 必须反映真实状态、`apply()` 必须依赖它做成功判定"）之前，
-   把它们接进 `build_registry()` 只会让 registry 组装出一个会在真实环境
-   下自我拒绝或误报成功的实例，比继续保持 mock 更危险。因此阶段二调整为
-   两步：①先在 `gateway/xray_file.py` 或 `forwarder/mihomo.py` 二选一
-   （不改动 `registry.py`），把上面确认的实现缺口修好，并补上对应的接口
-   契约测试；②契约测试稳定之后，再以**显式 opt-in**（而不是让它替换
-   `registry.py` 现有的默认拒绝分支）的方式接入 registry——具体是新增一个
-   独立的环境变量开关还是别的机制，留给阶段二自己设计，本阶段只定这个
-   "先加固测试、再显式 opt-in"的顺序，不替阶段二做实现细节的决定。
+   接口契约测试，再以显式 opt-in 方式接入 registry；首选候选是
+   `gateway/xray_file.py`（`XrayFileProvider`），不是直接接入 registry**
+   ——上一版建议是"B 类选一个直接接入 registry"，前提是"没有其它技术
+   障碍"；上面"具体实现缺口"一节已经确认这个前提不成立：
+   `XrayFileProvider` 在有真实 inbound 客户端时会被自己的校验拒绝，
+   `MihomoForwarderProvider` 的 `health()`/`apply()` 没有真正的重载后
+   校验。在这些缺口修好、并且有对应的契约测试之前，把它们接进
+   `build_registry()` 只会让 registry 组装出一个会在真实环境下自我拒绝
+   或误报成功的实例，比继续保持 mock 更危险。
+
+   **为什么首选 Xray 而不是 Mihomo：** 两者都需要先补契约测试，但缺口的
+   性质不同。Xray 已经有 `health()` 的真实实现（`socket.create_connection`
+   探测本机端口 + `marzban_health()` 回调）、`apply()` 也已经在重载后
+   调用 `health()` 并纳入回滚判断（`xray_file.py:112-118`）——它欠缺的
+   是"重载前生成的候选配置本身要不要保留 `inbounds`"这一条具体的
+   preservation 规则，属于**在一个已经存在的健康校验框架里补一条遗漏的
+   校验规则**。Mihomo 则连"重载后到底健不健康"这个最基础的校验都没有
+   （`health()` 硬编码恒真、`apply()` 从不调用它），属于**框架本身缺失**
+   ——在框架都不存在之前去讨论"候选配置要不要保留什么字段"没有意义。
+   因此 Xray 的缺口更收敛、更接近"补一条测试和一段逻辑"，Mihomo 需要先
+   把 post-reload health-gate 这个更基础的框架补上，工作量和不确定性都
+   更大。所以阶段二**首选 `XrayFileProvider`**；Mihomo 的
+   post-reload 健康校验缺口本身记为待办，但不在阶段二第一步的范围内。
+
+   阶段二的具体步骤（这里只记录 handoff 内容，本 PR 不实现、不改动
+   `xray_file.py` 或任何测试文件）：
+   ①**先建立并验证 Xray 的 full-config preservation 契约**——针对当前
+   配置已经存在 `inbounds`/客户端的场景，设计并补充契约测试，至少覆盖：
+   新候选配置不能删除既有 inbound 客户端；不能删除既有 routing rule；
+   不能删除既有 outbound；`private BLOCK` 规则和 `tcp,udp BLOCK` 兜底
+   规则这两条安全不变量仍然成立；候选配置能通过 `xray_test()`（`xray
+   run -test`）边界校验；重载失败或健康/preservation 校验失败时仍能
+   完整回滚到重载前状态。这些测试和对应的 `render()`/`_preservation_
+   errors()` 修复留给阶段二实现，本阶段不动这些文件。
+   ②契约测试稳定之后，再以**显式 opt-in**（而不是让它替换 `registry.py`
+   现有的默认拒绝分支）的方式接入 registry——具体是新增一个独立的环境
+   变量开关还是别的机制，留给阶段二自己设计。
+   ③在①②完成之前，`build_registry()` 不接入 `XrayFileProvider`，
+   `forwarder/mihomo.py` 也保持现状不接入。
 2. **阶段三：补完 `egress/webshare.py` 的响应映射**——`list_endpoints()`/
    `capacity()` 的真实响应体到 DTO 的映射需要先补上（目前是发真实请求、
    丢弃真实响应、返回假数据），且需要找到 `api_key` 的合理配置/凭据来源
