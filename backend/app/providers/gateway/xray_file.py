@@ -12,7 +12,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import NoReturn, Protocol
 
 from backend.app.providers.base import (
     ApplyResult,
@@ -106,8 +106,32 @@ class XrayFileProvider:
             self._alert("Xray candidate rejected before reload")
             raise XrayValidationError("; ".join(validation.errors))
 
-        self._runtime.install(candidate.content)
-        self._runtime.reload()
+        # `install()` and this first `reload()` are the only steps that can
+        # mutate disk/runtime state before any health signal exists ("pre-
+        # health mutating exception" in ADR-015 Part A). Either raising must
+        # never leave a bare exception propagating past this point: the
+        # candidate may already be on disk, the running Xray process may or
+        # may not have picked it up, and the only safe response is to
+        # attempt the exact same rollback path used for a post-reload health
+        # failure, then fail this call closed either way.
+        try:
+            self._runtime.install(candidate.content)
+            self._runtime.reload()
+        except Exception as exc:
+            self._audit("apply_mutation_failed", {"error": str(exc)})
+            self._rollback(
+                backup,
+                new_username=new_username,
+                failure_summary=(
+                    "Xray candidate install or reload raised an exception; "
+                    "backup restored"
+                ),
+                reload_error_message=(
+                    "candidate install or reload raised an exception before "
+                    "health could be checked"
+                ),
+            )
+
         self._audit("reload", {"version": candidate.version})
         report = self._runtime.health()
         post_reload_errors = _preservation_errors(
@@ -122,18 +146,96 @@ class XrayFileProvider:
         if post_reload_errors:
             self._audit("post_reload_routes_failed", {"errors": post_reload_errors})
 
-        self._runtime.restore(backup)
-        self._audit("backup_restored", {})
-        self._runtime.reload()
-        self._audit("rollback_reload", {})
-        rollback_health = self._runtime.health()
+        self._rollback(
+            backup,
+            new_username=new_username,
+            failure_summary="Xray health or route check failed; backup restored",
+            reload_error_message="post-reload health check failed",
+        )
+
+    def _rollback(
+        self,
+        backup: object,
+        *,
+        new_username: str | None,
+        failure_summary: str,
+        reload_error_message: str,
+    ) -> NoReturn:
+        """Attempt to restore the previously backed-up config; always raises.
+
+        This never reports a successful rollback unless `restore()`,
+        `reload()`, and `health()` all completed without raising *and*
+        health reports healthy. Any failure along this path (an exception
+        from any of those three calls, or a healthy=False result) leaves
+        the running system's state unverified/unknown -- it must be treated
+        as fail-closed, never as an equivalent to a confirmed-good rollback,
+        and must never be recorded as `rollback_reverified` succeeding.
+        """
+        try:
+            self._runtime.restore(backup)
+            self._audit("backup_restored", {})
+        except Exception as restore_exc:
+            self._audit("rollback_restore_failed", {"error": str(restore_exc)})
+            self._finish_with_alert(
+                new_username,
+                "Xray rollback failed: could not restore the previous "
+                "config; system state is unknown",
+            )
+            raise XrayReloadError(
+                "rollback failed: restore() raised; system state is "
+                "unknown and unverified"
+            ) from restore_exc
+
+        try:
+            self._runtime.reload()
+            self._audit("rollback_reload", {})
+        except Exception as reload_exc:
+            self._audit("rollback_reload_failed", {"error": str(reload_exc)})
+            self._finish_with_alert(
+                new_username,
+                "Xray rollback failed: reload after restore raised; "
+                "runtime state is unknown",
+            )
+            raise XrayReloadError(
+                "rollback failed: reload() after restore raised; runtime "
+                "state is unknown and unverified"
+            ) from reload_exc
+
+        try:
+            rollback_health = self._runtime.health()
+        except Exception as health_exc:
+            self._audit("rollback_health_check_failed", {"error": str(health_exc)})
+            self._finish_with_alert(
+                new_username,
+                "Xray rollback failed: health check after restore raised; "
+                "runtime state is unknown",
+            )
+            raise XrayReloadError(
+                "rollback failed: health() after restore raised; runtime "
+                "state is unknown and unverified"
+            ) from health_exc
+
         self._audit("rollback_reverified", {"healthy": rollback_health.healthy})
+        if not rollback_health.healthy:
+            self._finish_with_alert(
+                new_username,
+                "Xray rollback restored the previous config but the "
+                "runtime is unhealthy afterwards",
+            )
+            raise XrayReloadError(
+                "rollback restore succeeded but post-rollback health "
+                "check reported unhealthy"
+            )
+
+        self._finish_with_alert(new_username, failure_summary)
+        raise XrayReloadError(reload_error_message)
+
+    def _finish_with_alert(self, new_username: str | None, message: str) -> None:
         if new_username is not None:
             self._disable_user(new_username)
             self._audit("new_user_disabled", {"username": new_username})
-        self._alert("Xray health or route check failed; backup restored")
+        self._alert(message)
         self._audit("alert_sent", {})
-        raise XrayReloadError("post-reload health check failed")
 
     def health(self) -> HealthReport:
         return self._runtime.health()
