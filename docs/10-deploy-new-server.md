@@ -108,7 +108,13 @@ absent, Docker creates a directory at that path and the container fails before
 its process starts. A deployment must create file-typed runtime paths before
 `compose up`. The checked-in `xray_config.base.json` is intentionally only a
 skeleton: it is not runnable until the database renderer supplies valid
-outbounds, clients, Reality values, and BLOCK routing.
+outbounds, Reality values, and BLOCK routing. (Correction, TASK-T16 Phase
+2A / ADR-014: the renderer does not supply inbound `clients` — it inherits
+whatever `inbounds` the skeleton file already has, unchanged, and that
+skeleton's client list is empty. Whether and how a running Marzban process
+populates that shared file's `inbounds.settings.clients` at runtime is not
+established by this repository's code; see ADR-014 for the still-open
+question.)
 
 The backend image also previously copied application source without installing
 the dependencies declared in `pyproject.toml`. That allowed image build to
@@ -165,9 +171,10 @@ an explicit `compose.socks.yml` override and is included only when
 
 The Xray skeleton finding was reviewed separately. Adding a guessed outbound
 to `infrastructure/marzban/xray_config.base.json` would hide the fact that
-user routes, existing clients, Reality values, and BLOCK routing must come
-from the database renderer. The correct rule is therefore to render the full
-runtime config before stack-up. `40_stack_up.sh` now requires file-typed
+user routes, Reality values, and BLOCK routing must come from the database
+renderer (inbound `clients` are not part of what the renderer supplies —
+see the correction above and ADR-014). The correct rule is therefore to
+render the full runtime config before stack-up. `40_stack_up.sh` now requires file-typed
 `xray_config.json` and `db.sqlite3`, parses the Xray JSON, and rejects an
 unrendered config with no outbounds or routing rules. It never injects a
 synthetic outbound. A fresh deployment must complete the database-backed
