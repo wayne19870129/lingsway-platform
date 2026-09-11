@@ -15,15 +15,27 @@ name: Claude auto-merge gate
 # This workflow never checks out or runs the PR's own code -- it only
 # calls the GitHub API/CLI -- so a malicious PR branch cannot turn this
 # workflow's write permissions against the repository.
+#
+# Re-evaluation trigger: `check_suite.completed` was tried first but its
+# `pull_requests` array is not reliably populated for check suites created
+# by a workflow_dispatch run (which is how ci.yml/security.yml/
+# risk-classify.yml actually get triggered here, per the GITHUB_TOKEN
+# recursion limitation -- see TASK-T18). Relying on it risked permanently
+# missing the moment a PR's checks turn green if Work's PASS arrived while
+# CI was still running. `workflow_run.completed` on those three workflows
+# by name is used instead, and the PR is looked up by head branch
+# (`gh pr list --head`) rather than trusted from event payload fields that
+# have the same populated-or-not uncertainty.
 
 on:
   issue_comment:
     types: [created]
-  check_suite:
+  workflow_run:
+    workflows: [CI, Security, "Risk classification"]
     types: [completed]
 
 concurrency:
-  group: claude-automerge-${{ github.event.issue.number || (github.event.check_suite.pull_requests && github.event.check_suite.pull_requests[0].number) || github.run_id }}
+  group: claude-automerge-${{ github.event.issue.number || github.event.workflow_run.head_branch || github.run_id }}
   cancel-in-progress: true
 
 permissions:
@@ -36,14 +48,15 @@ jobs:
   gate:
     if: |
       (github.event_name == 'issue_comment' && github.event.issue.pull_request != null) ||
-      (github.event_name == 'check_suite' && github.event.check_suite.pull_requests[0] != null)
+      github.event_name == 'workflow_run'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
       REPO_OWNER: ${{ github.repository_owner }}
-      PR_NUMBER: ${{ github.event.issue.number || github.event.check_suite.pull_requests[0].number }}
+      ISSUE_PR_NUMBER: ${{ github.event.issue.number }}
+      WORKFLOW_RUN_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
     steps:
       - name: Evaluate merge gate
         shell: bash
@@ -51,6 +64,16 @@ jobs:
           set -euo pipefail
 
           repo_name="${REPO#*/}"
+
+          if [ -n "${ISSUE_PR_NUMBER:-}" ]; then
+            PR_NUMBER="$ISSUE_PR_NUMBER"
+          else
+            PR_NUMBER=$(gh pr list --repo "$REPO" --head "$WORKFLOW_RUN_HEAD_BRANCH" --state open --json number --jq '.[0].number // empty')
+            if [ -z "$PR_NUMBER" ]; then
+              echo "No open PR for branch $WORKFLOW_RUN_HEAD_BRANCH; nothing to evaluate."
+              exit 0
+            fi
+          fi
           echo "Evaluating PR #$PR_NUMBER in $REPO"
 
           pr=$(gh pr view "$PR_NUMBER" --repo "$REPO" \
@@ -88,8 +111,13 @@ jobs:
                       sha: (.body | capture("(?<sha>[0-9a-f]{40})"; "i").sha // "") } ]
           ' <<<"$all_comments")
 
-          needs_changes_rounds=$(jq '[.[] | select(.verdict == "NEEDS_CHANGES")] | length' <<<"$work_comments")
-          echo "NEEDS_CHANGES rounds so far: $needs_changes_rounds"
+          # Rounds are counted by distinct reviewed head SHA, not by raw
+          # comment count -- a duplicate delivery or a repeat review of the
+          # same SHA is one round, not two (CLAUDE.md requires SHA/event
+          # de-duplication; counting raw comments would let a duplicate
+          # consume a round with no corresponding rework cycle).
+          needs_changes_rounds=$(jq '[.[] | select(.verdict == "NEEDS_CHANGES" and .sha != "") | .sha] | unique | length' <<<"$work_comments")
+          echo "NEEDS_CHANGES rounds so far (distinct SHAs): $needs_changes_rounds"
 
           if [ "$needs_changes_rounds" -gt 3 ]; then
             block_marker="${marker_blocked_prefix}round-cap:${head_sha} -->"

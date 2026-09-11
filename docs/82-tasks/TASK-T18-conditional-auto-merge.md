@@ -106,10 +106,63 @@ PR")和 `CLAUDE.md`"No agent merges a PR automatically"的一次**用户明确
 PR 页面上(草稿标记、冲突提示、CI 红叉、未 resolve 的会话)已经是可见的,
 不需要额外重复一遍)。
 
+## 第二轮 Work 审查后的修正(head `4fbf841` → 本次修复)
+
+真实的 Work 审查(`NEEDS_CHANGES`)在这版实现上发现了 3 个 Major + 1 个
+Minor,全部核实为 `VALID`:
+
+1. **Major——"仅靠身份账号挡自伪造"这句话本身站不住脚,比最初向用户披露
+   的风险更严重。** 最初的措辞暗示"挡不住的是有人手动伪造"，隐含"至少
+   需要人为操作"。但审查者指出:`claude.yml` 这个 job 自己就有
+   `issues: write`,而且 `AGENTS.md`「身份识别注意事项」一节本来就写明
+   Work 和 Claude 都可能以 **User 本人的 GitHub 身份**发帖——也就是说,
+   **不需要任何人手动伪造**,`claude.yml` 触发的那次自动化会话本身,只要
+   被诱导(恶意 Issue 内容、prompt injection、模型出错)就能直接产出一条
+   会被 `claude-automerge.yml` 当真的 PASS 评论,中间没有任何技术门槛,
+   只有一句提示词。这是本任务最初对用户的风险描述有遗漏的地方,如实记录
+   在这里,而不是掩盖过去。
+   **修复**:把 `claude.yml` 提示词里"不要转述 PASS"这种弱化表述,改成
+   绝对禁止——不论任何理由,包括任务本身要求,都不得发出包含
+   `Verdict`/`Critical`/`Major`/`Minor`/`Checks performed` 这种审查格式
+   结构的评论,并要求 Claude 把这类请求当成需要拒绝、报告给人类的信号。
+   **仍然如实说明**:这依然是提示词层面的约束,不是技术门禁——技术上没有
+   办法让 `claude-automerge.yml` 分辨"这条评论是 Work 发的"还是"这条评论
+   是这次自动化会话自己发的",因为两者用的是同一个 GitHub 账号身份。
+   这个残留风险比最初讨论时说的更值得关注,已经在对话里向用户重新说明,
+   由用户决定是否需要现在就加一层人工标签之类的门槛,还是继续接受现状。
+2. **Major——`check_suite.completed` 触发不可靠,可能永久错过"检查变绿"
+   的那一刻。** 触发 `ci.yml`/`security.yml`/`risk-classify.yml` 用的是
+   `workflow_dispatch`(见前面"Token 方案"),这类运行产生的 `check_suite`
+   事件里 `pull_requests` 字段不保证被正确关联到 PR;如果 Work 的 PASS
+   在 CI 还没跑完时先到,门禁那次判断会因为条件不满足直接退出,而如果后续
+   没有一次"`pull_requests` 字段恰好非空"的 `check_suite` 事件,这个 PR
+   就可能再也不会被重新评估。**修复**:把触发条件从 `check_suite.completed`
+   换成 `workflow_run.completed`,按工作流名字(`CI`/`Security`/
+   `Risk classification`)过滤,PR 编号改成用 `gh pr list --head
+   <branch>` 按分支名查找,不再依赖事件 payload 里可能为空的关联字段。
+3. **Major——`AGENTS.md`「User(人)」角色描述和新加的例外互相矛盾。**
+   该角色描述原文"决定是否合并 PR...这三件事任何自动化都不得替代",和
+   铁律第 8 条新加的例外字面冲突。**修复**:改写为"是否合并默认仍由 User
+   决定,唯一例外是 User 自己明确授权、写死条件的
+   `claude-automerge.yml`",把它写成"User 提前授权一条具体策略"而不是
+   "自动化自己决定"。
+4. **Minor——返工轮数计数没有按 SHA 去重。** 同一个 SHA 上的重复评论
+   (重复投递、重复审查)会被计成多轮,消耗 3 轮上限却没有对应的真实返工。
+   **修复**:轮数改成"去重后的 SHA 数量",不是原始评论条数(已用样本
+   数据验证:同一 SHA 两条重复 `NEEDS_CHANGES` 现在计 1 轮,不是 2 轮)。
+
 ## 已知限制 / 未解决的差距(如实记录,不假装已经完美)
 
-- **PASS 校验没有身份加密验证**——见上面"用户已经做出的选型决定"第 1 条。
-  这是用户知情选择的残留风险,不是本任务的疏漏。
+- **PASS 校验没有身份加密验证,而且这个风险比最初披露的更严重**——见上面
+  "第二轮 Work 审查后的修正"第 1 条。这是用户知情选择的残留风险,但知情
+  的具体内容已经在第二轮里修正过一次,不是本任务一开始就完整披露的。
+- **`workflow_run` 触发要求 `claude-automerge.yml` 本身已经在默认分支
+  (`main`)上**——这是 GitHub 平台对 `workflow_run` 的通用限制(定义
+  `on: workflow_run` 的工作流文件必须已经合并到默认分支才会真正被注册
+  触发),不是这次实现的 bug。意味着这个门禁在 PR #43 合并之前,即使
+  `ci.yml`/`security.yml`/`risk-classify.yml` 真的跑完,也不会有
+  `workflow_run` 事件把 `claude-automerge.yml` 唤醒——合并之后才会开始
+  正常工作。
 - **`GITHUB_TOKEN` 方案下 CI 触发依赖 Claude 自己记得调用
   `gh workflow run`**——如果 Claude 某次会话漏了这一步,`claude-automerge.yml`
   的条件 9(所有 check run 必须 completed)会一直不满足,PR 就会卡住不合并
