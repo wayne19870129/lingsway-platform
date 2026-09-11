@@ -1,7 +1,9 @@
 name: Claude Code
 
-# Lets a repository collaborator with write access trigger a Claude Code
-# session by mentioning @claude in an issue comment or a PR review comment.
+# Only the repository owner may trigger a Claude Code session by mentioning
+# @claude in an issue comment or a PR review comment. This explicit actor gate
+# is required because the repository is public and the job holds write
+# permissions plus the CLAUDE_CODE_OAUTH_TOKEN secret.
 # See docs/82-tasks/TASK-T17-claude-code-github-action.md for the design
 # constraints (minimal permissions, no self-merge/close/deploy, auth choice).
 
@@ -23,6 +25,10 @@ jobs:
   # version of this gate only covered the PR path and disclosed the
   # Issue-first gap rather than closing it -- fixed per review, since
   # disclosing a scope cut is not the same as being authorized to make it).
+  #
+  # Public-repository authorization gate: only wayne19870129 may reach this
+  # job. The condition is evaluated before the job starts, so unauthorized
+  # commenters never receive this job's write token or reach any later step.
   #
   # The dedup key is always (target issue/PR number, a "state" component,
   # a hash of the triggering comment's own normalized text):
@@ -55,6 +61,7 @@ jobs:
   # dedup check.
   dedup:
     if: |
+      github.actor == 'wayne19870129' &&
       contains(github.event.comment.body, '@claude') &&
       github.event.comment.user.type != 'Bot'
     runs-on: ubuntu-latest
@@ -103,7 +110,9 @@ jobs:
 
   claude:
     needs: dedup
-    if: needs.dedup.outputs.proceed == 'true'
+    if: |
+      github.actor == 'wayne19870129' &&
+      needs.dedup.outputs.proceed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
