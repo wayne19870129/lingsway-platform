@@ -804,15 +804,23 @@ payload（`app/utils/notification.py`）——三者交叉验证，**从 v0.8.4
 `id` 或复合 client email，纯版本升级不能解决这个问题**。
 
 **Decision 3：从 `BLOCKED` 改为 `SELECTED`**——选定 Candidate B：
-为 pinned Marzban 镜像维护一个最小化 source patch（`UserResponse`
-上的 `model_validator(mode="before")`，从原始 ORM 对象计算），让
-`routing_principal: str` 字段（值 = `f"{marzban_db_user_id}.
-{username}"`，与 Marzban 自己 `operations.py` 内部计算公式逐字节
-一致）在本仓库实际依赖的 `POST /api/user`（`create_user`）和
-`GET /api/user/{username}`（`get_user`）两条路径上可靠可用——
-两者的响应构造均已 exact-source 核实持有带 `id` 的原始 ORM 对象，
-详见 ADR-016 "exact-source patch contract" 小节；`list_users`/
-webhook 等其它复用 `UserResponse` 的路径不在本方案承诺范围内。
+为 pinned Marzban 镜像维护一个最小化 source patch。**第三轮更正**：
+补丁机制不是此前写的 `model_validator(mode="before")`（这个描述
+未经验证，且方向不完全正确——会丢失其它字段的 `from_attributes`
+提取能力），而是"新增一个 `exclude=True` 的 `id: int` 字段（照旧
+通过 `from_attributes` 从 ORM 对象提取，不影响任何其它字段）+ 一个
+`@computed_field` 计算属性"，本轮已用实际 Pydantic v2（`2.13.5`）
+PoC 验证：对同一个模拟 ORM 对象，`UserResponse.model_validate
+(dbuser)`（对应 `add_user`）和模拟 FastAPI 自动 response-model
+校验（对应 `get_user`）产出完全一致的结果，现有字段全部正确保留，
+`id` 本身正确从输出中排除。让 `routing_principal: str` 字段
+（值 = `f"{marzban_db_user_id}.{username}"`，与 Marzban 自己
+`operations.py` 内部计算公式逐字节一致）在本仓库实际依赖的
+`POST /api/user`（`create_user`）和 `GET /api/user/{username}`
+（`get_user`）两条路径上可靠可用——两者的响应构造均已 exact-source
+核实持有带 `id` 的原始 ORM 对象，详见 ADR-016 "exact-source patch
+contract" 小节；`list_users`/webhook 等其它复用 `UserResponse` 的
+路径不在本方案承诺范围内。
 真实 Marzban-backed `AccountingProvider` 读取这个字段，
 `AccountUserDTO` 新增同名字段，`CREATE_ACCOUNTING_USER` 保留返回值
 并传给 `APPLY_GATEWAY`，`GatewayRouteBinding.gateway_principal` 的
@@ -831,10 +839,14 @@ ADR-016 Part C/D。
 Alembic revision（会把数据库 schema 升级绑定在一个非事务性外部
 系统上，`AGENTS.md` 铁律第 7 条针对的是纯数据库确定性 reconciliation，
 不适用于这种场景）——改为一个**独立的、显式触发的受控 reconciliation
-工具/作业**：全量只读查询 + preflight 完成后，在单一数据库事务内
-批量 UPDATE；任何查询/字段/冲突失败均整体中止、零写入；具备可安全
-重跑、超时/限流、审计、人工批准边界，凭据沿用现有
-`AccountingProvider` 配置路径。完整设计见 ADR-016。
+工具/作业**：全量只读查询 + preflight 完成后，**第三轮新增强制
+步骤**：进入单一数据库写事务后，必须先按同样过滤条件重新查询一次
+当前 active binding 集合，与查询阶段的旧快照逐行比较，任何行消失/
+变化/新增不一致都导致整体回滚、零写入（修复"全量快照与外部查询
+之间可能发生并发 provisioning/release"这个 TOCTOU 缺口，外部 HTTP
+查询阶段全程不持有数据库事务/锁）；校验通过后才在同一事务内批量
+UPDATE；具备可安全重跑、超时/限流、审计、人工批准边界，凭据沿用
+现有 `AccountingProvider` 配置路径。完整设计见 ADR-016。
 
 **Phase 2B gate**：`ADR-014` 第 5 条"选定收敛方向"的前提条件现在
 已满足，门槛本身解除。**但这不等于可以立即开始实现**——真正的

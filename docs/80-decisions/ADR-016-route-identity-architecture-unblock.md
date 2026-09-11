@@ -1,7 +1,13 @@
 # ADR-016: Decision 3 / Xray route identity architecture unblock
 
 - 状态: 已接受
-- 日期: 2026-09-11
+- 日期: 2026-09-11（同日第三次修订：独立审查指出两处 Major——
+  Candidate B 的补丁机制此前只是文字描述、未经执行验证，本轮用
+  实际 Pydantic v2 PoC 证明正确机制是"`exclude=True` 的 `id` 字段
+  + `@computed_field`"，不是此前写的 `model_validator(mode=
+  "before")`；reconciliation 工具的"全量快照 → 外部查询 → 稍后
+  单事务写入"流程之间存在 TOCTOU 窗口，本轮加入"进入写事务后必须
+  重新查询并与快照逐行比较，任何不一致立即整体回滚"的强制校验步骤）
 - 决策范围: TASK-T16 route-identity architecture research (docs/ADR-only,
   不实现代码)。本 ADR 是 `ADR-015-marzban-ownership-and-route-identity.md`
   Decision 3（`BLOCKED`）的专项后续研究，**supersede** ADR-015 的
@@ -242,15 +248,65 @@ routing_principal: str  # = f"{dbuser.id}.{dbuser.username}"，与
 **两条路径虽然构造方式不同（一个显式调用 `model_validate`，一个靠
 FastAPI 自动序列化），但两者在进入 `UserResponse` 校验管线的那一刻
 持有的都是同一个带 `id` 属性的 ORM 对象**，不是已经丢失 `id` 的
-其它中间表示。这意味着一个单点补丁是可行的：在 `UserResponse` 上
-新增一个 `model_validator(mode="before")`（Pydantic v2 校验管线里
-在字段级校验**之前**运行、可以看到原始输入对象的钩子），从传入的
-`dbuser` 上读取 `.id`/`.username`，计算
-`f"{id}.{username}"`，把结果注入待校验的数据里，成为
-`routing_principal` 字段的来源——这个钩子在 `model_validate()`
-被显式调用（`add_user`）和被 FastAPI 自动调用（`get_user`）两种
-场景下都会执行，不需要在每个 endpoint 单独重复这段逻辑，满足"单点
-最小补丁"的要求。
+其它中间表示。
+
+**第三轮独立审查更正（本轮执行了实际 PoC，推翻了此前未经验证的
+机制描述）**：此前版本在这里写"新增一个 `model_validator
+(mode="before")`……从传入的 `dbuser` 上读取 `.id`/`.username`……
+把结果注入待校验的数据里"——**这个描述本身没有经过实际执行验证，
+且方向不完全正确**：Pydantic v2 的 `model_validator(mode="before")`
+接收原始输入（这里是 ORM 对象），如果直接返回一个只包含新字段的
+dict，会丢失其余字段依赖 `from_attributes` 从 ORM 对象上做属性
+提取的能力（后续按 dict key 取值，取不到 `data_limit`/`expire`
+等其它字段）；如果返回原始 ORM 对象本身，又要额外处理"如何让
+`routing_principal` 变成一个可读属性"，这在最初的文字描述里没有
+交代清楚，是一个真实的、当时未闭合的实现缺口。
+
+**本轮实际执行了一个独立、不改动本仓库任何代码的最小 Pydantic v2
+PoC**（不属于本 PR 的 diff，只是研究过程中用于验证机制是否可行的
+临时脚本，验证环境：`pydantic==2.13.5`）证明了正确、可行的机制：
+
+```python
+from pydantic import BaseModel, ConfigDict, computed_field, Field
+
+class UserResponsePatched(BaseModel):
+    model_config = ConfigDict(from_attributes=True)  # 与真实
+                                                       # UserResponse
+                                                       # 完全一致
+    username: str
+    status: str
+    # 其余现有字段照旧声明（used_traffic、data_limit、expire 等）...
+
+    # 补丁的核心：把 id 声明成一个正常字段，让它像其它字段一样通过
+    # from_attributes 从 ORM 对象上自动提取；exclude=True 只影响
+    # 序列化输出，不影响提取——所以不会破坏/丢失任何现有字段。
+    id: int = Field(exclude=True)
+
+    @computed_field
+    @property
+    def routing_principal(self) -> str:
+        return f"{self.id}.{self.username}"
+```
+
+**实际运行结果**（针对一个模拟 `id=42, username="sub-123"` 的
+ORM 对象，分别用 `UserResponse.model_validate(dbuser)`——对应
+`add_user` 的显式调用路径——和同一次 `model_validate` 调用模拟
+FastAPI 对 `get_user` 返回值做的自动 response-model 校验）：
+
+```
+{'username': 'sub-123', 'status': 'active', 'used_traffic': 12345,
+ 'data_limit': None, 'expire': None, 'routing_principal': '42.sub-123'}
+```
+
+两条路径产出完全一致的结果；`id` 字段本身确认**没有**出现在序列化
+输出里（`exclude=True` 生效）；`username`/`status`/`used_traffic`/
+`data_limit`/`expire` 等现有字段全部正确保留，证明这个补丁点**不会
+破坏任何现有字段的提取**——这就是独立审查要求的"至少证明两条构造
+方式均返回完整原字段及正确 `routing_principal`"这项验证。**修正后
+的补丁机制是"新增一个 `exclude=True` 的 `id` 字段 + 一个
+`@computed_field` 计算属性"，不是最初描述的 `model_validator
+(mode="before")`**——这是本轮对 Candidate B 技术方案的实质性更正，
+不只是补充证据。
 
 **范围收窄（采纳独立审查的建议，不无必要扩大暴露面）**：本 ADR
 **只承诺**这个字段在 `POST /api/user` 和 `GET /api/user/{username}`
@@ -335,9 +391,11 @@ C 的额外风险）**。逐项分析：
 ## Decision 3: SELECTED — Candidate B
 
 **最终方案**：为 pinned Marzban 镜像维护一个最小化 source patch，
-给 `UserResponse` 新增一个 `routing_principal: str` 字段（通过
-`model_validator(mode="before")` 从原始 ORM 对象计算，见下方
-"exact-source patch contract"），值等于
+给 `UserResponse` 新增一个 `routing_principal: str` 字段——具体
+机制是新增一个 `exclude=True` 的 `id: int` 字段（通过现有
+`from_attributes` 提取，不影响任何其它字段）加一个 `@computed_field`
+计算属性（本轮已用实际 Pydantic v2 PoC 验证，见下方"exact-source
+patch contract"），值等于
 `f"{marzban_db_user_id}.{username}"`（与 `operations.py` 现有内部
 计算公式逐字节一致）。**本 ADR 只对本仓库实际依赖的两条路径——
 `POST /api/user`（`create_user`）和 `GET /api/user/{username}`
@@ -456,24 +514,50 @@ provisioning 请求时才 fail closed。
    字段缺失）都记录下来但不中止查询循环本身；查询阶段全部完成后，
    如果**存在任何**失败记录，**整个流程中止，不进入第 4 步，不做
    任何 UPDATE**——不允许"跳过失败的行，更新其它行"。
-4. 全部行查询成功、且第 5 步的冲突检测也通过之后，**在单一数据库
-   事务内批量 UPDATE 所有行的 `gateway_principal`**——这是流程中
-   唯一的写操作，且被收拢到一个事务里，要么全部成功要么全部不生效，
-   不依赖任何外部系统参与这一步。
-5. 冲突检测：批量更新前检测目标 `routing_principal` 值之间、以及
+4. **（本轮新增，修复独立审查指出的 TOCTOU 缺口）** 第 1 步的全量
+   快照和第 2 步的外部查询之间可能经过相当长时间（受限流/超时
+   影响），期间可能有新的 provisioning/release 发生，导致某个
+   binding 被新增、释放、更换 `subscription_id`/`gateway_principal`，
+   或者一个原本不在快照里的新 binding 变成了 active——**如果直接
+   按第 1 步的旧快照做批量 UPDATE，可能覆盖已经变化/已经释放的行，
+   也可能漏收敛快照之后新出现的 active binding，"全部成功或零写入"
+   和"全量收敛"这两个安全承诺都不成立**。修复方向：**外部 HTTP
+   查询阶段（第 2/3 步）全程不持有任何数据库事务/长锁**；进入
+   第 5 步的单一写事务后，**必须先在事务内按同样的过滤条件
+   （`enabled = True AND released_at IS NULL`）重新查询一次当前
+   实际的 active binding 集合，把这个重新查询的结果和第 1 步的
+   快照逐行比较**——如果重新查询的集合和快照集合不完全一致（任何
+   行消失、任何行的 `subscription_id`/`enabled`/`released_at`/
+   当前 `gateway_principal` 发生变化、或出现快照里没有的新 active
+   行），**整个事务立即回滚，不做任何 UPDATE，整个工具运行判定为
+   中止**，需要人工决定是否在没有新变化的时间窗口重新运行整个流程
+   （不是只重跑差异部分）。**不允许在外部 HTTP 调用期间持有数据库
+   锁**——重新校验必须是"进入写事务后的一次快速重新查询+比较"，
+   不是"从查询阶段开始就锁着相关行"。
+5. 只有第 4 步的重新校验确认快照与当前状态完全一致后，才在**同一个
+   事务内**批量 UPDATE 所有行的 `gateway_principal`——这是流程中
+   唯一的写操作，要么全部成功要么全部不生效。
+6. 冲突检测：批量更新前检测目标 `routing_principal` 值之间、以及
    和 `active_gateway_principal` 唯一约束的潜在冲突，冲突同样导致
-   整体中止、不做任何 UPDATE。
-6. 工具必须**可安全重跑**：重复执行时，已经等于目标值的行不产生
+   整体中止、不做任何 UPDATE；这项检测必须基于第 4 步重新校验后的
+   同一个行集合，不能用第 1 步的旧快照做冲突判断。
+7. **建议同时要求一个人工维护窗口**（例如在运行本工具期间暂停新的
+   provisioning/release 流程，或至少提高告警敏感度），作为降低
+   第 4 步频繁触发中止的运维手段——但第 4 步的重新校验是**强制的
+   正确性保证**，维护窗口只是"减少中止发生频率"的可选运维优化，
+   两者不能互相替代：即使有维护窗口，仍然必须执行第 4 步。
+8. 工具必须**可安全重跑**：重复执行时，已经等于目标值的行不产生
    无意义写入；如果 Marzban 一侧数据在两次执行之间发生变化（正常
-   业务变化），重跑会按新查询结果再次收敛——这是"独立显式触发的
-   工具"而不是"一次性 migration"的直接好处，不需要为"重复执行"
-   这件事发明特殊语义。
-7. 必须有**审计**（记录每次运行的时间、操作者、处理的行数、
-   成功/中止结果）和**人工批准边界**（例如要求显式的
-   `--confirm`/审批流程触发，不作为部署流程的自动一环，不在
-   Alembic `upgrade` 或应用启动时被动触发）。
-8. 凭据注入方式沿用现有 `AccountingProvider` 的 admin token 配置
-   路径，不新增独立的凭据存储机制。
+   业务变化），重跑会按新查询结果再次收敛，且同样受第 4 步的重新
+   校验保护——这是"独立显式触发的工具"而不是"一次性 migration"的
+   直接好处，不需要为"重复执行"这件事发明特殊语义。
+9. 必须有**审计**（记录每次运行的时间、操作者、处理的行数、
+   成功/中止结果，包括因为第 4 步重新校验失败而中止的次数和原因）
+   和**人工批准边界**（例如要求显式的 `--confirm`/审批流程触发，
+   不作为部署流程的自动一环，不在 Alembic `upgrade` 或应用启动时
+   被动触发）。
+10. 凭据注入方式沿用现有 `AccountingProvider` 的 admin token 配置
+    路径，不新增独立的凭据存储机制。
 
 **这依赖 Candidate B 的补丁已经部署并对存量用户生效**——补丁本身
 不需要 Marzban 重新创建用户（`routing_principal` 是从已有
