@@ -641,13 +641,17 @@ fail closed）、Xray 已生效但基线持久化失败（必须在"回滚运行
 完整走 restore(backup) 回滚"这个描述和当前实现不符——`install()`/
 第一次 `reload()` 周围没有 `try/except`，两者抛异常会绕过回滚路径
 直接从 `apply()` 传播出去，现有护栏测试也没有覆盖这两种异常场景。
-本轮据实更正 ADR 对当前代码行为的描述，新增第四种场景（异常绕过
-回滚、磁盘/运行时状态不确定，必须按"基线不推进 + fail closed 标记"
-处理，不能等同于"安全地什么都没发生"），并要求 Phase 2B 在实现
+本轮据实更正 ADR 对当前代码行为的描述，新增第四种场景（更精确命名
+为"pre-health mutating exception"：异常绕过回滚、磁盘/运行时状态
+不确定，必须按"基线不推进 + fail closed 标记"处理，不能等同于"安全
+地什么都没发生"，且要与"场景 C"——apply 成功之后基线持久化失败——
+明确区分成两个不同的失败时间点），并要求 Phase 2B 在实现
 drift-detection 基线机制之前，先加固 `apply()` 让这两处异常也进入
-等价于回滚成功/回滚失败的处理路径，同时补齐对应的护栏测试。完整
-规则见 ADR-015 Part A"drift detection 三态模型"及"last-applied 基线
-的持久化位置"两节。基线持久化不复用 `TransportVersion`/
+等价于回滚成功/回滚失败的处理路径，同时补齐四类护栏测试
+（`install()` 异常、首次 `reload()` 异常、rollback `restore()`
+异常、rollback 第二次 `reload()`/健康复核失败——第三次修订第四轮
+把测试要求从 2 类扩展到 4 类）。完整规则见 ADR-015 Part A"drift
+detection 三态模型"及"last-applied 基线的持久化位置"两节。基线持久化不复用 `TransportVersion`/
 `EgressVersion`（grep 确认零引用且 bounded context 不匹配），需要
 新的、scope 限定为共享 Xray 配置文件的持久化机制；首次运行需要显式
 bootstrap 策略，不得静默假设"无基线=无漂移"。不允许"DB renderer +

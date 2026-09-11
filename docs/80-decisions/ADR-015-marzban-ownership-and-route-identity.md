@@ -50,7 +50,14 @@ route identity 收敛方案
   异常场景。本轮据实更正 ADR 对当前代码行为的描述，新增"场景 D"
   （异常绕过回滚、状态未知，必须 fail closed 处理），并把"加固
   `apply()` 捕获这两处异常"列为 Phase 2B 的必需前提，同时要求补齐
-  对应的护栏测试。）
+  对应的护栏测试。2026-09-11 第三次修订第四轮：独立审查确认第三轮的
+  分类和修复方向正确（`VALID`），但要求把"场景 D"更精确命名为
+  "pre-health mutating exception"、显式区分它和"场景 C"（apply 成功
+  之后基线持久化失败）分别发生在 apply 流程的哪个时间点、并把未来
+  Phase 2B 护栏测试的要求从 2 类扩展到 4 类（`install()` 异常、首次
+  `reload()` 异常、rollback `restore()` 异常、rollback 第二次
+  `reload()`/健康复核失败），逐条采纳并写入下方对应小节，不涉及
+  Decision 3/Phase 2B gate 等已确认结论的重新讨论。）
 - 决策范围: TASK-T16 Phase 2B0（只读研究 + ADR/TASK 决策，不实现代码）
 - 前置: `docs/80-decisions/ADR-014-xray-desired-state-ownership.md`
   （Phase 2A，已接受，本 ADR 不重新讨论其中已 Accepted 的 Reality
@@ -394,7 +401,19 @@ scope 限定为这一份共享文件的持久化机制"）。**这意味着 Deci
   运行时是否真的在跑这份新配置是未知的（reload 命令失败通常意味着
   没有成功生效，但也可能是部分生效），而磁盘的旧内容已经不在原地，
   且**没有任何 `restore()` 被调用**——这是一个第二轮"场景 A/B"矩阵
-  没有覆盖的、真实存在于当前代码里的第三种状态，本轮补上为"场景 D"。
+  没有覆盖的、真实存在于当前代码里的第三种状态，本轮补上为"场景 D"
+  （第三次修订第四轮更正命名：这一类失败的准确描述是 **"pre-health
+  mutating exception"**——已经 `backup()` 完成、随后 `install()`/
+  第一次 `reload()` 阶段发生异常，且无法证明磁盘/runtime 此时仍处于
+  旧的 known-good 状态；"场景 D"这个编号继续沿用，只是补充这个更精确
+  的名字，避免和下方 Decision 4"既有数据 reconciliation"矩阵或
+  Part C 的候选 A/B/C 混淆）。**这个场景和"场景 C"（`ApplyResult
+  (True, ...)` 已经产出之后、基线持久化本身失败）是两个不同的失败
+  时间点，不能混为一谈**：场景 C 发生在 apply 成功**之后**（Xray
+  运行时已经确认应用了新 candidate，只是基线记录没跟上）；场景 D
+  （pre-health mutating exception）发生在 apply **尚未**产出任何结果
+  之前（`ApplyResult(True, ...)` 从未被返回，异常直接终止了整个
+  `apply()` 调用）。
 
   **`last_applied_state` 的更新规则不变**：仍然表示 **last known-good
   successfully applied config**，不是 **last file write attempt**，
@@ -415,9 +434,26 @@ scope 限定为这一份共享文件的持久化机制"）。**这意味着 Deci
      不推进，保持旧值）；如果这个恢复尝试本身也失败或无法确认磁盘/
      运行时回到已知良好状态，必须按场景 B 处理（基线标记未知/
      degraded，fail closed，不能静默假装恢复成功）。
-  3. 必须为"`install()` 抛异常"和"第一次 `reload()` 抛异常"这两种
-     情况分别新增护栏测试，纳入未来 Phase 2B 的验收标准——不能只
-     依赖现有覆盖"health 返回 False"这一种失败模式的测试。
+  3. **（第三次修订第四轮扩展）** 必须新增以下四类护栏测试，纳入未来
+     Phase 2B 的验收标准——不能只依赖现有覆盖"health 返回 False"这
+     一种失败模式的测试：
+     - **`install()` 抛异常测试**——验证 `apply()` 能捕获这个异常并
+       走场景 A/B 路径，而不是让异常直接传播出去。
+     - **第一次 `reload()` 抛异常测试**——同上，覆盖
+       `LocalXrayRuntime.reload()` 的 `subprocess.run(...,
+       check=True)` 失败时 `apply()` 的处理方式。
+     - **rollback 阶段 `restore()` 本身抛异常测试**——对应场景 B 的
+       "`restore(backup)` 本身失败"这个分支，验证此时基线被正确标记
+       为未知/degraded 并 fail closed，而不是假装恢复成功。
+     - **rollback 阶段第二次 `reload()`/健康复核失败测试**——对应
+       场景 B 的另一个分支（`restore()` 复制文件成功，但 rollback
+       reload 命令异常或 `rollback_reverified` 健康检查返回不健康），
+       同样验证 fail closed，不假设旧配置已经确认生效。
+     以上四类测试都必须验证同一个不变量：**不允许出现"磁盘已经是新
+     candidate 内容 + 基线仍是旧值 + runtime 是否成功不确定"这种
+     组合被静默当作正常状态**——尤其是"第一次 `reload()` 抛异常"这
+     一类，必须证明测试能验证 `apply()` 不会把这种组合遗留下来且不
+     报警。
 
   **rollback/baseline 矩阵（本轮按独立审查要求逐场景明确，第三轮
   新增场景 D）**：
@@ -1061,12 +1097,15 @@ Phase 2B gate 与本 ADR 的关系"一节）显式 supersede 它，因此不能�
     在 Decision 3 从 `BLOCKED` 解锁之前，不得启动任何 Phase 2B 代码
     实现（无论 Decision 4 矩阵里标 `YES` 还是 `BLOCKED`）；下一步是
     专门解决 route identity 的任务，不是 Phase 2B 实现 PR。
-12. **（第三次修订第三轮新增）** 当前 `XrayFileProvider.apply()` 对
-    `install()`/第一次 `reload()` 抛出的异常没有回滚兜底（见 Part A
-    "场景 D"）；Phase 2B 实现 drift-detection 基线机制之前，必须先
-    加固 `apply()` 让这两处异常也进入等价于场景 A/B 的处理路径，并
-    补齐对应的护栏测试；在这个加固完成之前，不能假设当前代码已经
-    对所有 apply 失败模式提供了安全的回滚保证。
+12. **（第三次修订第三轮新增，第四轮扩展）** 当前 `XrayFileProvider.
+    apply()` 对 `install()`/第一次 `reload()` 抛出的异常没有回滚
+    兜底（见 Part A"场景 D"/"pre-health mutating exception"）；
+    Phase 2B 实现 drift-detection 基线机制之前，必须先加固 `apply()`
+    让这两处异常也进入等价于场景 A/B 的处理路径，并补齐四类护栏
+    测试（`install()` 异常、首次 `reload()` 异常、rollback
+    `restore()` 异常、rollback 第二次 `reload()`/健康复核失败）；
+    在这个加固完成之前，不能假设当前代码已经对所有 apply 失败模式
+    提供了安全的回滚保证。
 
 ## 考虑过的替代方案
 
