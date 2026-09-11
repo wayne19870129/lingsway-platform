@@ -975,3 +975,33 @@ adapter、DTO/编排改动、独立的 reconciliation 工具/作业、
   provisioning named-lock 持有跨度 /
   `DEFAULT_LOCK_TIMEOUT_SECONDS = 30` blocker **本 PR 未处理，仍然
   存在**，必须在真实 provider wiring 前单独解决。
+
+  **本 PR review 过程中的第四轮修订（接入 CI + 独立 pinned-upstream
+  contract 校验）**：独立审查指出两处 Major——(1)
+  `infrastructure/marzban/patches/tests` 当时完全没有接入 GitHub CI，
+  `.github/workflows/ci.yml` 的 `backend` job 只跑
+  `backend/tests/**`，意味着即使 patch/drift-guard/contract 被后续
+  改动破坏，现有 required checks 仍可能全绿。修复：新增独立
+  `marzban-contract` job，在专属 runner 上安装 pinned
+  `pydantic==2.10.4`/`fastapi==0.115.2`/`starlette==0.40.0` 后运行
+  `python infrastructure/marzban/patches/verify_pinned_upstream.py`
+  与 `python -m pytest infrastructure/marzban/patches/tests -v`；不与
+  `backend` job 共用 Python 环境，不污染其依赖版本；job
+  无条件运行（不做路径过滤），因此即使将来把它加入 `main` 分支保护的
+  required checks 也不会在不相关的 PR 上永久 pending。(2)
+  `apply_patch.sh --check` 只证明补丁自身的 context 行仍能套用到给定
+  source tree，并不证明 pinned commit 的其它文件仍然构成同一个
+  contract——具体地，`app/xray/operations.py` 才是 Marzban 内部实际
+  计算 Xray client email 公式的地方，若上游未来只改这个文件、不动
+  `app/models/user.py`，drift guard 完全不会察觉。修复：新增
+  `infrastructure/marzban/patches/pinned_upstream_manifest.py`
+  （pinned commit、三个受影响文件——`app/models/user.py`、
+  `app/xray/operations.py`、`requirements.txt`——及其 sha256、Xray
+  email 公式字符串、pinned 依赖版本的唯一权威记录）与
+  `verify_pinned_upstream.py`（fail-closed 校验器：任一文件抓取失败、
+  哈希不符、公式缺失、依赖版本漂移，均非零退出并汇报全部问题，从不
+  跳过或退回旧内容）。`tests/test_pinned_upstream_contract.py`
+  用真实网络抓取 + 有针对性的 monkeypatch 逐项验证该校验器自身的
+  fail-closed 行为。这是与 patch 可套用性验证（`apply_patch.sh
+  --check`）互补、独立存在的第二层保证，两者含义不同，缺一不可。
+  以上均已落地并通过验证（19/19 测试通过，含新增的 8 个）。

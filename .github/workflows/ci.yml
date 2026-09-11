@@ -114,6 +114,32 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: docker build -f frontend/Dockerfile -t lingsway-frontend:t5f .
 
+  marzban-contract:
+    # TASK-T16 Phase 2B4: the pinned Marzban routing_principal source
+    # patch and its contract tests (infrastructure/marzban/patches/) are
+    # NOT covered by the `backend` job above -- they depend on Marzban's
+    # own pinned dependency versions (pydantic==2.10.4/fastapi==0.115.2),
+    # not this repository's backend/pyproject.toml pins, so they run in
+    # their own isolated job/runner rather than polluting the backend
+    # job's Python environment. Runs unconditionally (like every other
+    # job here, not path-filtered) so it can never become a required
+    # check that sits permanently pending on PRs that don't touch
+    # infrastructure/marzban/**.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install pinned Marzban contract dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pydantic==2.10.4 fastapi==0.115.2 starlette==0.40.0 httpx pytest
+      - name: Verify pinned Marzban upstream contract (fail-closed)
+        run: python infrastructure/marzban/patches/verify_pinned_upstream.py
+      - name: Run Marzban routing_principal patch contract tests
+        run: python -m pytest infrastructure/marzban/patches/tests -v
+
   backend-image:
     runs-on: ubuntu-latest
     steps:

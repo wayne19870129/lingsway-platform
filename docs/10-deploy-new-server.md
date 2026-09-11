@@ -222,7 +222,10 @@ them in the GitHub web UI for `wayne19870129/lingsway-platform`.
 4. Enable **Require approvals** and choose the repository's review policy.
 5. Enable **Require status checks to pass before merging**, then select the CI
    and Security checks, including backend, lint, frontend, backend-image,
-   gitleaks, python-audit, and npm-audit.
+   marzban-contract, gitleaks, python-audit, and npm-audit. `marzban-contract`
+   runs unconditionally on every PR (not path-filtered), so adding it as
+   required cannot leave it permanently pending on PRs that don't touch
+   `infrastructure/marzban/**`.
 6. Enable **Require branches to be up to date before merging**.
 7. Enable **Do not allow bypassing the above settings** where available.
 8. Ensure **Allow force pushes** and **Allow deletions** are disabled.

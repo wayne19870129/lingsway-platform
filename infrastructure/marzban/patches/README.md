@@ -97,6 +97,60 @@ actually rebuilds/deploys a patched Marzban image is responsible for
 cloning/extracting the pinned commit and invoking this script as a
 fail-closed build step, and must not proceed past a non-zero exit.
 
+`apply_patch.sh --check` only proves the patch's own context lines still
+apply to whatever source tree it is pointed at — it says nothing about
+whether the pinned commit's *other* files still form the same contract
+this repository depends on. `verify_pinned_upstream.py` is the other,
+independent layer: see "Pinned-upstream contract verification" below.
+
+## Pinned-upstream contract verification (`verify_pinned_upstream.py`)
+
+`app/models/user.py` is not the only file this patch's correctness
+depends on. `app/xray/operations.py` is where Marzban actually computes
+the Xray client email this repository must match
+(`f"{dbuser.id}.{dbuser.username}"`) — if a future upstream change alters
+that formula without touching `app/models/user.py` at all, the patch
+would still apply cleanly (passing `apply_patch.sh --check`) while
+`routing_principal` silently stopped matching what Xray actually
+authenticates against. Likewise, the contract tests below are only
+meaningful under the exact pinned dependency versions they were verified
+against (`pydantic==2.10.4`, `fastapi==0.115.2`, `starlette==0.40.0`,
+`SQLAlchemy==2.0.36`).
+
+`pinned_upstream_manifest.py` is the single source of truth for the
+pinned commit, the three files this contract depends on
+(`app/models/user.py`, `app/xray/operations.py`, `requirements.txt`) and
+their verified sha256 hashes, the exact Xray email formula, and the
+pinned dependency versions — both `verify_pinned_upstream.py` and the
+pytest fixtures (`tests/_pinned_upstream.py`) import from it so these
+facts are recorded in exactly one place.
+
+`verify_pinned_upstream.py` fetches all three files fresh over the
+network and fails closed (non-zero exit, every problem reported, never a
+skip) if: any fetch fails, any file's hash no longer matches, the exact
+Xray email formula is no longer present in `app/xray/operations.py`, or
+any of the four pinned dependency versions is no longer pinned exactly
+in `requirements.txt`. Run it directly:
+
+```
+python infrastructure/marzban/patches/verify_pinned_upstream.py
+```
+
+CI (`.github/workflows/ci.yml`'s `marzban-contract` job) runs this before
+the pytest contract suite, so a change to any of these three pinned
+files — not just `app/models/user.py` — that breaks the contract fails
+the build. `test_pinned_upstream_contract.py` covers this verifier's own
+fail-closed behavior (fetch failure, hash mismatch, missing formula,
+dependency drift) with real assertions, deliberately breaking one check
+at a time via monkeypatching rather than relying on the live network
+state to happen to be broken.
+
+This verifier and `apply_patch.sh --check` are deliberately two separate
+layers: upstream **contract** verification (do the files this patch
+depends on still say what we think they say) and patch **applicability**
+verification (does the patch's own diff still apply to the current
+target file). Passing one does not imply the other.
+
 ## Upstream source: fetched, not vendored
 
 This patch set does **not** commit a copy of Marzban's `app/models/
@@ -177,7 +231,25 @@ Also included: `test_patch_drift_guard.py`, which proves the fail-closed
 contract with real `git apply` runs (not simulated): applying the patch
 to a correct pinned copy succeeds; applying it to a deliberately mutated
 copy (simulating upstream drift in the exact context the patch depends
-on) fails closed with a non-zero exit and touches nothing.
+on) fails closed with a non-zero exit and touches nothing. And
+`test_pinned_upstream_contract.py`, covering `verify_pinned_upstream.py`
+itself — see "Pinned-upstream contract verification" above.
+
+## CI (`.github/workflows/ci.yml`'s `marzban-contract` job)
+
+This entire test suite (patch drift guard + routing_principal contract +
+pinned-upstream contract) runs in CI, in its own job — not folded into
+the `backend` job, since it needs Marzban's pinned dependency versions
+(`pydantic==2.10.4`/`fastapi==0.115.2`/`starlette==0.40.0`), not this
+repository's own `backend/pyproject.toml` pins, and running it in the
+same job/environment as `backend`'s tests would let one silently
+override the other's installed versions. The job runs unconditionally on
+every PR (not path-filtered), the same as every other job in this
+workflow, specifically so it can never become a required check that sits
+permanently pending on a PR that happens not to touch
+`infrastructure/marzban/**`. See `docs/10-deploy-new-server.md`'s
+"Protect `main`" section for whether/how to add it to GitHub's required
+status checks.
 
 ## Explicitly out of scope here
 
