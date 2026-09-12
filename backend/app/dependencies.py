@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -16,9 +16,48 @@ from sqlalchemy.orm import Session
 from backend.app.core.database import get_db
 from backend.app.core.security import create_access_token, decode_access_token
 from backend.app.models import Customer, CustomerRole, CustomerStatus, JwtSession
+from backend.app.providers.registry import ProviderRegistry
 
 DbSession = Annotated[Session, Depends(get_db)]
 bearer = HTTPBearer(auto_error=False)
+
+
+class ProviderRegistryNotConfigured(RuntimeError):
+    """Raised by :func:`get_provider_registry` when the application-scoped
+    ``ProviderRegistry`` was never installed on ``app.state`` -- i.e. the
+    FastAPI ``lifespan`` in ``main.py`` never ran for this app instance.
+
+    TASK-T16 Phase 2B8 (independent-review Major 1): this dependency
+    fails closed instead of silently constructing an unmanaged fallback
+    registry that nothing would ever close. Every real ASGI server
+    (uvicorn included) always runs the lifespan, so this is only ever
+    reachable from a test that built ``TestClient(app)`` without the
+    ``with`` context manager needed to trigger startup/shutdown events --
+    such a test must either use ``with TestClient(app) as client:`` or
+    override this dependency (``app.dependency_overrides``) explicitly.
+    """
+
+
+def get_provider_registry(request: Request) -> ProviderRegistry:
+    """The one place route handlers reach the application-scoped
+    ``ProviderRegistry`` -- built exactly once by ``main.py``'s
+    ``lifespan`` and stored on ``app.state``, so every request within the
+    same process reuses the same instance (and, once a real
+    resource-owning provider is wired in, its resources) instead of each
+    route constructing and discarding its own. Raises
+    :class:`ProviderRegistryNotConfigured` (fail closed, never a silent
+    unmanaged fallback) if the lifespan never ran.
+    """
+    registry: ProviderRegistry | None = getattr(request.app.state, "provider_registry", None)
+    if registry is None:
+        raise ProviderRegistryNotConfigured(
+            "app.state.provider_registry is not set -- the FastAPI lifespan "
+            "never ran for this app instance"
+        )
+    return registry
+
+
+ManagedRegistry = Annotated[ProviderRegistry, Depends(get_provider_registry)]
 
 
 @dataclass(frozen=True, slots=True)

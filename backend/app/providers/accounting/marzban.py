@@ -388,6 +388,7 @@ class MarzbanAccountingProvider:
         self._owns_client = client is None
         self._client = client or httpx.Client(verify=verify_tls, timeout=timeout_seconds)
         self._token: str | None = None
+        self._close_failed = False
 
     def __repr__(self) -> str:
         # Deliberately not the dataclass-style "every field" repr: the
@@ -399,8 +400,37 @@ class MarzbanAccountingProvider:
         )
 
     def close(self) -> None:
-        if self._owns_client:
+        """Closes the self-created client, never a client this provider
+        did not create.
+
+        Independent review (PR #65, round 4): ``httpx.Client.close()``
+        (confirmed in the installed 0.28.1) sets its internal state to
+        CLOSED *before* calling the underlying transport's ``close()``.
+        If the transport close then raises, the client is already marked
+        CLOSED, so a later ``self._client.close()`` call would silently
+        no-op instead of retrying -- turning a still-failed close into an
+        apparent success. Once a close attempt has actually raised, this
+        provider can never truly retry the same client's cleanup, so it
+        tracks a permanent ``_close_failed`` flag and keeps re-raising on
+        every later call instead of calling ``self._client.close()``
+        again (see ``SubscriptionTransportProvider.close()`` for the same
+        fix and the full rationale)."""
+        if not self._owns_client:
+            return
+        if self._close_failed:
+            raise RuntimeError(
+                "MarzbanAccountingProvider's owned httpx.Client previously failed "
+                "to close; httpx.Client.close() cannot be safely retried once it "
+                "has raised (it marks its internal state CLOSED before actually "
+                "closing the transport), so this failure is permanent for this "
+                "provider instance and must keep surfacing rather than being "
+                "silently treated as success"
+            )
+        try:
             self._client.close()
+        except Exception:
+            self._close_failed = True
+            raise
 
     # -- auth -----------------------------------------------------------
 

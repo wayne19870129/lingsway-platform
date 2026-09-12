@@ -14,6 +14,7 @@ from starlette.requests import Request
 
 from backend.app.api.public import payment_notice, place_order
 from backend.app.api.subscription import get_subscription
+from backend.app.core.config import Settings
 from backend.app.core.database import Base
 from backend.app.domain.capacity import CapacityExceededError
 from backend.app.domain.ordering import Order as DomainOrder
@@ -36,7 +37,16 @@ from backend.app.models import (
     UsagePeriodStatus,
 )
 from backend.app.providers.base import CapacityDTO
+from backend.app.providers.registry import ProviderRegistry, build_registry
 from backend.app.schemas.public import OrderCreate
+
+
+def _registry() -> ProviderRegistry:
+    """A fresh all-mock registry for direct route-function calls in this
+    file, which bypass FastAPI's dependency injection entirely (TASK-T16
+    Phase 2B8: route handlers now require an explicit ``registry``
+    parameter instead of building one internally)."""
+    return build_registry(Settings())
 
 
 def add_available_egress_endpoint(
@@ -136,6 +146,7 @@ def test_order_to_payment_notice_state_flow(db_session: Session) -> None:
         OrderCreate(plan_id=plan.id, client_request_id="request-001"),
         db_session,
         actor,
+        _registry(),
     )
     assert order.status is OrderStatus.PENDING
     assert order.payment_status is PaymentStatus.UNPAID
@@ -144,6 +155,7 @@ def test_order_to_payment_notice_state_flow(db_session: Session) -> None:
         order.id,
         db_session,
         actor,
+        _registry(),
     )
     assert result == {"status": "notified"}
     persisted = db_session.get(Order, order.id)
@@ -200,6 +212,7 @@ def test_place_order_rejects_when_no_dedicated_ip_available(db_session: Session)
             OrderCreate(plan_id=plan.id, client_request_id="no-ip-request-001"),
             db_session,
             actor,
+            _registry(),
         )
     assert excinfo.value.status_code == 409
     assert db_session.scalar(
@@ -245,6 +258,7 @@ def test_place_order_rejects_when_only_mismatched_egress_endpoints_exist(
             OrderCreate(plan_id=plan.id, client_request_id="mismatch-request-001"),
             db_session,
             actor,
+            _registry(),
         )
     assert excinfo.value.status_code == 409
     assert db_session.scalar(
@@ -272,6 +286,7 @@ def test_place_order_precheck_does_not_mutate_egress_endpoint(db_session: Sessio
         OrderCreate(plan_id=plan.id, client_request_id="no-mutate-request-001"),
         db_session,
         actor,
+        _registry(),
     )
 
     db_session.expire_all()
@@ -348,7 +363,7 @@ def test_subscription_feed_has_complete_private_headers_and_ua_formats(
         ("unknown-client/1", "text/yaml; charset=utf-8"),
     ]:
         response = get_subscription(
-            "subscription-token-001", request_with_ua(user_agent), db_session
+            "subscription-token-001", request_with_ua(user_agent), db_session, _registry()
         )
         assert response.headers["content-type"] == expected_content_type
         assert response.headers["cache-control"] == "private, no-store"

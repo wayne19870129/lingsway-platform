@@ -10,7 +10,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from backend.app.core.config import Settings, get_settings
 from backend.app.domain.capacity import ensure_capacity
 from backend.app.domain.ordering import (
     BillingCommand,
@@ -31,7 +30,7 @@ from backend.app.domain.provisioning import (
 )
 from backend.app.domain.subscription_render import RenderedSubscription, render_subscription
 from backend.app.infra.gateway_route_lock import GatewayRouteBindingLockError
-from backend.app.providers.registry import ProviderRegistry, build_registry
+from backend.app.providers.registry import ProviderRegistry
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,11 +45,20 @@ def build_services(
     state: ProvisioningState,
     runs: ProvisionRunStore,
     *,
-    settings: Settings | None = None,
-    providers: ProviderRegistry | None = None,
+    providers: ProviderRegistry,
 ) -> ServiceContainer:
-    """Compose domain services from the environment-selected provider registry."""
-    registry = providers or build_registry(settings or get_settings())
+    """Compose domain services from the caller-supplied, already-owned
+    provider registry.
+
+    TASK-T16 Phase 2B8 (independent-review Major 3): ``providers`` is
+    required, not an optional fallback to a freshly built, unowned
+    registry -- exactly one ``ProviderRegistry`` must exist per process
+    (built and closed by ``main.py``'s FastAPI ``lifespan`` or the
+    scheduler's ``main()``), and every caller here must be handed that
+    same managed instance rather than being allowed to silently
+    construct (and never close) its own.
+    """
+    registry = providers
     return ServiceContainer(
         providers=registry,
         provisioning=ProvisioningService(
@@ -70,13 +78,10 @@ def provision(
     state: ProvisioningState,
     runs: ProvisionRunStore,
     *,
-    settings: Settings | None = None,
-    providers: ProviderRegistry | None = None,
+    providers: ProviderRegistry,
 ) -> ProvisionOutcome:
     """Run the single supported T3 nine-step provisioning orchestration."""
-    return build_services(
-        state, runs, settings=settings, providers=providers
-    ).provisioning.provision(request)
+    return build_services(state, runs, providers=providers).provisioning.provision(request)
 
 
 def confirm_payment_and_provision(
@@ -88,8 +93,7 @@ def confirm_payment_and_provision(
     order_state: OrderWorkflowState,
     payment_reference: str,
     *,
-    settings: Settings | None = None,
-    providers: ProviderRegistry | None = None,
+    providers: ProviderRegistry,
     payment_provider_code: str = "manual",
 ) -> ProvisionOutcome | None:
     """Run the three-phase paid-order workflow.
@@ -97,8 +101,13 @@ def confirm_payment_and_provision(
     Ordering owns DB transitions, while ``ProvisioningService`` owns only the
     external nine-step saga.  Each DB phase has its own transaction supplied by
     ``order_state``; no provider call is made while one is open.
+
+    ``providers`` is required (TASK-T16 Phase 2B8, independent-review
+    Major 3): the caller must supply the one process-managed
+    ``ProviderRegistry`` it does not own -- this function must never
+    construct (and thus never be responsible for closing) its own.
     """
-    registry = providers or build_registry(settings or get_settings())
+    registry = providers
     capacity = registry.egress.capacity()
 
     # Capacity is checked before the payment provider is called or PAID is
@@ -130,7 +139,7 @@ def confirm_payment_and_provision(
     # (provision_apply_gateway, APPLY_GATEWAY..NOTIFY) may mutate it, so
     # the named lock is acquired only immediately before that call --
     # never for the external-provider-only steps below.
-    provisioning = build_services(state, runs, settings=settings, providers=registry).provisioning
+    provisioning = build_services(state, runs, providers=registry).provisioning
     try:
         prepared = provisioning.provision_prepare(request)
     except Exception as exc:
@@ -253,12 +262,13 @@ def confirm_manual_payment(
     order: object,
     reference: str,
     *,
-    settings: Settings | None = None,
-    providers: ProviderRegistry | None = None,
+    providers: ProviderRegistry,
 ) -> None:
-    """Forward manual payment confirmation through the selected provider."""
-    registry = providers or build_registry(settings or get_settings())
-    registry.payment.confirm_manual(order, reference)
+    """Forward manual payment confirmation through the caller-supplied,
+    already-owned provider registry (see ``confirm_payment_and_provision``'s
+    docstring for why ``providers`` is required, not an optional
+    self-constructing fallback)."""
+    providers.payment.confirm_manual(order, reference)
 
 
 def render_customer_subscription(

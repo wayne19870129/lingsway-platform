@@ -1489,3 +1489,476 @@ adapter、DTO/编排改动、独立的 reconciliation 工具/作业、
   `registry.py` 未改动、无 patched Marzban 镜像构建/部署、无真实
   staging 凭据/真实网络调用、无 409 reconciliation、无通用 retry
   框架、无 Alembic/schema 变更、无生产部署。
+
+- **Phase 2B8（本 PR）：Provider lifecycle / ownership 基础设施**
+
+  **背景**：PR #64（TASK-T16 Phase 2B7）合入 `main`
+  （`46577b137102b40d67d1bab35fbb45844cf47a99`）后，
+  `MarzbanAccountingProvider` 已经具备 `_owns_client`/`close()`，但
+  `backend/app/providers/registry.py` 的 `ProviderRegistry` 本身
+  没有任何 ownership/生命周期概念——它是一个纯数据容器
+  （`@dataclass(frozen=True, slots=True)`），而
+  `build_registry()` 在生产 API 路径（`public.py`/`admin.py`/
+  `subscription.py`/`services.py`）和 scheduler
+  （`workers/scheduler.py`）里，都是**每次调用都现造一个新实例**，
+  从不持有、也从不关闭。今天因为 `build_registry()` 只能装配
+  mock/noop provider（全部无状态、无需关闭），这不产生真实资源泄漏；
+  但这是真实 provider（`MarzbanAccountingProvider`、
+  `SubscriptionTransportProvider`，两者都持有/可能持有一个长期
+  `httpx.Client`）接入 registry 之前必须先解决的 blocker——否则每个
+  HTTP 请求、每个 60/300 秒的 scheduler tick，都会创建一个永远不会
+  被 `close()` 的新 `httpx.Client`。
+
+  **本阶段目标**：只解决这一个 blocker，不启用任何真实 provider，不
+  产生任何真实外部副作用。
+
+  **本阶段边界（严格执行下面"明确禁止"一节）**：不修改
+  `ACCOUNTING_PROVIDER=marzban` 的可用性、不启用 Webshare/
+  `XrayFileProvider`/`MihomoForwarderProvider`/
+  `SubscriptionTransportProvider`、不连接真实 Marzban/Webshare、不用
+  真实凭据、不构建/部署 patched Marzban 镜像、不碰生产 VPS、不做
+  Xray/Mihomo reload、不做 existing-data reconciliation、不改
+  Alembic/schema、不开始生产部署、不做与 lifecycle 无关的重构
+  （尤其不碰 subscription parsing/节点解析/transport 业务逻辑本身）。
+
+  **验收标准**：
+  1. 重新枚举并覆盖全部生产 `build_registry()` 调用点（不只是已知的
+     几个），包括 `backend/app/api/public.py`、
+     `backend/app/api/admin.py`、`backend/app/api/subscription.py`、
+     `backend/app/services.py`、`backend/app/workers/scheduler.py`。
+  2. `ProviderRegistry` 获得明确的 ownership/lifecycle：
+     resource-owning provider 有确定的关闭路径；`close()` 幂等；
+     同一个 owned resource 不 double-close；provider 自己创建的
+     client 由 provider/registry 生命周期关闭；外部注入的 client
+     不被 provider 擅自关闭；`build_registry()` 本身继续保持"构造时
+     无 network/Docker/filesystem/shell I/O"的既有契约（不变）。
+  3. FastAPI backend 有明确的 application/process 生命周期：进程
+     启动时创建受管理的 `ProviderRegistry`，HTTP 请求复用同一个实例，
+     进程关闭时确定性 `close()`，不允许 `/orders`、subscription feed、
+     admin usage sync、health 等请求各自重复创建从不关闭的
+     `httpx.Client`。
+  4. 生产 API 路径里的临时 `build_registry(get_settings())` 全部替换
+     为显式复用同一个受管理 registry；为兼容既有单元测试保留的
+     helper/factory 不得形成新的生产资源泄漏路径。
+  5. Scheduler 生命周期：一个 scheduler 进程只创建一次
+     `ProviderRegistry`，loop 多轮复用；正常退出、异常退出都在
+     `finally` 等确定性路径关闭；非 `--loop` 的 one-shot 模式也必须
+     关闭；不允许每个 tick 创建一个新的长期 `httpx.Client` 却从不
+     `close()`。
+  6. 检查并修复目前已经持有/可能持有长期 resource 的 provider：
+     `MarzbanAccountingProvider`（已有 `_owns_client`/`close()`，补
+     测试证明自建 client 会被关闭、注入 client 不被误关、close 多次
+     安全）；`SubscriptionTransportProvider`（当前 `client or
+     httpx.Client(...)` 但完全没有 ownership/close 语义——确认是
+     同一类资源泄漏问题，做最小修复：记录 `_owns_client`，新增
+     确定性、幂等的 `close()`，不改动其 subscription 解析/节点逻辑/
+     transport 业务行为）。
+  7. 新增测试证明：all-mock/noop registry 继续可以在无 network、无
+     Docker、无真实文件系统依赖环境下构造；多个 FastAPI 请求复用同一
+     application-scoped registry；shutdown 对 owned provider/client
+     只执行一次正确关闭；外部注入 client 不被误关；scheduler 连续
+     执行至少两个 batch 时只创建一个 registry；scheduler 正常/异常
+     退出最终都会关闭 registry；one-shot scheduler 同样关闭；本轮
+     重构没有改变 provisioning、payment、routing、named-lock、
+     rollback 现有语义（即 ADR-016/017/018 相关测试全部保持绿色）。
+  8. 若发现必须修改 `backend/app/domain/**` 或
+     `backend/app/providers/base.py` 才能完成 lifecycle 设计：立即
+     停止代码实现，先确认是否需要新 ADR（AGENTS.md 铁律第 5 条），
+     不得直接改。（结果：本阶段最终**未**触碰这两处——lifecycle 是
+     纯 infrastructure 层的 registry/API-wiring/scheduler 关注点，
+     不涉及任何新的架构决策，ADR-016/017/018 均不受影响，未新增
+     ADR。）
+
+  **实现摘要**：
+  - `backend/app/providers/registry.py`：`ProviderRegistry` 从
+    `@dataclass(frozen=True, slots=True)` 改为 `@dataclass(slots=True)`
+    （不再 frozen，仅为了让 `close()` 能设置一个私有 `_closed` 标记）。
+    新增 `close()`：对持有的十个 provider 逐一 duck-type 检测
+    `close` 属性，存在则调用；用 `_closed` 标记保证幂等（第二次及以后
+    的调用直接返回，不重复关闭）。新增 `__enter__`/`__exit__`，
+    `ProviderRegistry` 因此也是一个 context manager。不需要知道具体
+    哪个 provider 拥有可关闭资源——今天全部 mock/noop provider 都没有
+    `close()` 方法，被安全跳过。
+  - `backend/app/main.py`：新增 `lifespan()`（`@asynccontextmanager`），
+    在 FastAPI 启动时 `build_registry(get_settings())` 一次，存到
+    `app.state.provider_registry`；`finally` 块保证进程关闭时
+    `registry.close()` 总会执行，即使某个请求处理中抛出异常。
+    `app = FastAPI(..., lifespan=lifespan)`。
+  - `backend/app/dependencies.py`：新增 `get_provider_registry(request)`
+    读取 `request.app.state.provider_registry`；若 lifespan 未运行
+    （例如测试用裸 `TestClient(app)`，不经过 `with` 触发生命周期事件），
+    惰性构建一次并缓存到 `app.state` 上，保证同一进程内后续调用仍拿到
+    同一实例。`ManagedRegistry = Annotated[ProviderRegistry,
+    Depends(get_provider_registry)]` 供路由函数直接声明为参数类型。
+  - `backend/app/api/public.py`/`subscription.py`/`admin.py`：
+    `place_order`/`payment_notice`/`get_subscription`/
+    `admin_confirm_payment`/`admin_accounting_health`/
+    `admin_sync_usage` 六个函数新增 `registry: ManagedRegistry` 参数，
+    全部内部 `build_registry(get_settings())` 调用点替换为直接读取
+    该参数；`admin_confirm_payment` 额外把 `registry` 通过
+    `confirm_payment_and_provision(..., providers=registry)` 显式传入
+    （`services.py` 三个函数早就有 `providers: ProviderRegistry | None`
+    可选参数，本轮不改 `services.py` 本身，只是不再让生产路径依赖它的
+    默认值）。移除三个文件里因此变成未使用的 `build_registry`/
+    `get_settings` import。
+  - `backend/app/workers/scheduler.py`：`main()` 改为在
+    `argparse` 解析后先 `build_scheduler_registry()` 一次，`while`
+    循环（含非 `--loop` 的单次执行）用
+    `run_batch(registry_factory=lambda: registry)`
+    复用同一个已构建实例，`try/finally` 保证正常 `return`、
+    `--loop` 达到条件退出、以及循环体内任何异常都会在退出前
+    `registry.close()`。`run_batch()`/`build_scheduler_registry()`
+    自身签名未变，向后兼容 `test_scheduler.py` 原有测试。
+  - `backend/app/providers/transport/subscription.py`：
+    `SubscriptionTransportProvider.__init__` 新增 `self._owns_client
+    = client is None`（`MarzbanAccountingProvider` 已有的同一模式）
+    和 `self._closed = False`；新增 `close()`，幂等，只关闭自建的
+    client，从不关闭外部注入的 client。未改动其订阅解析/节点解析/
+    transport 业务逻辑本身。
+  - `backend/app/providers/accounting/marzban.py`：未改动代码（其
+    `_owns_client`/`close()` 已在 Phase 2B7 实现），本阶段只补测试。
+
+  **测试影响**：因为 `place_order`/`payment_notice`/`get_subscription`/
+  `admin_confirm_payment` 这四个路由函数被直接（绕过 FastAPI DI）
+  调用的既有测试（`test_order_subscription_api.py`、
+  `test_admin_api.py`、`test_db_adapters.py`，共 8 处调用点）现在
+  必须显式传入一个 `registry` 参数，已全部更新为传入
+  `build_registry(Settings())`（或该文件已有等价 helper）构造的
+  all-mock registry，行为与之前"内部默认构建"完全等价，不影响这些
+  测试原本验证的业务逻辑。
+
+  **新增测试**（TASK-T16 Phase 2B8 round 1 专属，共 18 条——round 2
+  独立复审 Minor 1 指出此前误写成"22 条"，已更正）：
+  - `backend/tests/unit/test_registry.py`（+4）：
+    `test_all_mock_registry_close_is_a_safe_noop`、
+    `test_registry_close_calls_each_owned_providers_close_exactly_once`、
+    `test_registry_close_is_idempotent_never_double_closes`、
+    `test_registry_context_manager_closes_on_exit`。
+  - `backend/tests/unit/test_application_lifecycle.py`（新文件，+5）：
+    多个请求复用同一 application-scoped registry、lifespan 正常关闭时
+    `close()` 恰好一次、lifespan 在请求处理抛异常时仍然
+    `close()`（依赖 `@asynccontextmanager` 自身的 `finally` 语义）、
+    lifespan 未运行时 `get_provider_registry()` 惰性构建并在同进程内
+    复用、`get_provider_registry` 确实是 `main.py` 路由实际绑定的
+    依赖（非同名重复定义）。
+  - `backend/tests/unit/test_scheduler.py`（+3）：one-shot 模式
+    只构建一次 registry 且退出时关闭、`--loop` 连续至少两个 batch
+    只构建一次 registry（`registries_used` 全部是同一实例）、
+    `run_batch()` 抛异常时 `main()` 仍在 `finally` 关闭 registry。
+  - `backend/tests/unit/test_marzban_accounting_provider.py`（+3）：
+    自建 client 被 `close()` 关闭、注入 client 不被误关、`close()`
+    可安全重复调用。
+  - `backend/tests/unit/test_transport_provider.py`（+3）：
+    `SubscriptionTransportProvider` 同上三条（新增
+    `_owns_client`/`close()` 后首次获得测试覆盖）。
+  - 既有测试文件里新增/调整的 8 处调用点不计入上面的"新增测试"
+    条数，但同样在下面的验证结果里通过。
+
+  **验证**：
+  - `ruff check backend/` → All checks passed!
+  - `mypy backend/app backend/tests`（strict）→
+    Success: no issues found in 94 source files。
+  - `pytest backend/tests/unit backend/tests/guards -q` → **217 通过**
+    （199 既有 + 18 本阶段新增，0 回归）。
+  - `pytest backend/tests/integration -q`（本地 MariaDB 10.11，
+    `TEST_DATABASE_URL` 已设置）→ **50 通过、1 个失败**——失败项是
+    `test_mysql_84_database_is_reachable` 的 `VERSION()` 字符串检查
+    （沙箱是 MariaDB 10.11，非真实 MySQL 8.4），与本次改动完全无关的
+    既有环境限制，**本地未验证**真实 MySQL 8.4；ADR-016/017/018
+    相关的全部 provisioning/payment/routing/named-lock/rollback
+    production-backed 测试均在本次运行中保持绿色（未被本轮改动
+    影响其语义）。最终以 GitHub CI 的真实 MySQL 8.4 backend job 结果
+    为准。
+  - GitHub CI / Security / Risk classification：将在推送后、拿到
+    exact head SHA 后报告实际结果。
+
+  **仍未完成**（严格保持本阶段边界，未扩大 scope）：
+  `ACCOUNTING_PROVIDER=marzban` 依然不可选（`build_registry()` 本身
+  未改动，继续只能装配 mock/noop）；未启用 Webshare/
+  `XrayFileProvider`/`MihomoForwarderProvider`/
+  `SubscriptionTransportProvider`；未连接任何真实 Marzban/Webshare；
+  未使用真实凭据；未构建/部署 patched Marzban 镜像；未碰生产 VPS；
+  未做 Xray/Mihomo reload；未做 existing-data reconciliation；未改
+  Alembic/schema；未开始生产部署。
+
+- **Phase 2B8 round 2（本轮，ChatGPT 对 PR #65 exact head
+  `a8fa12b5d180fc145f9fe1abe4ac219c2212c704` 的独立复审，3 个
+  Major + 2 个 Minor）**：
+
+  **Major 1（`get_provider_registry()` 的 fallback 路径缺少
+  cleanup owner）**：独立验证后确认 **VALID**——lifespan 未运行时
+  （例如裸 `TestClient(app)`，不经 `with` 触发生命周期事件），
+  `get_provider_registry()` 之前会惰性 `build_registry()` 并缓存到
+  `app.state`，但没有任何东西会关闭这个实例；今天因为全部
+  provider 都是 mock/noop 而无害，一旦真实 resource-owning provider
+  接入，这条路径就是一个真实可达、且没有确定性 close 的泄漏点，
+  违反 Phase 2B8 验收标准第 4 条（"为兼容测试保留的 helper 不得形成
+  新的生产资源泄漏路径"）。修复：`get_provider_registry()` 改为
+  fail closed——`app.state.provider_registry` 不存在时抛出新的
+  `ProviderRegistryNotConfigured`（`RuntimeError` 子类），不再有任何
+  隐式 fallback 构造。生产 ASGI server（uvicorn）总会跑 lifespan，
+  这条路径因此只可能在测试里触发；受影响的测试改为要么用
+  `with TestClient(app) as client:` 触发 lifespan，要么直接断言
+  `ProviderRegistryNotConfigured` 被抛出。
+
+  **Major 2（`ProviderRegistry.close()` 在某个 provider 抛异常时
+  会永久跳过后续/无法重试）**：独立验证后确认 **VALID**——原实现在
+  遍历 provider 之前就把 `_closed = True` 设成真，如果第一个
+  provider（`egress`）的 `close()` 抛异常，异常会直接向外传播，
+  `accounting`/`transport` 等后续 provider 全部被跳过；且因为
+  `_closed` 已经是 `True`，第二次调用 `close()` 会立即返回，那些被
+  跳过的 provider 永远没有机会被重新关闭。修复：`close()` 改为对
+  每个 provider 独立 `try/except`，一个 provider 失败不影响其它
+  provider 继续被尝试关闭；新增 `_closed_provider_ids`（按
+  `id(provider)` 记录已经成功关闭、或确认无需关闭的 provider），
+  保证同一个 provider 不会被重复关闭，也保证同一个对象同时填两个
+  角色时只关闭一次；只有当本轮遍历里的每一个 provider 都成功（或
+  本来就没有 `close()`）时，`_closed` 才会变成 `True`；否则把全部
+  失败收集进一个 `ExceptionGroup` 并在遍历结束后抛出——失败会被
+  完整暴露，绝不静默吞掉。
+
+  **Major 3（`backend/app/services.py` 仍保留未托管的
+  `providers or build_registry(...)` fallback）**：独立验证后确认
+  **VALID**——`build_services()`/`provision()`/
+  `confirm_payment_and_provision()`/`confirm_manual_payment()` 四个
+  函数此前都允许在 `providers` 省略时自己 `build_registry()`，且不
+  拥有、也不关闭这个自建实例；虽然本轮已经让唯一的生产调用方
+  （`admin.py::admin_confirm_payment`）显式传入了受管理的
+  registry，但只要这四个 public 函数签名仍然"允许"自建，就仍然是
+  Phase 2B8 要消灭的同一类泄漏。核实发现：这四个函数在生产代码里
+  只有 `admin_confirm_payment` 一个调用方（已修复），仓库内其余全部
+  调用（`test_services_wiring.py` 六处、
+  `test_provisioning_phase_boundary.py` 二十五处）早就显式传入了
+  `providers=`，唯一的例外是一处遗留的 `settings=None`（同一测试
+  文件），修复：把 `providers` 从 `ProviderRegistry | None = None`
+  改成必填的 `providers: ProviderRegistry`（keyword-only），彻底删除
+  `providers or build_registry(settings or get_settings())` 这行
+  fallback 和随之变成死代码的 `settings` 参数、`Settings`/
+  `get_settings`/`build_registry` import；修正那一处遗留的
+  `settings=None` 调用。
+
+  **Minor 1（测试计数与实际不符）**：round 1 的 PR/TASK 文本写
+  "22 new tests"，但列出的加总是 4+5+3+3+3=18，套件差值也是
+  199→217（=18）。本条已经是文档措辞错误，不是代码问题——本轮
+  correction 一并把最终数字改成准确值（见下方"验证"）。
+
+  **Minor 2（部分测试没有真正证明 DI 路径）**：
+  `test_multiple_requests_reuse_the_same_application_scoped_registry`
+  之前只请求 `/health`（这个路由根本不依赖 `ManagedRegistry`），
+  `test_get_provider_registry_is_the_dependency_used_by_main_app`
+  只检查了 `callable(place_order)`，两者都没有真正证明"两次 FastAPI
+  请求通过被改动的 dependency 解析到同一个 registry"。修复：改用
+  真正声明了 `registry: ManagedRegistry` 参数的路由
+  （`admin_accounting_health`，配合 `app.dependency_overrides`
+  注入一个 admin 身份）发两次真实 HTTP 请求，断言两次都成功
+  且 `app.state.provider_registry` 前后同一实例。
+
+  **测试**：
+  - `backend/tests/unit/test_registry.py` 新增 3 条：一个 provider
+    的 `close()` 抛异常时其余 provider 仍被正确关闭
+    （`test_registry_close_still_closes_every_other_provider_when_one_raises`）；
+    第二次 `close()` 只重试之前失败的 provider，不重复关闭已成功的
+    （`test_registry_close_retries_only_the_provider_that_previously_failed`）；
+    同一对象填两个角色只关闭一次
+    （`test_registry_close_closes_a_shared_provider_object_only_once`）。
+  - `backend/tests/unit/test_application_lifecycle.py`：
+    `test_registry_dependency_fails_closed_when_lifespan_did_not_run`
+    替换原来的"惰性构建"测试，断言
+    `ProviderRegistryNotConfigured` 被抛出；
+    `test_multiple_requests_reuse_the_same_application_scoped_registry`
+    改为通过 `admin_accounting_health` 真实路由验证（Minor 2）。
+  - `backend/tests/integration/test_provisioning_phase_boundary.py`：
+    删除一处遗留的 `settings=None` 调用（`confirm_payment_and_provision`
+    不再接受该参数）。
+
+  **验证**：`ruff check backend/` 全过；
+  `mypy backend/app backend/tests`（strict）无问题；
+  `pytest backend/tests/unit backend/tests/guards -q` → **220 通过**
+  （217 + 本轮新增 3 条，0 回归，round 1 的全部测试保持绿色）；
+  `pytest backend/tests/integration -q` → 50 通过、1 个与本次改动
+  无关的既有环境限制失败（同上，MariaDB 10.11 沙箱版本字符串检查）。
+  Phase 2B8 累计新增测试：18（round 1）+ 3（round 2）= **21 条**，
+  更正 round 1 文本里"22 条"的笔误（Minor 1）。
+
+  **仍未完成**：与 round 1 完全一致，未扩大 scope。
+
+- **Phase 2B8 round 3（本轮，ChatGPT 对 PR #65 exact head
+  `7cfda7c6725bd4467245b61dcb997d836087edf9` 的独立复审，1 个
+  Major，0 个 Minor）**：
+
+  **Major 1（`SubscriptionTransportProvider.close()` 在 owned
+  client 关闭失败时会在重试时被误报为成功）**：独立验证后确认
+  **VALID**——round 1 引入的实现在尝试真正关闭 client **之前**就把
+  `self._closed` 设成 `True`：
+
+  ```python
+  def close(self) -> None:
+      if self._closed:
+          return
+      self._closed = True
+      if self._owns_client:
+          self._client.close()
+  ```
+
+  如果 `self._client.close()` 本次抛异常（例如网络层临时错误），
+  `_closed` 已经变成 `True`；`ProviderRegistry.close()`（round 2
+  已修复为逐个 provider 独立 `try/except`、支持重试）下一次重试
+  调这个 provider 的 `close()` 时，会因为 `if self._closed: return`
+  立即返回、不再尝试真正关闭底层 client，把一次仍然失败的关闭
+  静默报告成"成功"——这正是 round 2 刚刚在 `ProviderRegistry` 层面
+  修复的同一类"跳过即视为成功"问题，只是这次出现在 provider 自己
+  身上。复查 `MarzbanAccountingProvider.close()`（同样是
+  `_owns_client` 模式的先例）确认它完全没有 `_closed` 标志——
+  `def close(self) -> None: if self._owns_client: self._client.close()`
+  ——因此不存在同类假成功路径，按审查意见"除非能复现同类假成功
+  路径，否则不要改动它"的要求，未做任何修改。
+
+  修复：删除 `SubscriptionTransportProvider` 的 `_closed` 字段与
+  `if self._closed: return` / `self._closed = True` 两行判断，改成
+  与 `MarzbanAccountingProvider.close()` 完全一致的模式——幂等性
+  完全依赖 `httpx.Client.close()` 自身"可安全重复调用"的契约（已经
+  关闭的 client 上再调用是无操作；上次调用失败过的 client 上再调用
+  会真正重试关闭，而不是静默判定为已关闭）。
+
+  **测试**：`backend/tests/unit/test_transport_provider.py` 新增
+  2 条：
+  - `test_close_retries_correctly_when_the_owned_client_close_call_fails`：
+    只针对 provider 自身，把 owned client 的 `close` 换成一个"第一次
+    抛异常、第二次真正关闭"的替身，断言第一次 `adapter.close()`
+    抛出异常且 client 未真正关闭，第二次 `adapter.close()` 真正重试
+    并成功关闭——证明 provider 自己不带假成功标志位。
+  - `test_registry_close_surfaces_transport_close_failure_and_retries_it_only`：
+    在 `ProviderRegistry` 级别复现审查意见要求的完整场景——把这个
+    provider 放进 `egress` 槽位、另一个 `_ClosableProvider` 放进
+    `transport` 槽位（在遍历顺序里排在它之后），断言：(1) 第一次
+    `registry.close()` 通过 `ExceptionGroup` 暴露失败；(2) 排在它
+    之后的 provider 仍然被正常关闭；(3) 第二次 `registry.close()`
+    只重试这一个失败过的 provider，真正让底层 client 关闭成功，且
+    另一个 provider 没有被重复关闭。
+
+  **验证**：`ruff check backend/` 全过；
+  `mypy backend/app backend/tests`（strict，使用项目 `/tmp/venv312`
+  虚拟环境，已确认包含 fastapi/pytest/sqlalchemy 等依赖）无问题；
+  `pytest backend/tests/unit backend/tests/guards -q` → **222 通过**
+  （220 + 本轮新增 2 条，0 回归）；`pytest backend/tests/integration -q`
+  （`TEST_DATABASE_URL=mysql+pymysql://lingsway:lingsway@127.0.0.1/lingsway_test`，
+  本地 MariaDB 10.11）→ 50 通过、1 个与本次改动无关的既有环境限制
+  失败（`test_mysql_84_database_is_reachable`：本地沙箱只有 MariaDB
+  10.11，不是 MySQL 8.4，此断言**本地未验证**，最终以 GitHub CI 的
+  真实 MySQL 8.4 backend job 为准）。Phase 2B8 累计新增测试：
+  18（round 1）+ 3（round 2）+ 2（round 3）= **23 条**。
+
+  **仍未完成**：与 round 1/round 2 完全一致，未扩大 scope。
+
+- **Phase 2B8 round 4（本轮，ChatGPT 对 PR #65 exact head
+  `601fa6ed7e4e6982069b43266fda6a84d93fa078` 的独立复审，2 个
+  Major，1 个 Minor）**：
+
+  **Major 1（round 3 的"依赖 `httpx.Client.close()` 自身幂等重试"
+  这个假设本身就是错的，`SubscriptionTransportProvider` 和
+  `MarzbanAccountingProvider` 都受影响）**：独立验证后确认
+  **VALID**——直接读 CI 实际安装的 `httpx==0.28.1` 源码
+  （`Client.close()`）：
+
+  ```python
+  def close(self) -> None:
+      if self._state != ClientState.CLOSED:
+          self._state = ClientState.CLOSED
+          self._transport.close()
+          ...
+  ```
+
+  `self._state` 在调用 `self._transport.close()` **之前**就被设成
+  `CLOSED`；如果 transport 的 `close()` 抛异常，client 已经被标记成
+  CLOSED，后续任何一次 `self._client.close()` 都会因为
+  `self._state != ClientState.CLOSED` 为假而直接跳过、不再重试
+  transport 的关闭——round 3 删除 `_closed` 字段、把幂等性完全托付
+  给 `httpx.Client.close()`"自身可安全重试"的假设，在真实的 httpx
+  实现里根本不成立。用一个真实的 `httpx.BaseTransport`（`close()`
+  第一次抛异常）复现：第一次 `client.close()` 抛异常，但
+  `client.is_closed` 已经变成 `True`；第二次 `client.close()`
+  完全不再调用 transport 的 `close()`，静默返回——本地复现脚本
+  确认：`transport.close_calls` 始终停在 `1`。`MarzbanAccountingProvider.close()`
+  虽然从未有过自己的 `_closed` 字段，但因为同样直接委托给
+  `self._client.close()`，这个假成功路径其实来自 httpx 本身，两个
+  provider 都受影响。
+
+  修复：两个 provider 都改为跟踪一个**永久性**的
+  `_close_failed` 标志——只有在 `self._client.close()` 真的抛出
+  异常之后才置位；一旦置位，之后每一次 `close()` 调用都重新抛出
+  同一个语义清晰的 `RuntimeError`（说明底层 client 因为 httpx 自身
+  的 CLOSED-then-cleanup 顺序而永远无法真正重试），**不会**再去
+  调用 `self._client.close()`（那只会静默 no-op、被误判成功）。也就
+  是说：一旦第一次关闭真的失败，这个 provider 实例的清理状态就是
+  永久失败，绝不会被静默判定为成功。第一次调用即成功、或从未
+  失败过的场景完全不受影响（幂等性测试保持通过）。
+
+  **测试**：`backend/tests/unit/test_transport_provider.py` 与
+  `backend/tests/unit/test_marzban_accounting_provider.py` 各自新增
+  一个真实 `httpx.BaseTransport`（`_FlakyTransport`，`close()` 可控
+  失败次数）驱动的回归测试，替换 round 3 里用 monkeypatch 直接换掉
+  `client.close` 方法（在 httpx 真正实现运行之前就把它换掉，因此
+  根本没有复现 httpx 真实的 "先置 CLOSED 再关 transport" 顺序）的
+  两个旧测试：
+  - `test_close_permanently_surfaces_failure_when_the_owned_transport_close_raises`
+    （两个文件都新增）：provider 自身层面，第一次 `close()` 抛出
+    真实的 transport 失败且 transport 只被调用一次；第二次
+    `close()` 抛出永久失败错误，且 transport 的 `close()`**没有**
+    被再次调用（证明 httpx 确实不会重试）。
+  - `test_registry_close_never_falsely_reports_the_transport_provider_closed`
+    （`test_transport_provider.py`）：在 `ProviderRegistry` 层面复现
+    审查指出的完整场景——第一次 `registry.close()` 通过
+    `ExceptionGroup` 暴露失败，排在它之后的 provider 仍然被正常
+    关闭；第二次 `registry.close()` 仍然抛出 `ExceptionGroup`（不会
+    被静默标记成功），且 transport 的 `close()` 调用次数始终停在
+    `1`（证明 httpx 从未真正重试）。
+
+  **Major 2（`workers/scheduler.py::run_batch()` 仍保留未托管的
+  registry 构造 fallback）**：独立验证后确认 **VALID**——
+  `run_batch(registry_factory: Callable[[], ProviderRegistry] =
+  build_scheduler_registry, ...)` 的默认参数本身就是一条生产代码
+  路径（不只是测试替身），只要有任何调用方省略 `registry_factory`
+  直接调用 `run_batch()`，就会自建一个从不被关闭的
+  `ProviderRegistry`——`main()` 虽然已经显式传入
+  `lambda: registry` 从而规避了这个问题，但函数签名本身仍然"允许"
+  自建，属于 Phase 2B8 验收标准第 1/4 条要求消灭的同一类泄漏
+  （`services.py` 在 round 2 已经修过同一类问题）。修复：
+  `run_batch()` 的 `registry_factory` 参数改成必填的
+  `registry: ProviderRegistry`（直接传对象而不是工厂函数），
+  `build_scheduler_registry()` 现在只在真正的进程所有权边界
+  （`main()`）里调用一次。
+
+  **测试**：`backend/tests/unit/test_scheduler.py` 的
+  `test_scheduler_runs_one_mock_round_without_external_services`、
+  `test_main_one_shot_builds_registry_once_and_closes_it_on_exit`、
+  `test_main_loop_reuses_one_registry_across_multiple_batches`、
+  `test_main_closes_the_registry_even_when_run_batch_raises` 四处调用
+  和 monkeypatch 替身同步改成新签名（直接接收/断言
+  `registry` 对象，而不是先前那个总是非空的 `registry_factory`）。
+
+  **Minor 1（`ProviderRegistry` 从 `frozen=True` 改成可变，超出了
+  "只是为了让 `_closed` 能变"这个必要范围）**：独立验证后确认
+  **VALID**——round 1 把 `@dataclass(frozen=True, slots=True)` 改成
+  `@dataclass(slots=True)`（不再 frozen），这样做的唯一目的是让
+  `close()` 能给 `self._closed` 赋值，但代价是 `egress`/
+  `accounting`/... 这些公开字段现在也能被外部重新赋值——如果
+  `close()` 成功后调用方把某个字段换成一个新的、未关闭的
+  resource-owning provider，`self._closed` 已经是 `True`，这个替换
+  掉的新 provider 永远不会被这个 registry 关闭。目前仓库内没有真的
+  这样做的生产代码，所以不是当前阻塞项，但这是不必要引入的生命周期
+  风险。修复：把 `ProviderRegistry` 改回
+  `@dataclass(frozen=True, slots=True)`，只有 `close()` 内部通过
+  `object.__setattr__(self, "_closed", True)` 修改私有生命周期状态；
+  `_closed_provider_ids` 本来就是通过 `.add()` 原地修改的可变
+  `set`，frozen dataclass 从不阻止这种原地修改，不需要改动。
+
+  **验证**：`ruff check backend/` 全过；
+  `mypy backend/app backend/tests`（strict，`/tmp/venv312`）无问题；
+  `pytest backend/tests/unit backend/tests/guards -q` → **223 通过**
+  （222 - 2 条被替换的旧回归测试 + 2 条新的 provider 级回归测试 + 1
+  条新的 `MarzbanAccountingProvider` 回归测试，0 回归）；
+  `pytest backend/tests/integration -q`（本地 MariaDB 10.11）→ 50
+  通过、1 个与本次改动无关的既有环境限制失败（同上，**本地未
+  验证**，最终以 GitHub CI 的真实 MySQL 8.4 backend job 为准）。
+
+  **仍未完成**：与前几轮完全一致，未扩大 scope。

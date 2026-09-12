@@ -110,11 +110,19 @@ def usage_poll_interval_seconds(fast_usage_poll: bool) -> int:
 
 
 def run_batch(
-    registry_factory: Callable[[], ProviderRegistry] = build_scheduler_registry,
+    registry: ProviderRegistry,
     db_factory: Callable[[], Any] = SessionLocal,
 ) -> SchedulerBatchResult:
-    """Run one scheduler tick using only providers assembled by the registry."""
-    registry = registry_factory()
+    """Run one scheduler tick using only providers assembled by the registry.
+
+    TASK-T16 Phase 2B8 (independent-review round 4, Major 2): takes an
+    already-built ``registry`` instead of a ``registry_factory`` default
+    that self-constructed one via ``build_scheduler_registry()``. That
+    default was itself an unmanaged-construction path -- calling this
+    function directly (its own default argument, not just a test double)
+    would build a registry nothing ever closes. ``build_scheduler_registry()``
+    now only ever runs at the actual process ownership boundary, ``main()``.
+    """
     with db_factory() as db:
         transport_records = sync_transport_capacity_and_inventory(db, registry)
         reconciled = run_pending_reconcile(
@@ -140,17 +148,31 @@ def run_batch(
 
 
 def main() -> None:
+    """TASK-T16 Phase 2B8: build exactly one process-lifetime
+    ``ProviderRegistry`` and reuse it across every batch this process
+    runs -- looping or one-shot alike -- closing it deterministically in
+    ``finally`` on both normal and exceptional exit. Previously each
+    ``run_batch()`` call (every loop iteration, and even the single
+    one-shot call) used its own default ``registry_factory`` argument
+    (``build_scheduler_registry``), so a real, resource-owning provider
+    would have leaked a fresh, never-closed ``httpx.Client`` every 60/300
+    seconds.
+    """
     parser = argparse.ArgumentParser(description="Run registry-backed scheduler jobs")
     parser.add_argument("--loop", action="store_true")
     parser.add_argument("--interval", type=int, default=NORMAL_USAGE_INTERVAL_SECONDS)
     args = parser.parse_args()
-    while True:
-        result = run_batch()
-        if not args.loop:
-            return
-        normal_interval = max(args.interval, NORMAL_USAGE_INTERVAL_SECONDS)
-        interval = FAST_USAGE_INTERVAL_SECONDS if result.fast_usage_poll else normal_interval
-        time.sleep(interval)
+    registry = build_scheduler_registry()
+    try:
+        while True:
+            result = run_batch(registry)
+            if not args.loop:
+                return
+            normal_interval = max(args.interval, NORMAL_USAGE_INTERVAL_SECONDS)
+            interval = FAST_USAGE_INTERVAL_SECONDS if result.fast_usage_poll else normal_interval
+            time.sleep(interval)
+    finally:
+        registry.close()
 
 
 if __name__ == "__main__":

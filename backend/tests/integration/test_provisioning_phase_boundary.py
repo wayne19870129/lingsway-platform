@@ -511,7 +511,6 @@ def test_lock_acquisition_timeout_fails_closed_with_zero_gateway_writes(engine: 
                     order_state,
                     "receipt-lock-timeout",
                     providers=_registry(accounting=accounting),
-                    settings=None,
                 )
     finally:
         release_holder.set()

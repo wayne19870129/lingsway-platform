@@ -10,12 +10,12 @@ from fastapi import APIRouter, HTTPException, Request, status
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
-from backend.app.core.config import get_settings
 from backend.app.core.security import hash_password, verify_password
 from backend.app.dependencies import (
     CurrentAuth,
     CurrentCustomer,
     DbSession,
+    ManagedRegistry,
     issue_access_token,
     revoke_customer_sessions,
     revoke_session,
@@ -34,7 +34,6 @@ from backend.app.models import (
     PlanStatus,
 )
 from backend.app.providers.base import NotifyEvent
-from backend.app.providers.registry import build_registry
 from backend.app.schemas.public import (
     CustomerCreate,
     CustomerRead,
@@ -117,7 +116,9 @@ def list_plans(db: DbSession) -> list[Plan]:
 
 
 @router.post("/orders", response_model=OrderRead, status_code=status.HTTP_201_CREATED)
-def place_order(data: OrderCreate, db: DbSession, customer: CurrentCustomer) -> Order:
+def place_order(
+    data: OrderCreate, db: DbSession, customer: CurrentCustomer, registry: ManagedRegistry
+) -> Order:
     existing = db.scalar(
         select(Order).where(
             Order.customer_id == customer.id,
@@ -135,7 +136,7 @@ def place_order(data: OrderCreate, db: DbSession, customer: CurrentCustomer) -> 
     # customer-facing flow never marks payment as paid; any future payment
     # confirmation must repeat this guard immediately before that transition.
     try:
-        capacity = build_registry(get_settings()).egress.capacity()
+        capacity = registry.egress.capacity()
         ensure_capacity(capacity, Decimal(plan.traffic_limit_bytes) / Decimal(1024**3))
     except CapacityExceededError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from None
@@ -205,6 +206,7 @@ def payment_notice(
     order_id: int,
     db: DbSession,
     customer: CurrentCustomer,
+    registry: ManagedRegistry,
 ) -> dict[str, object]:
     order = db.scalar(
         select(Order).where(Order.id == order_id, Order.customer_id == customer.id)
@@ -244,7 +246,7 @@ def payment_notice(
         },
     )
     try:
-        delivery = build_registry(get_settings()).notify.send(event)
+        delivery = registry.notify.send(event)
         if not delivery.delivered:
             raise RuntimeError(delivery.error or "notification delivery failed")
     except Exception as exc:
