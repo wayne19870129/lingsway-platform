@@ -1,0 +1,12 @@
+# Top-level pins for the Marzban routing_principal patch contract
+# (TASK-T16 Phase 2B4). See ../README.md's "Reproducible dependency lock"
+# section for how requirements-contract.txt is generated from this file
+# and why it exists.
+#
+# Regenerate requirements-contract.txt with pip-tools whenever a pin here
+# changes -- never hand-edit the .txt file.
+pydantic==2.10.4
+fastapi==0.115.2
+starlette==0.40.0
+httpx==0.28.1
+pytest==9.1.1

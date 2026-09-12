@@ -30,7 +30,36 @@
   正确性来源，conditional UPDATE + rowcount 校验降级为纵深防御，
   人工维护窗口降级为可选运维措施而非 correctness primitive，并
   明确这个机制的边界（不约束直接 SQL 操作、假定单一 MySQL server
-  写拓扑）。）
+  写拓扑）。）同日第六次修订（TASK-T16 Phase 2B4 落地补丁时，独立
+  审查发现两处 Major）：(1) 本 ADR 此前记录的 Candidate B 机制——
+  `id: int = Field(exclude=True)` + 一个 `@computed_field
+  routing_principal` 属性——会被 `SubscriptionUserResponse
+  (UserResponse)` 继承，而该类正是客户可见的 `GET /{token}/info`
+  订阅端点（`app/routers/subscription.py`）使用的响应模型，导致
+  这个源自数据库 id 的字段泄漏到本 ADR 明确排除在契约之外的订阅
+  端点。经在 pinned `pydantic==2.10.4` 下用真实解释器验证，
+  `@computed_field` 在该 pydantic 版本无法被子类选择性排除
+  （`ValueError: you can't override a field with a computed
+  field`），是这次泄漏在机制层面无法回避的根因，不是补丁实现疏漏。
+  修正后的机制改为普通字段 + `@model_validator(mode="after")`（见
+  下方"精确定义"一节的更正）：`routing_principal: str =
+  Field(default="")` 加一个在 `after` 阶段计算并赋值的
+  validator，这样 `SubscriptionUserResponse` 就能像它已经排除
+  `admin`/`note`/`inbounds` 等字段一样，用普通的
+  `Field(default="", exclude=True)` 覆盖排除它，不再受
+  `@computed_field` 不可选择性排除的限制。(2) 本 ADR 此前假设的
+  实现路径是把 Marzban 该文件的补丁前拷贝（"vendor"）进本仓库；
+  独立审查指出 Marzban 是 AGPL-3.0 协议，而本仓库根目录 `LICENSE`
+  是不带第三方代码例外条款的"保留所有权利、专有机密"声明，两者存在
+  真实的许可证冲突，不应由本次改动自行下一个未经授权的法律结论去
+  "解决"。Phase 2B4 因此改为在测试运行时通过网络抓取 pinned commit
+  的该文件并校验 sha256，不再把这份 AGPL-3.0 源码提交进本仓库
+  Git 历史；是否要以及如何正式 vendor Marzban 源码（例如补充
+  `THIRD_PARTY_LICENSES` 声明）留给仓库所有者或法务决定，本 ADR
+  不代为下结论。以上两处修正均已在 Phase 2B4 的
+  `infrastructure/marzban/patches/` 补丁、脚本与 pinned-dependency
+  契约测试中落地并通过验证，详见该 PR 说明与
+  `infrastructure/marzban/patches/README.md`。）
 - 决策范围: TASK-T16 route-identity architecture research (docs/ADR-only,
   不实现代码)。本 ADR 是 `ADR-015-marzban-ownership-and-route-identity.md`
   Decision 3（`BLOCKED`）的专项后续研究，**supersede** ADR-015 的
@@ -364,6 +393,18 @@ FastAPI 的 `response_model` 序列化管线，不是手工模拟；`id` 字段�
 Candidate B 技术方案的实质性更正，本轮（第四轮）只是把验证环境和
 验证方式都换成更贴近真实运行时的版本，结论不变。
 
+> **第六次修订更正（Phase 2B4 落地时发现）**：上面这段第四轮 PoC
+> 验证的 `@computed_field` 机制，在 Phase 2B4 实际把补丁应用到真实
+> pinned Marzban 源码时被发现有一个当时没有测试到的缺陷——它会被
+> `SubscriptionUserResponse(UserResponse)` 继承且**无法在该子类里被
+> 选择性排除**（pinned `pydantic==2.10.4` 下 `ValueError: you can't
+> override a field with a computed field`），而 `SubscriptionUserResponse`
+> 正是本 ADR"范围收窄"承诺之外的客户可见订阅端点使用的模型。上面
+> 展示的 `UserResponsePatched` PoC 代码示例因此已被证明**不是**最终
+> 采用的机制；权威版本是"精确定义"一节（Decision 3 正文）里第六次
+> 修订更新后的 `model_validator(mode="after")` 写法，保留于此仅作为
+> 历史记录，说明为什么需要这次更正。
+
 **范围收窄（采纳独立审查的建议，不无必要扩大暴露面）**：本 ADR
 **只承诺**这个字段在 `POST /api/user` 和 `GET /api/user/{username}`
 这两条本仓库实际依赖的路径上可靠可用——这是 Candidate B 被判定
@@ -447,11 +488,7 @@ C 的额外风险）**。逐项分析：
 ## Decision 3: SELECTED — Candidate B
 
 **最终方案**：为 pinned Marzban 镜像维护一个最小化 source patch，
-给 `UserResponse` 新增一个 `routing_principal: str` 字段——具体
-机制是新增一个 `exclude=True` 的 `id: int` 字段（通过现有
-`from_attributes` 提取，不影响任何其它字段）加一个 `@computed_field`
-计算属性（本轮已用实际 Pydantic v2 PoC 验证，见下方"exact-source
-patch contract"），值等于
+给 `UserResponse` 新增一个 `routing_principal: str` 字段，值等于
 `f"{marzban_db_user_id}.{username}"`（与 `operations.py` 现有内部
 计算公式逐字节一致）。**本 ADR 只对本仓库实际依赖的两条路径——
 `POST /api/user`（`create_user`）和 `GET /api/user/{username}`
@@ -460,6 +497,27 @@ patch contract"），值等于
 （理由见下方 patch contract 小节）。真实的 Marzban-backed
 `AccountingProvider` 实现读取这个字段，本仓库的编排/持久化层把它
 当作 `GatewayRouteBinding.gateway_principal` 唯一合法的写入来源。
+
+**机制（第六次修订更正）**：新增一个 `exclude=True` 的 `id: int`
+字段（通过现有 `from_attributes` 提取，不影响任何其它字段），加一个
+普通字段 `routing_principal: str = Field(default="")` 和一个
+`@model_validator(mode="after")` 方法在校验后阶段把它赋值为
+`f"{self.id}.{self.username}"`。**这不是**上方"exact-source patch
+contract"小节 PoC 代码示例里最初验证的 `@computed_field` 计算属性
+——Phase 2B4 实际把补丁应用到 pinned 源码时发现，`@computed_field`
+在 pinned `pydantic==2.10.4` 下无法被子类选择性排除（试图在
+`SubscriptionUserResponse` 里覆盖会抛出 `ValueError: you can't
+override a field with a computed field`），而
+`SubscriptionUserResponse(UserResponse)` 正是本 ADR 范围之外的客户
+可见订阅端点（`GET /{token}/info`）所用的模型，若沿用
+`@computed_field` 会导致这个源自数据库 id 的字段泄漏到未授权的
+响应面。改为普通字段 + `model_validator(mode="after")` 后，
+`SubscriptionUserResponse` 就能像它已经在排除的 `admin`/`note`/
+`inbounds` 等字段一样，用 `routing_principal: str =
+Field(default="", exclude=True)` 正常覆盖排除它——这个修正后的机制
+已在 `infrastructure/marzban/patches/0001-expose-routing-principal.patch`
+落地，并有专门的 `SubscriptionUserResponse` 排除回归测试
+（`test_subscription_user_response_excludes_routing_principal`）覆盖。
 
 ### 精确定义
 
