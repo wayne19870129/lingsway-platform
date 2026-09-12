@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# Issue #71: deterministic PR-creation + CI/Security/Risk dispatch.
+#
+# This is intentionally a plain GitHub Actions shell step, never something
+# Claude itself is asked to do. The pinned anthropics/claude-code-action's
+# tag mode (the mode this repo's claude.yml runs, since it sets no `prompt`
+# input) hardcodes a narrow tool allowlist for Claude -- Glob/Grep/LS/Read,
+# a few read-only CI-status MCP tools, and `git add`/`git commit`/the
+# action's own push wrapper/`git rm`. It does NOT include `gh` at all. The
+# workflow's previous system prompt nonetheless told Claude to run
+# `gh pr create` and `gh workflow run ci.yml/security.yml/risk-classify.yml`
+# after pushing -- every one of those calls was denied by the SDK's
+# permission gate (there is no interactive prompt to fall back to in this
+# headless action, so a disallowed tool call is a hard denial, not a wait),
+# and Claude kept retrying, burning turns until --max-turns was hit. A real
+# run (#103, Issue #66) hit exactly this: 13 permission denials, 31 turns,
+# failure -- despite having already made and pushed the one real commit the
+# task needed.
+#
+# Moving PR creation and CI/Security/Risk dispatch into this deterministic
+# script removes the mismatch instead of widening Claude's allowedTools to
+# paper over it: these are fixed, mechanical actions with no judgment
+# involved once a branch has been pushed, so they belong in a normal
+# workflow step (which has full `gh` access via the job's own GITHUB_TOKEN)
+# rather than in Claude's own reasoning loop.
+#
+# Used from two places in .github/workflows/claude.yml:
+#   1. The `claude` job, immediately after the claude-code-action step, with
+#      `if: always()` -- so this still runs even if that step reported
+#      failure (e.g. hit --max-turns) as long as a branch with real commits
+#      was actually pushed. This is what lets a run that already did the
+#      real work finish (PR opened, checks dispatched) without needing any
+#      retry at all, turn-mismatch failures included.
+#   2. The `claude-recovery` job (workflow_dispatch, owner-only), so a
+#      transient `gh`/network failure in (1) -- as opposed to a mismatch
+#      failure, which this script's normal post-Claude invocation already
+#      recovers from by itself -- can be retried by hand against an
+#      already-pushed branch without re-running the full Claude model turn
+#      loop a second time.
+#
+# Idempotent: if a PR already exists for BRANCH (Claude pushed directly onto
+# an existing PR's branch for a PR-rework trigger, or a previous invocation
+# of this same script already created one for an Issue-first trigger), that
+# PR is reused rather than duplicated -- "one task, one PR" (CLAUDE.md) is
+# preserved across retries and across the normal/recovery invocation paths.
+set -euo pipefail
+
+: "${REPO:?REPO is required (owner/repo)}"
+: "${BRANCH:?BRANCH is required}"
+: "${BASE_BRANCH:?BASE_BRANCH is required}"
+
+if ! git ls-remote --exit-code origin "refs/heads/${BRANCH}" >/dev/null 2>&1; then
+  echo "Branch '${BRANCH}' does not exist on origin -- nothing was pushed, nothing to do."
+  exit 0
+fi
+
+git fetch origin "${BASE_BRANCH}" "${BRANCH}" --quiet
+
+commit_count=$(git rev-list --count "origin/${BASE_BRANCH}..origin/${BRANCH}")
+if [ "${commit_count}" -eq 0 ]; then
+  echo "Branch '${BRANCH}' has no commits ahead of '${BASE_BRANCH}' -- nothing to do."
+  exit 0
+fi
+
+pr_number=$(gh pr list --repo "${REPO}" --head "${BRANCH}" --state all --json number --jq '.[0].number // empty')
+
+if [ -z "${pr_number}" ]; then
+  echo "No existing PR for branch '${BRANCH}' -- creating one from its latest commit."
+  # The latest commit's subject/body become the PR title/body: Claude is
+  # instructed (see claude.yml's system prompt) to make its final commit
+  # message the complete, structured PR description (Issue reference,
+  # Summary, Acceptance criteria, Verification, Known gaps, and a `Closes
+  # #N` line when the change fully resolves the triggering Issue).
+  title=$(git log -1 --format=%s "origin/${BRANCH}")
+  body=$(git log -1 --format=%b "origin/${BRANCH}")
+  if [ -z "${body}" ]; then
+    body="(no commit body was provided; see the commit history on this branch for details)"
+  fi
+  pr_url=$(gh pr create --repo "${REPO}" --base "${BASE_BRANCH}" --head "${BRANCH}" \
+    --title "${title}" --body "${body}")
+  pr_number=$(printf '%s' "${pr_url}" | grep -oE '[0-9]+$')
+  echo "Created PR #${pr_number} for branch '${BRANCH}': ${pr_url}"
+else
+  echo "Reusing existing PR #${pr_number} for branch '${BRANCH}' -- not creating a duplicate."
+fi
+
+echo "Dispatching ci.yml and security.yml against ref '${BRANCH}'..."
+gh workflow run ci.yml --repo "${REPO}" --ref "${BRANCH}"
+gh workflow run security.yml --repo "${REPO}" --ref "${BRANCH}"
+
+if [ -n "${pr_number}" ]; then
+  echo "Dispatching risk-classify.yml for PR #${pr_number}..."
+  gh workflow run risk-classify.yml --repo "${REPO}" --ref "${BRANCH}" -f "pull_number=${pr_number}"
+fi
+
+if [ -n "${GITHUB_OUTPUT:-}" ]; then
+  echo "pr_number=${pr_number}" >> "${GITHUB_OUTPUT}"
+fi
