@@ -175,24 +175,49 @@ class SubscriptionTransportProvider:
         self._enabled = True
         self._endpoints: list[TransportEndpointDTO] = []
         self._capacity: TransportCapacityDTO | None = None
+        self._close_failed = False
 
     def close(self) -> None:
         """Closes the self-created client, never a client this provider
         did not create.
 
-        Deliberately has no self-tracked "already closed" flag
-        (independent review, PR #65 round 3): a flag set *before* the
-        close attempt would let a failed ``self._client.close()`` be
-        reported as success on a later retry -- the flag alone can't
-        distinguish "already closed successfully" from "already tried
-        and failed". Idempotency instead comes entirely from
-        ``httpx.Client.close()``'s own contract, which is always safe to
-        call again -- on an already-closed client it is a no-op, and on
-        a client whose close previously raised, calling it again
-        actually retries the close rather than silently no-opping.
+        Independent review (PR #65, round 4): round 3 removed this
+        provider's own "already closed" flag on the theory that
+        ``httpx.Client.close()`` is always safe to call again, including
+        as a genuine retry after a prior failure. That is false for the
+        real library: ``httpx.Client.close()`` (confirmed in the
+        installed 0.28.1) sets its internal state to CLOSED *before*
+        calling the underlying transport's ``close()``. If the transport
+        close then raises, the client is already marked CLOSED, and a
+        later ``self._client.close()`` call sees CLOSED and returns
+        without ever retrying the transport cleanup -- silently turning a
+        still-failed close into an apparent success.
+
+        Because of that, once a close attempt has raised, this provider
+        can never truly retry the same client's cleanup -- httpx will not
+        let it. So this method tracks a permanent ``_close_failed`` flag
+        set only when a close attempt actually raises, and keeps
+        re-raising on every subsequent call rather than calling
+        ``self._client.close()`` again (which would just no-op and look
+        like success). This is deliberately less convenient than a real
+        retry, but it never lies about whether cleanup succeeded.
         """
-        if self._owns_client:
+        if not self._owns_client:
+            return
+        if self._close_failed:
+            raise RuntimeError(
+                "SubscriptionTransportProvider's owned httpx.Client previously "
+                "failed to close; httpx.Client.close() cannot be safely retried "
+                "once it has raised (it marks its internal state CLOSED before "
+                "actually closing the transport), so this failure is permanent "
+                "for this provider instance and must keep surfacing rather than "
+                "being silently treated as success"
+            )
+        try:
             self._client.close()
+        except Exception:
+            self._close_failed = True
+            raise
 
     def health_check(self) -> bool:
         return self._enabled and bool(self._endpoints)

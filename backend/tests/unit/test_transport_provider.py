@@ -171,59 +171,77 @@ class _ClosableProvider:
         self.close_calls.append(None)
 
 
-def test_close_retries_correctly_when_the_owned_client_close_call_fails() -> None:
-    """Independent review (PR #65, round 3): a self-tracked ``_closed``
-    flag set *before* attempting ``self._client.close()`` would let a
-    failed close be reported as a false success on a later retry. Drives
-    the provider's own owned client through a failing close followed by a
-    successful retry, proving the provider itself carries no such flag --
-    it relies entirely on ``httpx.Client.close()``'s own safe-to-retry
-    contract."""
+class _FlakyTransport(httpx.BaseTransport):
+    """A real ``httpx.BaseTransport`` whose ``close()`` raises for the
+    first ``fail_times`` calls, then succeeds -- used to drive a real
+    ``httpx.Client`` through its actual ``state=CLOSED ->
+    transport.close()`` close order (confirmed in the installed httpx
+    0.28.1), rather than monkeypatching ``Client.close`` itself before it
+    ever runs."""
+
+    def __init__(self, fail_times: int = 0) -> None:
+        self.fail_times = fail_times
+        self.close_calls = 0
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, text="proxies: []\n")
+
+    def close(self) -> None:
+        self.close_calls += 1
+        if self.close_calls <= self.fail_times:
+            raise RuntimeError("simulated transport close failure")
+
+
+def test_close_permanently_surfaces_failure_when_the_owned_transport_close_raises() -> None:
+    """Independent review (PR #65, round 4): httpx 0.28.1's
+    ``Client.close()`` sets its internal state to CLOSED *before* calling
+    the transport's own ``close()`` -- so once a real close attempt has
+    raised, the client is already marked closed and a later
+    ``Client.close()`` call silently no-ops instead of retrying. Round 3's
+    fix (trusting ``httpx.Client.close()`` to be a safe, genuine retry)
+    does not hold against the real library. This test drives a real
+    ``httpx.Client`` through a ``BaseTransport`` whose ``close()`` raises,
+    so it exercises httpx's actual close order instead of a monkeypatched
+    stand-in."""
+    transport = _FlakyTransport(fail_times=1)
     adapter = SubscriptionTransportProvider("PROVIDER_A", "https://provider.invalid/private")
-    real_client = adapter._client  # noqa: SLF001
-    calls: list[None] = []
-    original_close = real_client.close
+    assert adapter._owns_client is True  # noqa: SLF001
+    # Swap in a real httpx.Client bound to the flaky transport while
+    # keeping _owns_client True -- the provider's own constructor has no
+    # way to inject a custom transport for a self-owned client, so this
+    # replicates "the client this provider owns happens to fail to close"
+    # without going through the (owns_client=False) injection path.
+    adapter._client = httpx.Client(transport=transport)  # noqa: SLF001
 
-    def flaky_close() -> None:
-        calls.append(None)
-        if len(calls) == 1:
-            raise RuntimeError("simulated transient close failure")
-        original_close()
-
-    real_client.close = flaky_close  # type: ignore[method-assign]
-
-    with pytest.raises(RuntimeError, match="simulated transient close failure"):
+    with pytest.raises(RuntimeError, match="simulated transport close failure"):
         adapter.close()
-    assert len(calls) == 1
-    assert real_client.is_closed is False  # the failed attempt never actually closed it
+    assert transport.close_calls == 1
 
-    adapter.close()  # retry: must actually retry the close, never silently no-op
+    # httpx has already marked its Client CLOSED internally even though the
+    # transport close raised -- a naive retry of `self._client.close()`
+    # would now silently no-op and be mistaken for success. The provider
+    # must keep surfacing the original failure instead of pretending it
+    # succeeded.
+    with pytest.raises(RuntimeError, match="previously failed to close"):
+        adapter.close()
+    assert transport.close_calls == 1  # never actually retried -- httpx would just no-op
 
-    assert len(calls) == 2
-    assert real_client.is_closed is True
 
-
-def test_registry_close_surfaces_transport_close_failure_and_retries_it_only() -> None:
+def test_registry_close_never_falsely_reports_the_transport_provider_closed() -> None:
     """Reproduces the exact scenario from independent review (PR #65,
-    round 3) at the ProviderRegistry level: a SubscriptionTransportProvider
-    whose owned client's close() fails once must (1) surface that failure
-    via ProviderRegistry.close()'s ExceptionGroup, (2) not prevent other
-    owned providers from being closed in the same sweep, and (3) actually
-    retry -- never silently mark itself successfully closed -- on the next
-    registry.close() call."""
+    round 4) at the ProviderRegistry level, using a real
+    ``httpx.Client``/``BaseTransport`` rather than a monkeypatched close:
+    the transport provider's close failure must surface via
+    ``ExceptionGroup``, a later-iterated provider must still be closed,
+    and a second ``registry.close()`` must never mark the transport
+    provider as successfully closed -- since httpx's own close() can
+    never truly retry a failed transport close, the provider must keep
+    failing rather than silently succeeding."""
+    transport = _FlakyTransport(fail_times=999)  # always fails
     adapter = SubscriptionTransportProvider("PROVIDER_A", "https://provider.invalid/private")
-    real_client = adapter._client  # noqa: SLF001
-    calls: list[None] = []
-    original_close = real_client.close
-
-    def flaky_close() -> None:
-        calls.append(None)
-        if len(calls) == 1:
-            raise RuntimeError("simulated transient close failure")
-        original_close()
-
-    real_client.close = flaky_close  # type: ignore[method-assign]
-
+    assert adapter._owns_client is True  # noqa: SLF001
+    adapter._client = httpx.Client(transport=transport)  # noqa: SLF001
     other = _ClosableProvider()
     defaults = build_registry(Settings())
     registry = ProviderRegistry(
@@ -241,12 +259,11 @@ def test_registry_close_surfaces_transport_close_failure_and_retries_it_only() -
 
     with pytest.raises(ExceptionGroup):
         registry.close()
-    assert len(calls) == 1
-    assert real_client.is_closed is False
+    assert transport.close_calls == 1
     assert len(other.close_calls) == 1  # closed despite the earlier failure elsewhere
 
-    registry.close()  # retry: only the transport provider needed a second attempt
+    with pytest.raises(ExceptionGroup):
+        registry.close()  # retry: must keep failing, never silently succeed
 
-    assert len(calls) == 2
-    assert real_client.is_closed is True
+    assert transport.close_calls == 1  # httpx never actually retries the transport close
     assert len(other.close_calls) == 1  # never re-closed

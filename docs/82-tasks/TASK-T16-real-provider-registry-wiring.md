@@ -1849,3 +1849,116 @@ adapter、DTO/编排改动、独立的 reconciliation 工具/作业、
   18（round 1）+ 3（round 2）+ 2（round 3）= **23 条**。
 
   **仍未完成**：与 round 1/round 2 完全一致，未扩大 scope。
+
+- **Phase 2B8 round 4（本轮，ChatGPT 对 PR #65 exact head
+  `601fa6ed7e4e6982069b43266fda6a84d93fa078` 的独立复审，2 个
+  Major，1 个 Minor）**：
+
+  **Major 1（round 3 的"依赖 `httpx.Client.close()` 自身幂等重试"
+  这个假设本身就是错的，`SubscriptionTransportProvider` 和
+  `MarzbanAccountingProvider` 都受影响）**：独立验证后确认
+  **VALID**——直接读 CI 实际安装的 `httpx==0.28.1` 源码
+  （`Client.close()`）：
+
+  ```python
+  def close(self) -> None:
+      if self._state != ClientState.CLOSED:
+          self._state = ClientState.CLOSED
+          self._transport.close()
+          ...
+  ```
+
+  `self._state` 在调用 `self._transport.close()` **之前**就被设成
+  `CLOSED`；如果 transport 的 `close()` 抛异常，client 已经被标记成
+  CLOSED，后续任何一次 `self._client.close()` 都会因为
+  `self._state != ClientState.CLOSED` 为假而直接跳过、不再重试
+  transport 的关闭——round 3 删除 `_closed` 字段、把幂等性完全托付
+  给 `httpx.Client.close()`"自身可安全重试"的假设，在真实的 httpx
+  实现里根本不成立。用一个真实的 `httpx.BaseTransport`（`close()`
+  第一次抛异常）复现：第一次 `client.close()` 抛异常，但
+  `client.is_closed` 已经变成 `True`；第二次 `client.close()`
+  完全不再调用 transport 的 `close()`，静默返回——本地复现脚本
+  确认：`transport.close_calls` 始终停在 `1`。`MarzbanAccountingProvider.close()`
+  虽然从未有过自己的 `_closed` 字段，但因为同样直接委托给
+  `self._client.close()`，这个假成功路径其实来自 httpx 本身，两个
+  provider 都受影响。
+
+  修复：两个 provider 都改为跟踪一个**永久性**的
+  `_close_failed` 标志——只有在 `self._client.close()` 真的抛出
+  异常之后才置位；一旦置位，之后每一次 `close()` 调用都重新抛出
+  同一个语义清晰的 `RuntimeError`（说明底层 client 因为 httpx 自身
+  的 CLOSED-then-cleanup 顺序而永远无法真正重试），**不会**再去
+  调用 `self._client.close()`（那只会静默 no-op、被误判成功）。也就
+  是说：一旦第一次关闭真的失败，这个 provider 实例的清理状态就是
+  永久失败，绝不会被静默判定为成功。第一次调用即成功、或从未
+  失败过的场景完全不受影响（幂等性测试保持通过）。
+
+  **测试**：`backend/tests/unit/test_transport_provider.py` 与
+  `backend/tests/unit/test_marzban_accounting_provider.py` 各自新增
+  一个真实 `httpx.BaseTransport`（`_FlakyTransport`，`close()` 可控
+  失败次数）驱动的回归测试，替换 round 3 里用 monkeypatch 直接换掉
+  `client.close` 方法（在 httpx 真正实现运行之前就把它换掉，因此
+  根本没有复现 httpx 真实的 "先置 CLOSED 再关 transport" 顺序）的
+  两个旧测试：
+  - `test_close_permanently_surfaces_failure_when_the_owned_transport_close_raises`
+    （两个文件都新增）：provider 自身层面，第一次 `close()` 抛出
+    真实的 transport 失败且 transport 只被调用一次；第二次
+    `close()` 抛出永久失败错误，且 transport 的 `close()`**没有**
+    被再次调用（证明 httpx 确实不会重试）。
+  - `test_registry_close_never_falsely_reports_the_transport_provider_closed`
+    （`test_transport_provider.py`）：在 `ProviderRegistry` 层面复现
+    审查指出的完整场景——第一次 `registry.close()` 通过
+    `ExceptionGroup` 暴露失败，排在它之后的 provider 仍然被正常
+    关闭；第二次 `registry.close()` 仍然抛出 `ExceptionGroup`（不会
+    被静默标记成功），且 transport 的 `close()` 调用次数始终停在
+    `1`（证明 httpx 从未真正重试）。
+
+  **Major 2（`workers/scheduler.py::run_batch()` 仍保留未托管的
+  registry 构造 fallback）**：独立验证后确认 **VALID**——
+  `run_batch(registry_factory: Callable[[], ProviderRegistry] =
+  build_scheduler_registry, ...)` 的默认参数本身就是一条生产代码
+  路径（不只是测试替身），只要有任何调用方省略 `registry_factory`
+  直接调用 `run_batch()`，就会自建一个从不被关闭的
+  `ProviderRegistry`——`main()` 虽然已经显式传入
+  `lambda: registry` 从而规避了这个问题，但函数签名本身仍然"允许"
+  自建，属于 Phase 2B8 验收标准第 1/4 条要求消灭的同一类泄漏
+  （`services.py` 在 round 2 已经修过同一类问题）。修复：
+  `run_batch()` 的 `registry_factory` 参数改成必填的
+  `registry: ProviderRegistry`（直接传对象而不是工厂函数），
+  `build_scheduler_registry()` 现在只在真正的进程所有权边界
+  （`main()`）里调用一次。
+
+  **测试**：`backend/tests/unit/test_scheduler.py` 的
+  `test_scheduler_runs_one_mock_round_without_external_services`、
+  `test_main_one_shot_builds_registry_once_and_closes_it_on_exit`、
+  `test_main_loop_reuses_one_registry_across_multiple_batches`、
+  `test_main_closes_the_registry_even_when_run_batch_raises` 四处调用
+  和 monkeypatch 替身同步改成新签名（直接接收/断言
+  `registry` 对象，而不是先前那个总是非空的 `registry_factory`）。
+
+  **Minor 1（`ProviderRegistry` 从 `frozen=True` 改成可变，超出了
+  "只是为了让 `_closed` 能变"这个必要范围）**：独立验证后确认
+  **VALID**——round 1 把 `@dataclass(frozen=True, slots=True)` 改成
+  `@dataclass(slots=True)`（不再 frozen），这样做的唯一目的是让
+  `close()` 能给 `self._closed` 赋值，但代价是 `egress`/
+  `accounting`/... 这些公开字段现在也能被外部重新赋值——如果
+  `close()` 成功后调用方把某个字段换成一个新的、未关闭的
+  resource-owning provider，`self._closed` 已经是 `True`，这个替换
+  掉的新 provider 永远不会被这个 registry 关闭。目前仓库内没有真的
+  这样做的生产代码，所以不是当前阻塞项，但这是不必要引入的生命周期
+  风险。修复：把 `ProviderRegistry` 改回
+  `@dataclass(frozen=True, slots=True)`，只有 `close()` 内部通过
+  `object.__setattr__(self, "_closed", True)` 修改私有生命周期状态；
+  `_closed_provider_ids` 本来就是通过 `.add()` 原地修改的可变
+  `set`，frozen dataclass 从不阻止这种原地修改，不需要改动。
+
+  **验证**：`ruff check backend/` 全过；
+  `mypy backend/app backend/tests`（strict，`/tmp/venv312`）无问题；
+  `pytest backend/tests/unit backend/tests/guards -q` → **223 通过**
+  （222 - 2 条被替换的旧回归测试 + 2 条新的 provider 级回归测试 + 1
+  条新的 `MarzbanAccountingProvider` 回归测试，0 回归）；
+  `pytest backend/tests/integration -q`（本地 MariaDB 10.11）→ 50
+  通过、1 个与本次改动无关的既有环境限制失败（同上，**本地未
+  验证**，最终以 GitHub CI 的真实 MySQL 8.4 backend job 为准）。
+
+  **仍未完成**：与前几轮完全一致，未扩大 scope。

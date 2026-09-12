@@ -34,7 +34,7 @@ class ProviderConfigurationError(ValueError):
     """Raised when settings select an unavailable provider implementation."""
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class ProviderRegistry:
     """The complete set of providers selected for one process/application
     lifetime.
@@ -49,10 +49,16 @@ class ProviderRegistry:
     and are silently skipped, so this costs nothing before a real,
     resource-owning provider is ever wired in.
 
-    Not a frozen dataclass (unlike before Phase 2B8): :meth:`close` must
-    mutate ``_closed`` to stay idempotent. Nothing else about equality/
-    construction changes for existing callers -- every field is still a
-    plain keyword-constructible attribute.
+    Still ``frozen=True`` (independent-review round 4, Minor 1): the
+    public provider fields (``egress``, ``accounting``, ...) must stay
+    immutable so a caller can never reassign one to a fresh, unclosed
+    provider after a successful ``close()`` -- that would let
+    ``self._closed`` (already ``True``) permanently hide the replacement
+    from ever being closed. Only the private lifecycle bookkeeping
+    (``_closed``, ``_closed_provider_ids``) needs to change after
+    construction; ``_closed`` is updated via ``object.__setattr__`` for
+    that reason, and ``_closed_provider_ids`` is a set mutated in place
+    (``.add()``), which a frozen dataclass never prevents.
     """
 
     egress: EgressProvider
@@ -133,7 +139,7 @@ class ProviderRegistry:
             raise ExceptionGroup(
                 "ProviderRegistry.close() failed to close one or more providers", errors
             )
-        self._closed = True
+        object.__setattr__(self, "_closed", True)
 
     def __enter__(self) -> ProviderRegistry:
         return self

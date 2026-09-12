@@ -743,4 +743,59 @@ def test_close_is_idempotent_and_safe_to_call_multiple_times() -> None:
     provider.close()
     provider.close()
 
+
+class _FlakyTransport(httpx.BaseTransport):
+    """A real ``httpx.BaseTransport`` whose ``close()`` raises for the
+    first ``fail_times`` calls, then succeeds -- drives a real
+    ``httpx.Client`` through its actual close order rather than a
+    monkeypatched stand-in (see the identical helper and rationale in
+    ``test_transport_provider.py``)."""
+
+    def __init__(self, fail_times: int = 0) -> None:
+        self.fail_times = fail_times
+        self.close_calls = 0
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, json={"access_token": "token-1"})
+
+    def close(self) -> None:
+        self.close_calls += 1
+        if self.close_calls <= self.fail_times:
+            raise RuntimeError("simulated transport close failure")
+
+
+def test_close_permanently_surfaces_failure_when_the_owned_transport_close_raises() -> None:
+    """Independent review (PR #65, round 4): httpx 0.28.1's
+    ``Client.close()`` sets its internal state to CLOSED before calling
+    the transport's own ``close()``, so once a real close attempt has
+    raised, the client is already marked closed and a later
+    ``Client.close()`` call would silently no-op instead of retrying.
+    ``MarzbanAccountingProvider.close()`` never had its own ``_closed``
+    flag, but it still delegated straight to ``self._client.close()`` --
+    the same false-success path exists inside httpx itself."""
+    transport = _FlakyTransport(fail_times=1)
+    provider = MarzbanAccountingProvider(
+        base_url=_BASE_URL,
+        admin_username=_ADMIN_USERNAME,
+        admin_password=_ADMIN_PASSWORD,
+        default_protocol="vless",
+        default_inbounds_json=_INBOUNDS_JSON,
+    )
+    assert provider._owns_client is True  # noqa: SLF001
+    # Swap in a real httpx.Client bound to the flaky transport while
+    # keeping _owns_client True (the constructor has no way to inject a
+    # custom transport for a self-owned client) so this exercises "the
+    # client this provider owns happens to fail to close", not the
+    # (owns_client=False) injection path.
+    provider._client = httpx.Client(transport=transport)  # noqa: SLF001
+
+    with pytest.raises(RuntimeError, match="simulated transport close failure"):
+        provider.close()
+    assert transport.close_calls == 1
+
+    with pytest.raises(RuntimeError, match="previously failed to close"):
+        provider.close()
+    assert transport.close_calls == 1  # never actually retried -- httpx would just no-op
+
     assert provider._client.is_closed is True  # noqa: SLF001

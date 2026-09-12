@@ -110,11 +110,19 @@ def usage_poll_interval_seconds(fast_usage_poll: bool) -> int:
 
 
 def run_batch(
-    registry_factory: Callable[[], ProviderRegistry] = build_scheduler_registry,
+    registry: ProviderRegistry,
     db_factory: Callable[[], Any] = SessionLocal,
 ) -> SchedulerBatchResult:
-    """Run one scheduler tick using only providers assembled by the registry."""
-    registry = registry_factory()
+    """Run one scheduler tick using only providers assembled by the registry.
+
+    TASK-T16 Phase 2B8 (independent-review round 4, Major 2): takes an
+    already-built ``registry`` instead of a ``registry_factory`` default
+    that self-constructed one via ``build_scheduler_registry()``. That
+    default was itself an unmanaged-construction path -- calling this
+    function directly (its own default argument, not just a test double)
+    would build a registry nothing ever closes. ``build_scheduler_registry()``
+    now only ever runs at the actual process ownership boundary, ``main()``.
+    """
     with db_factory() as db:
         transport_records = sync_transport_capacity_and_inventory(db, registry)
         reconciled = run_pending_reconcile(
@@ -157,7 +165,7 @@ def main() -> None:
     registry = build_scheduler_registry()
     try:
         while True:
-            result = run_batch(registry_factory=lambda: registry)
+            result = run_batch(registry)
             if not args.loop:
                 return
             normal_interval = max(args.interval, NORMAL_USAGE_INTERVAL_SECONDS)

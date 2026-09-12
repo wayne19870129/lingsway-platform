@@ -51,7 +51,7 @@ class EmptySession:
 def test_scheduler_runs_one_mock_round_without_external_services() -> None:
     settings = Settings()
     result = run_batch(
-        registry_factory=lambda: build_registry(settings),
+        build_registry(settings),
         db_factory=EmptySession,
     )
     assert result.transport_records == 0
@@ -115,11 +115,11 @@ def test_main_one_shot_builds_registry_once_and_closes_it_on_exit(
     registries_used: list[object] = []
 
     def fake_run_batch(
-        registry_factory: object = None, db_factory: object = None
+        used_registry: object = None, db_factory: object = None
     ) -> SchedulerBatchResult:
         del db_factory
-        assert registry_factory is not None
-        registries_used.append(registry_factory())  # type: ignore[operator]
+        assert used_registry is not None
+        registries_used.append(used_registry)
         return _EMPTY_RESULT
 
     monkeypatch.setattr(scheduler, "build_scheduler_registry", lambda: registry)
@@ -142,13 +142,13 @@ def test_main_loop_reuses_one_registry_across_multiple_batches(
     call_count = 0
 
     def fake_run_batch(
-        registry_factory: object = None, db_factory: object = None
+        used_registry: object = None, db_factory: object = None
     ) -> SchedulerBatchResult:
         del db_factory
         nonlocal call_count
         call_count += 1
-        assert registry_factory is not None
-        registries_used.append(registry_factory())  # type: ignore[operator]
+        assert used_registry is not None
+        registries_used.append(used_registry)
         return _EMPTY_RESULT
 
     sleep_calls: list[int] = []
@@ -181,11 +181,10 @@ def test_main_closes_the_registry_even_when_run_batch_raises(
     registry = _spy_registry(egress)
 
     def failing_run_batch(
-        registry_factory: object = None, db_factory: object = None
+        used_registry: object = None, db_factory: object = None
     ) -> SchedulerBatchResult:
         del db_factory
-        assert registry_factory is not None
-        registry_factory()  # type: ignore[operator]
+        assert used_registry is not None
         raise RuntimeError("simulated batch failure")
 
     monkeypatch.setattr(scheduler, "build_scheduler_registry", lambda: registry)
