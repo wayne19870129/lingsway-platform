@@ -299,6 +299,10 @@ class _FakeBind:
 class _FakeSession:
     def __init__(self, connection: _FakeLockConnection) -> None:
         self._bind = _FakeBind(connection)
+        # Real sqlalchemy.orm.Session always has this plain dict attribute;
+        # gateway_route_binding_write() uses it to record ADR-017's
+        # lock-held marker (see SESSION_INFO_LOCK_HELD_KEY).
+        self.info: dict[str, object] = {}
 
     def get_bind(self) -> _FakeBind:
         return self._bind

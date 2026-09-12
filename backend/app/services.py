@@ -27,9 +27,9 @@ from backend.app.domain.provisioning import (
     ProvisionOutcome,
     ProvisionRequest,
     ProvisionRunStore,
-    ProvisionStatus,
 )
 from backend.app.domain.subscription_render import RenderedSubscription, render_subscription
+from backend.app.infra.gateway_route_lock import GatewayRouteBindingLockError
 from backend.app.providers.registry import ProviderRegistry, build_registry
 
 
@@ -124,26 +124,48 @@ def confirm_payment_and_provision(
             order_state.activate_subscription(command)
             return None
 
-    # ADR-016: desired_routing_state() (invoked from provision()'s
-    # APPLY_GATEWAY step) mutates GatewayRouteBinding but only flushes --
-    # the actual commit (activate_paid_purchase, below) or rollback
-    # (state.rollback_database(), in the except branch) happens later, in
-    # this same function. The named lock must therefore be held across this
-    # entire span, not just around the mutation itself: releasing it any
-    # earlier would let a concurrent writer observe this transaction's
+    # ADR-017: steps 1-6 (CAPACITY..CREATE_ACCOUNTING_USER) never touch
+    # GatewayRouteBinding, so they run unlocked. Only phase B
+    # (provision_apply_gateway, APPLY_GATEWAY..NOTIFY) may mutate it, so
+    # the named lock is acquired only immediately before that call --
+    # never for the external-provider-only steps below.
+    provisioning = build_services(state, runs, settings=settings, providers=registry).provisioning
+    try:
+        prepared = provisioning.provision_prepare(request)
+    except Exception as exc:
+        # Steps 1-6 run without the named lock (ADR-017) but still share
+        # the one DB transaction/session with phase B: any failure here
+        # (capacity/allocate/credentials/forwarder/accounting-create) must
+        # roll it back, same as a phase-B failure does. Calling this after
+        # STORE_CREDENTIALS' own internal rollback_database() call is a
+        # harmless no-op, not a double-rollback bug.
+        state.rollback_database()
+        with order_state.transaction():
+            fail_paid_purchase(command, type(exc).__name__, order_state)
+        raise
+
+    if isinstance(prepared, ProvisionOutcome):
+        # PENDING_MANUAL: terminal, and reached without ever touching the
+        # named lock -- do not proceed to phase B.
+        with order_state.transaction():
+            order_state.mark_provision_pending(
+                command, "external tenant creation requires review"
+            )
+        return prepared
+
+    # ADR-017/ADR-016: desired_routing_state() (invoked from
+    # provision_apply_gateway()'s APPLY_GATEWAY step) mutates
+    # GatewayRouteBinding but only flushes -- the actual commit
+    # (activate_paid_purchase, below) or rollback
+    # (state.rollback_database(), in the except branches) happens later,
+    # in this same function. The named lock must therefore be held across
+    # this entire span, not just around the mutation itself: releasing it
+    # any earlier would let a concurrent writer observe this transaction's
     # uncommitted GatewayRouteBinding state as if it were free to proceed.
     try:
         with state.gateway_route_binding_lock():
             try:
-                outcome = build_services(
-                    state, runs, settings=settings, providers=registry
-                ).provisioning.provision(request)
-                if outcome.status is ProvisionStatus.PENDING_MANUAL:
-                    with order_state.transaction():
-                        order_state.mark_provision_pending(
-                            command, "external tenant creation requires review"
-                        )
-                    return outcome
+                outcome = provisioning.provision_apply_gateway(prepared, request)
             except Exception:
                 # The provider-specific saga performs its external
                 # compensation. The DB terminal state is written only after
@@ -155,6 +177,18 @@ def confirm_payment_and_provision(
 
             with order_state.transaction():
                 activate_paid_purchase(command, order_state)
+    except GatewayRouteBindingLockError as lock_exc:
+        # ADR-017: GET_LOCK() itself failed -- provision_apply_gateway()
+        # never ran, so its own APPLY_GATEWAY exception handler (disable
+        # accounting user, alert, mark run FAILED) never ran either. Steps
+        # 1-6 already flushed DB state and made real external calls
+        # (tenant, forwarder, accounting user), which still need the same
+        # compensation and rollback any other mid-saga failure gets.
+        provisioning.fail_apply_gateway_lock_acquisition(prepared, request, lock_exc)
+        state.rollback_database()
+        with order_state.transaction():
+            fail_paid_purchase(command, type(lock_exc).__name__, order_state)
+        raise
     except Exception as exc:
         with order_state.transaction():
             fail_paid_purchase(command, type(exc).__name__, order_state)

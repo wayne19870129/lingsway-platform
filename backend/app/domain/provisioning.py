@@ -62,6 +62,22 @@ class ProvisionOutcome:
 
 
 @dataclass(frozen=True, slots=True)
+class ProvisioningCheckpoint:
+    """Opaque continuation between :meth:`ProvisioningService.provision_prepare`
+    (steps 1-6, run without the ADR-016 named lock held) and
+    :meth:`ProvisioningService.provision_apply_gateway` (steps 7-9, which
+    the caller must run entirely inside ``state.gateway_route_binding_lock()``).
+
+    See ADR-017 for why this phase split exists and why the lock cannot
+    simply be moved into ``APPLY_GATEWAY``'s own ``try`` block instead.
+    """
+
+    run_id: str
+    endpoint: EgressEndpointDTO
+    tenant: TenantDTO
+
+
+@dataclass(frozen=True, slots=True)
 class ProvisionRunRecord:
     run_id: str
     step: ProvisionStep
@@ -150,6 +166,34 @@ class ProvisioningService:
     token_factory: Callable[[], str] = lambda: secrets.token_urlsafe(32)
 
     def provision(self, request: ProvisionRequest) -> ProvisionOutcome:
+        """Run the full nine-step saga in one call.
+
+        A thin composition of :meth:`provision_prepare` and
+        :meth:`provision_apply_gateway` kept for callers that do not need
+        the ADR-017 phase split (e.g. calling this directly against a
+        non-locking test double). Production's paid-purchase path
+        (``services.confirm_payment_and_provision``) calls the two phases
+        separately so it can acquire the named lock only around the
+        second one -- see ADR-017.
+        """
+        prepared = self.provision_prepare(request)
+        if isinstance(prepared, ProvisionOutcome):
+            return prepared
+        return self.provision_apply_gateway(prepared, request)
+
+    def provision_prepare(
+        self, request: ProvisionRequest
+    ) -> ProvisioningCheckpoint | ProvisionOutcome:
+        """Steps 1-6 (``CAPACITY`` through ``CREATE_ACCOUNTING_USER``).
+
+        Never touches ``GatewayRouteBinding`` and never acquires the
+        ADR-016 named lock -- see ADR-017. Returns a
+        :class:`ProvisioningCheckpoint` to continue with
+        :meth:`provision_apply_gateway`, or a terminal
+        :class:`ProvisionOutcome` (``PENDING_MANUAL``) that callers must
+        not continue past. Any other failure propagates as an exception,
+        exactly as before this method existed.
+        """
         run_id = self.runs.start(request)
 
         self._start(run_id, ProvisionStep.CAPACITY)
@@ -222,6 +266,23 @@ class ProvisioningService:
             raise
         self._success(run_id, ProvisionStep.CREATE_ACCOUNTING_USER)
 
+        return ProvisioningCheckpoint(run_id=run_id, endpoint=endpoint, tenant=tenant)
+
+    def provision_apply_gateway(
+        self, checkpoint: ProvisioningCheckpoint, request: ProvisionRequest
+    ) -> ProvisionOutcome:
+        """Steps 7-9 (``APPLY_GATEWAY`` through ``NOTIFY``).
+
+        Callers **must** invoke this only from inside
+        ``state.gateway_route_binding_lock()``, and must not release that
+        lock until their own commit/rollback for this call's
+        ``GatewayRouteBinding`` mutation has completed -- see ADR-017.
+        This is the only method that calls ``desired_routing_state()``.
+        """
+        run_id = checkpoint.run_id
+        endpoint = checkpoint.endpoint
+        tenant = checkpoint.tenant
+
         self._start(run_id, ProvisionStep.APPLY_GATEWAY)
         try:
             desired_routing = self.state.desired_routing_state(request, endpoint, tenant)
@@ -261,6 +322,28 @@ class ProvisioningService:
         self._success(run_id, ProvisionStep.NOTIFY)
         self.runs.mark_status(run_id, ProvisionStatus.SUCCEEDED)
         return ProvisionOutcome(run_id, ProvisionStatus.SUCCEEDED, subscription_url)
+
+    def fail_apply_gateway_lock_acquisition(
+        self, checkpoint: ProvisioningCheckpoint, request: ProvisionRequest, error: Exception
+    ) -> None:
+        """Compensation for the ADR-017 lock-acquisition-failure scenario.
+
+        Call this when ``state.gateway_route_binding_lock()`` itself
+        raises (``GatewayRouteBindingLockError``) before
+        :meth:`provision_apply_gateway` could run. Because
+        ``provision_apply_gateway`` never started, its own
+        ``APPLY_GATEWAY`` exception handler never ran either -- this
+        performs the identical compensation (disable the accounting user
+        created in phase A, raise the same alert, mark the run FAILED at
+        the same step) so the two failure paths cannot semantically drift
+        apart. The caller is still responsible for rolling back the DB
+        transaction (``state.rollback_database()``) after this returns.
+        """
+        self.accounting.disable_user(request.username)
+        self._alert(
+            "GATEWAY_APPLY_FAILED", {"run_id": checkpoint.run_id, "user": request.username}
+        )
+        self._failed(checkpoint.run_id, ProvisionStep.APPLY_GATEWAY, error)
 
     def _alert(self, event_type: str, payload: Mapping[str, object]) -> None:
         try:

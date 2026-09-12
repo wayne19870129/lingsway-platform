@@ -43,6 +43,19 @@ DEFAULT_LOCK_TIMEOUT_SECONDS = 30
 #: MySQL's documented GET_LOCK() name length limit (in bytes/characters).
 _LOCK_NAME_MAX_LENGTH = 64
 
+#: Key set on ``session.info`` (a plain dict SQLAlchemy attaches to every
+#: ``Session`` and never touches itself) while that session's caller holds
+#: the named lock via :func:`gateway_route_binding_write`. ADR-017's
+#: production-bypass guard: ``SqlAlchemyProvisioningState.
+#: ensure_gateway_route_binding()`` checks this before mutating, so a
+#: caller that reaches it without having entered
+#: ``gateway_route_binding_lock()`` first (e.g. a convenience API pointed
+#: at a real state object outside the one sanctioned, lock-wrapped
+#: production call path) fails closed instead of silently writing
+#: unprotected. This is a real runtime check, not a naming convention or a
+#: static grep for callers.
+SESSION_INFO_LOCK_HELD_KEY = "gateway_route_binding_lock_held"
+
 
 class GatewayRouteBindingLockError(RuntimeError):
     """The named lock could not be acquired; callers must fail closed.
@@ -155,9 +168,19 @@ def gateway_route_binding_write(
     try:
         name = gateway_route_binding_lock_name(lock_connection)
         _get_lock(lock_connection, name, timeout_seconds)
+        previously_held = session.info.get(SESSION_INFO_LOCK_HELD_KEY, False)
+        session.info[SESSION_INFO_LOCK_HELD_KEY] = True
         try:
             yield
         finally:
+            session.info[SESSION_INFO_LOCK_HELD_KEY] = previously_held
             _release_lock(lock_connection, name)
     finally:
         lock_connection.close()
+
+
+def session_holds_gateway_route_binding_lock(session: Session) -> bool:
+    """Whether ``session`` is currently inside a
+    :func:`gateway_route_binding_write` block -- see
+    ``SESSION_INFO_LOCK_HELD_KEY`` for why this exists."""
+    return bool(session.info.get(SESSION_INFO_LOCK_HELD_KEY, False))

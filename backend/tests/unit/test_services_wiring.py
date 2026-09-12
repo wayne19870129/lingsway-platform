@@ -17,6 +17,7 @@ from backend.app.domain.provisioning import (
     ProvisionStep,
 )
 from backend.app.domain.subscription_render import RenderedSubscription
+from backend.app.infra.gateway_route_lock import GatewayRouteBindingLockError
 from backend.app.providers.accounting.mock import MockAccountingProvider
 from backend.app.providers.base import (
     CredentialDTO,
@@ -47,6 +48,8 @@ from backend.app.services import (
 @dataclass
 class State:
     events: list[str] = field(default_factory=list)
+    lock_acquire_count: int = 0
+    lock_error: Exception | None = None
 
     def mark_paid(self, order_id: str) -> None:
         self.events.append(f"paid:{order_id}")
@@ -70,6 +73,12 @@ class State:
 
     @contextmanager
     def gateway_route_binding_lock(self) -> Iterator[None]:
+        self.lock_acquire_count += 1
+        if self.lock_error is not None:
+            # ADR-017: simulates GET_LOCK() itself failing -- __enter__
+            # raises before the `with` block body (the caller's try/except
+            # around provision_apply_gateway) ever runs.
+            raise self.lock_error
         self.events.append("lock:acquire")
         try:
             yield
@@ -236,6 +245,95 @@ def test_external_failure_keeps_paid_order_marks_subscription_failed_and_disable
     assert runs.status is ProvisionStatus.FAILED
     assert "rollback" in provisioning_state.events
     assert workflow.transaction_events == ["begin", "commit", "begin", "commit"]
+    # ADR-017: CREATE_ACCOUNTING_USER (step 6) is part of phase A
+    # (provision_prepare), which runs before the named lock is ever
+    # touched -- this failure must never reach it.
+    assert provisioning_state.lock_acquire_count == 0
+
+
+def test_pending_manual_never_acquires_the_named_lock() -> None:
+    """ADR-017: CREATE_TENANT -> PENDING_MANUAL is also a phase-A-only
+    outcome; it must return before the named lock is ever touched."""
+    from backend.app.providers.egress.mock import MockEgressProvider
+
+    class PartiallyCreatedEgress(MockEgressProvider):
+        def create_tenant(self, label, quota_gb, thread_limit):  # type: ignore[no-untyped-def]
+            from backend.app.domain.provisioning import ExternalTenantCreationError
+
+            raise ExternalTenantCreationError("provider response lost", "external-tenant-1")
+
+    providers = registry()
+    providers = ProviderRegistry(
+        egress=PartiallyCreatedEgress(),
+        accounting=providers.accounting,
+        gateway=providers.gateway,
+        forwarder=providers.forwarder,
+        payment=providers.payment,
+        notify=providers.notify,
+        email=providers.email,
+        captcha=providers.captcha,
+        storage=providers.storage,
+        transport=providers.transport,
+    )
+    workflow = WorkflowState()
+    provisioning_state = State()
+
+    outcome = confirm_payment_and_provision(
+        command(),
+        request(),
+        object(),
+        provisioning_state,
+        Runs(),
+        workflow,
+        "receipt-1",
+        providers=providers,
+    )
+
+    assert outcome is not None
+    assert outcome.status is ProvisionStatus.PENDING_MANUAL
+    assert "provision:pending-manual" in workflow.events
+    assert provisioning_state.lock_acquire_count == 0
+    assert "rollback" not in provisioning_state.events
+
+
+def test_lock_acquisition_failure_disables_accounting_user_and_rolls_back() -> None:
+    """ADR-017: steps 1-6 already ran (accounting user created) before
+    GET_LOCK() is attempted. If it fails, provision_apply_gateway() never
+    runs -- so its own APPLY_GATEWAY exception handler (disable user,
+    alert, mark run failed) never fires either. This must still happen,
+    via the dedicated lock-acquisition-failure compensation path, plus the
+    same DB rollback and terminal order state any other mid-saga failure
+    gets. Critically: zero GatewayRouteBinding mutation, since
+    provision_apply_gateway() (the only caller of desired_routing_state())
+    never runs at all."""
+    providers = registry()
+    workflow = WorkflowState()
+    runs = Runs()
+    provisioning_state = State(lock_error=GatewayRouteBindingLockError("GET_LOCK timed out"))
+
+    with pytest.raises(GatewayRouteBindingLockError, match="GET_LOCK timed out"):
+        confirm_payment_and_provision(
+            command(),
+            request(),
+            object(),
+            provisioning_state,
+            runs,
+            workflow,
+            "receipt-1",
+            providers=providers,
+        )
+
+    assert isinstance(providers.accounting, MockAccountingProvider)
+    assert providers.accounting.disabled_users == {"customer-1"}
+    assert runs.status is ProvisionStatus.FAILED
+    assert "rollback" in provisioning_state.events
+    assert "order:paid" in workflow.events
+    assert "subscription:provision-failed" in workflow.events
+    # desired_routing_state()/ensure_gateway_route_binding() must never
+    # have been reached -- "lock:acquire" is only appended on a
+    # successful (non-raising) lock acquisition in this fake.
+    assert "lock:acquire" not in provisioning_state.events
+    assert provisioning_state.lock_acquire_count == 1
 
 
 @pytest.mark.parametrize(

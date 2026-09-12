@@ -13,6 +13,7 @@ from backend.app.domain.capacity import CapacityExceededError
 from backend.app.domain.provisioning import (
     ExternalTenantCreationError,
     ProvisioningService,
+    ProvisionOutcome,
     ProvisionRequest,
     ProvisionStatus,
     ProvisionStep,
@@ -215,6 +216,110 @@ def test_capacity_failure_happens_before_mark_paid() -> None:
 
     assert state.events == ["capacity-rejected:order-1"]
     assert not any(event.startswith("paid:") for event in state.events)
+
+
+def test_provision_prepare_runs_steps_1_to_6_without_touching_the_lock() -> None:
+    """ADR-017: phase A (provision_prepare) never touches
+    GatewayRouteBinding and never acquires the named lock -- the domain
+    layer has never acquired this lock itself; that is the caller's job
+    (see services.confirm_payment_and_provision)."""
+    from backend.app.domain.provisioning import ProvisioningCheckpoint
+
+    runs = FakeRuns()
+    state = FakeState()
+    checkpoint = service(state=state, runs=runs).provision_prepare(request())
+
+    assert isinstance(checkpoint, ProvisioningCheckpoint)
+    assert checkpoint.run_id == "run-1"
+    assert checkpoint.endpoint.endpoint_id == "egress-1"
+    assert checkpoint.tenant.tenant_id is not None
+    started_steps = [step for step, status in runs.steps if status == "STARTED"]
+    assert started_steps == [
+        ProvisionStep.CAPACITY,
+        ProvisionStep.ALLOCATE_ENDPOINT,
+        ProvisionStep.CREATE_TENANT,
+        ProvisionStep.STORE_CREDENTIALS,
+        ProvisionStep.APPLY_FORWARDER,
+        ProvisionStep.CREATE_ACCOUNTING_USER,
+    ]
+    assert "lock:acquire" not in state.events
+
+
+def test_provision_apply_gateway_continues_from_a_checkpoint_and_uses_the_lock() -> None:
+    """ADR-017: phase B is the only method that calls
+    desired_routing_state(); production callers must wrap it in
+    state.gateway_route_binding_lock() themselves (this test does so
+    explicitly, mirroring services.confirm_payment_and_provision, since
+    the domain layer itself never acquires the lock)."""
+    runs = FakeRuns()
+    state = FakeState()
+    svc = service(state=state, runs=runs)
+    checkpoint = svc.provision_prepare(request())
+    assert not isinstance(checkpoint, ProvisionOutcome)
+
+    with state.gateway_route_binding_lock():
+        outcome = svc.provision_apply_gateway(checkpoint, request())
+
+    assert outcome.status is ProvisionStatus.SUCCEEDED
+    assert outcome.subscription_url == "https://subs.example.invalid/s/one-time-token"
+    started_steps = [step for step, status in runs.steps if status == "STARTED"]
+    assert started_steps == [
+        ProvisionStep.CAPACITY,
+        ProvisionStep.ALLOCATE_ENDPOINT,
+        ProvisionStep.CREATE_TENANT,
+        ProvisionStep.STORE_CREDENTIALS,
+        ProvisionStep.APPLY_FORWARDER,
+        ProvisionStep.CREATE_ACCOUNTING_USER,
+        ProvisionStep.APPLY_GATEWAY,
+        ProvisionStep.ISSUE_SUBSCRIPTION,
+        ProvisionStep.NOTIFY,
+    ]
+    assert state.events[-2:] == ["lock:acquire", "lock:release"]
+
+
+def test_provision_is_equivalent_to_prepare_then_apply_gateway() -> None:
+    """provision() (kept for callers that don't need the phase split) must
+    still run every step in order for a plain success case -- it is a
+    composition of the two new methods, not a parallel implementation."""
+    runs = FakeRuns()
+    outcome = service(runs=runs).provision(request())
+    started_steps = [step for step, status in runs.steps if status == "STARTED"]
+    assert started_steps == list(ProvisionStep)
+    assert outcome.status is ProvisionStatus.SUCCEEDED
+
+
+def test_fail_apply_gateway_lock_acquisition_disables_user_and_marks_run_failed() -> None:
+    """ADR-017: the compensation for GET_LOCK() itself failing must be
+    identical to the in-band APPLY_GATEWAY exception handler's -- disable
+    the accounting user, raise the same alert, mark the run FAILED at the
+    APPLY_GATEWAY step -- since provision_apply_gateway() never got a
+    chance to run its own handler."""
+
+    accounting = TrackingAccounting()
+    notify = NoopNotifyProvider()
+    runs = FakeRuns()
+    svc = ProvisioningService(
+        egress=MockEgressProvider(),
+        accounting=accounting,
+        gateway=MockGatewayProvider(),
+        forwarder=MockForwarderProvider(),
+        notify=notify,
+        state=FakeState(),
+        runs=runs,
+        token_factory=lambda: "one-time-token",
+    )
+    checkpoint = svc.provision_prepare(request())
+    assert not isinstance(checkpoint, ProvisionOutcome)
+
+    lock_error = RuntimeError("GET_LOCK timed out")
+    svc.fail_apply_gateway_lock_acquisition(checkpoint, request(), lock_error)
+
+    assert accounting.disabled_users == {"customer-1"}
+    assert accounting.delete_calls == []
+    assert [event.event_type for event in notify.events] == ["GATEWAY_APPLY_FAILED"]
+    assert runs.status is ProvisionStatus.FAILED
+    assert runs.error == "GET_LOCK timed out"
+    assert (ProvisionStep.APPLY_GATEWAY, "FAILED") in runs.steps
 
 
 def test_routing_invariants_block_private_first_and_catch_all_last() -> None:
