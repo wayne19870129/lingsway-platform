@@ -25,6 +25,7 @@ from backend.app.providers.accounting.marzban import (
     MarzbanApiError,
     MarzbanContractError,
 )
+from backend.app.providers.base import AccountingCreateEffect, AccountingCreateUserError
 
 _BASE_URL = "https://marzban.internal.invalid"
 _ADMIN_USERNAME = "admin"
@@ -225,6 +226,14 @@ def test_create_user_naive_datetime_fails_closed() -> None:
         provider.create_user("alice", 1000, datetime(2027, 1, 1))  # noqa: DTZ001
 
 
+def test_create_user_pre_epoch_datetime_fails_closed() -> None:
+    """Major 2: a timezone-aware datetime whose epoch maps to <= 0 must
+    never be silently sent as Marzban's "0 = unlimited" sentinel."""
+    provider = _provider(_recording_handler([]))
+    with pytest.raises(MarzbanContractError, match="non-positive"):
+        provider.create_user("alice", 1000, datetime(1969, 1, 1, tzinfo=UTC))
+
+
 def test_create_response_maps_to_account_user_dto_with_routing_principal() -> None:
     provider = _provider(_recording_handler([]))
 
@@ -245,8 +254,11 @@ def test_create_response_missing_routing_principal_fails_closed() -> None:
 
     provider = _provider(_recording_handler([], user_response=user_response))
 
-    with pytest.raises(MarzbanContractError, match="routing_principal"):
+    with pytest.raises(AccountingCreateUserError, match="routing_principal") as excinfo:
         provider.create_user("alice", 1000, None)
+    # ADR-018: HTTP 200 proves the user was created -- a postcondition
+    # failure in the response body is CREATED, never NO_SIDE_EFFECT.
+    assert excinfo.value.effect is AccountingCreateEffect.CREATED
 
 
 def test_create_response_blank_routing_principal_fails_closed() -> None:
@@ -255,8 +267,9 @@ def test_create_response_blank_routing_principal_fails_closed() -> None:
 
     provider = _provider(_recording_handler([], user_response=user_response))
 
-    with pytest.raises(MarzbanContractError, match="routing_principal"):
+    with pytest.raises(AccountingCreateUserError, match="routing_principal") as excinfo:
         provider.create_user("alice", 1000, None)
+    assert excinfo.value.effect is AccountingCreateEffect.CREATED
 
 
 def test_create_response_username_mismatch_fails_closed() -> None:
@@ -265,8 +278,9 @@ def test_create_response_username_mismatch_fails_closed() -> None:
 
     provider = _provider(_recording_handler([], user_response=user_response))
 
-    with pytest.raises(MarzbanContractError, match="username"):
+    with pytest.raises(AccountingCreateUserError, match="username") as excinfo:
         provider.create_user("alice", 1000, None)
+    assert excinfo.value.effect is AccountingCreateEffect.CREATED
 
 
 @pytest.mark.parametrize(
@@ -277,6 +291,8 @@ def test_create_response_username_mismatch_fails_closed() -> None:
         {"expire": True},
         {"status": ""},
         {"status": 123},
+        {"status": "unknown-status"},
+        {"expire": -123},
     ],
 )
 def test_create_response_malformed_fields_fail_closed(overrides: dict[str, object]) -> None:
@@ -285,8 +301,26 @@ def test_create_response_malformed_fields_fail_closed(overrides: dict[str, objec
 
     provider = _provider(_recording_handler([], user_response=user_response))
 
-    with pytest.raises(MarzbanContractError):
+    with pytest.raises(AccountingCreateUserError) as excinfo:
         provider.create_user("alice", 1000, None)
+    assert excinfo.value.effect is AccountingCreateEffect.CREATED
+
+
+@pytest.mark.parametrize("status", ["disabled", "limited", "expired", "on_hold"])
+def test_create_response_non_active_status_fails_closed_as_created(status: str) -> None:
+    """Major 2: create_user() explicitly requests status="active" -- any
+    other pinned status back means the just-created account is not in
+    the requested usable state. This must never be treated as a plain
+    success that continues into APPLY_GATEWAY."""
+
+    def user_response(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_user_payload(status=status))
+
+    provider = _provider(_recording_handler([], user_response=user_response))
+
+    with pytest.raises(AccountingCreateUserError, match="active") as excinfo:
+        provider.create_user("alice", 1000, None)
+    assert excinfo.value.effect is AccountingCreateEffect.CREATED
 
 
 # ---------------------------------------------------------------------------
@@ -302,13 +336,49 @@ def test_create_user_409_fails_closed_without_reconciliation() -> None:
 
     provider = _provider(_recording_handler(requests, user_response=user_response))
 
-    with pytest.raises(MarzbanApiError) as excinfo:
+    with pytest.raises(AccountingCreateUserError) as excinfo:
         provider.create_user("alice", 1000, None)
-    assert excinfo.value.status_code == 409
+    # ADR-018/Major-1: exact-source proven pre-commit rejection (409 is
+    # only raised after crud.create_user()'s IntegrityError -> rollback)
+    # -- no user was ever created, so this is NO_SIDE_EFFECT, never
+    # something that would justify disabling any username.
+    assert excinfo.value.effect is AccountingCreateEffect.NO_SIDE_EFFECT
 
     # No GET-existing-user reconciliation call was made.
     user_calls = [r for r in requests if r.url.path == "/api/user" or "/api/user/" in r.url.path]
     assert len(user_calls) == 1
+
+
+def test_create_user_400_fails_closed_as_no_side_effect() -> None:
+    """Exact-source (app/routers/user.py::add_user): the unsupported-
+    protocol 400 is raised before crud.create_user() is ever called."""
+    requests: list[httpx.Request] = []
+
+    def user_response(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"detail": "Protocol vless is disabled"})
+
+    provider = _provider(_recording_handler(requests, user_response=user_response))
+
+    with pytest.raises(AccountingCreateUserError) as excinfo:
+        provider.create_user("alice", 1000, None)
+    assert excinfo.value.effect is AccountingCreateEffect.NO_SIDE_EFFECT
+
+
+def test_create_user_5xx_fails_closed_as_ambiguous_not_no_side_effect() -> None:
+    """Major 1: crud.create_user() commits unconditionally as soon as it
+    runs; a 5xx could still occur after that commit (background task
+    scheduling, response serialization, audit reporting). A 5xx must
+    never be assumed NO_SIDE_EFFECT."""
+    requests: list[httpx.Request] = []
+
+    def user_response(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="internal error")
+
+    provider = _provider(_recording_handler(requests, user_response=user_response))
+
+    with pytest.raises(AccountingCreateUserError) as excinfo:
+        provider.create_user("alice", 1000, None)
+    assert excinfo.value.effect is AccountingCreateEffect.AMBIGUOUS
 
 
 def test_transport_error_after_create_post_is_not_retried() -> None:
@@ -322,11 +392,28 @@ def test_transport_error_after_create_post_is_not_retried() -> None:
 
     provider = _provider(handler)
 
-    with pytest.raises(MarzbanApiError, match="transport layer"):
+    with pytest.raises(AccountingCreateUserError, match="transport layer") as excinfo:
         provider.create_user("alice", 1000, None)
+    assert excinfo.value.effect is AccountingCreateEffect.AMBIGUOUS
 
     post_attempts = [r for r in requests if r.url.path == "/api/user"]
     assert len(post_attempts) == 1
+
+
+def test_authentication_failure_before_create_dispatch_is_no_side_effect() -> None:
+    """A clean auth rejection (never even reaching the create endpoint
+    with valid credentials) is always NO_SIDE_EFFECT -- never AMBIGUOUS,
+    since the pinned Admin.get_current dependency always runs before
+    add_user()'s body."""
+
+    def token_response(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401)
+
+    provider = _provider(_recording_handler([], token_response=token_response))
+
+    with pytest.raises(AccountingCreateUserError) as excinfo:
+        provider.create_user("alice", 1000, None)
+    assert excinfo.value.effect is AccountingCreateEffect.NO_SIDE_EFFECT
 
 
 # ---------------------------------------------------------------------------
@@ -435,6 +522,28 @@ def test_get_usage_uses_real_upstream_status_string() -> None:
     provider = _provider(_recording_handler([], user_response=user_response))
     usage = provider.get_usage("alice")
     assert usage.status == "limited"
+
+
+def test_get_usage_unknown_status_fails_closed() -> None:
+    def user_response(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_user_payload(status="not-a-real-status"))
+
+    provider = _provider(_recording_handler([], user_response=user_response))
+    with pytest.raises(MarzbanContractError, match="UserStatus"):
+        provider.get_usage("alice")
+
+
+def test_get_usage_negative_expire_response_fails_closed() -> None:
+    """get_usage() itself does not read 'expire', but the shared
+    _expire_from_marzban() helper (also used by create_user()'s response
+    parsing) must fail closed on a negative value rather than treating it
+    as unlimited -- covered directly since get_connection_links()/
+    get_usage() never call _parse_account_user()."""
+    from backend.app.providers.accounting.marzban import _expire_from_marzban
+
+    with pytest.raises(MarzbanContractError, match="negative"):
+        _expire_from_marzban(-1, operation="test")
+    assert _expire_from_marzban(0, operation="test") is None
 
 
 # ---------------------------------------------------------------------------

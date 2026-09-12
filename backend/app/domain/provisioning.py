@@ -10,6 +10,8 @@ from typing import Protocol
 from backend.app.domain.capacity import CapacityExceededError, ensure_capacity
 from backend.app.domain.quota import quota_gb_to_bytes
 from backend.app.providers.base import (
+    AccountingCreateEffect,
+    AccountingCreateUserError,
     AccountingProvider,
     AccountUserDTO,
     CredentialDTO,
@@ -364,23 +366,63 @@ class ProvisioningService:
             # never computes a Marzban-style f"{id}.{username}" principal
             # itself (that formula is the real provider's responsibility)
             # and never falls back to request.username/an egress
-            # tenant_id when the contract is violated.
+            # tenant_id when the contract is violated. A postcondition
+            # failure here means the provider's create_user() call already
+            # returned successfully -- ownership is established, so this
+            # is classified the same as ADR-018's CREATED effect.
             if account_user.username != request.username:
-                raise RuntimeError(
+                raise AccountingCreateUserError(
                     "accounting provider contract violation: create_user() "
                     f"returned username {account_user.username!r}, expected "
-                    f"{request.username!r}"
+                    f"{request.username!r}",
+                    effect=AccountingCreateEffect.CREATED,
                 )
             if not account_user.routing_principal.strip():
-                raise RuntimeError(
+                raise AccountingCreateUserError(
                     "accounting provider contract violation: create_user() "
-                    "returned an empty or whitespace-only routing_principal"
+                    "returned an empty or whitespace-only routing_principal",
+                    effect=AccountingCreateEffect.CREATED,
                 )
+        except AccountingCreateUserError as exc:
+            if exc.effect is AccountingCreateEffect.NO_SIDE_EFFECT:
+                # ADR-018: the provider has exact-source evidence no user
+                # was ever created for this request -- disabling
+                # request.username here would blindly target an
+                # unrelated, pre-existing external account (e.g. a 409
+                # username conflict). Skip compensation entirely.
+                self.state.rollback_database()
+                self._failed(run_id, ProvisionStep.CREATE_ACCOUNTING_USER, exc)
+                raise
+            if exc.effect is AccountingCreateEffect.AMBIGUOUS:
+                # ADR-018: the provider cannot prove whether a user was
+                # created (e.g. a transport failure after dispatch) --
+                # never blind-disable, never retry the create, never
+                # proceed to APPLY_GATEWAY. This mirrors CREATE_TENANT's
+                # existing PENDING_MANUAL pattern exactly (ADR-017): no
+                # internal mark_status() here, only best-effort progress
+                # bookkeeping, so the terminal PENDING_MANUAL status is
+                # only ever durably recorded by the caller after its own
+                # business commit (services.confirm_payment_and_provision()
+                # already handles this generically for any phase-A
+                # ProvisionOutcome).
+                self.runs.record_step(
+                    run_id, ProvisionStep.CREATE_ACCOUNTING_USER, "PENDING_MANUAL"
+                )
+                return ProvisionOutcome(
+                    run_id,
+                    ProvisionStatus.PENDING_MANUAL,
+                    pending_manual_error=(
+                        f"accounting user creation result is ambiguous: {exc}"
+                    ),
+                )
+            # CREATED: ownership is established -- compensate.
+            return self._compensate_created_accounting_user(run_id, request, exc)
         except Exception as exc:
-            self.accounting.disable_user(request.username)
-            self.state.rollback_database()
-            self._failed(run_id, ProvisionStep.CREATE_ACCOUNTING_USER, exc)
-            raise
+            # A provider that has not adopted ADR-018's typed contract
+            # (or a genuine bug) -- treated conservatively as if a user
+            # may have been created, preserving this method's pre-ADR-018
+            # default behavior (always attempt to disable).
+            return self._compensate_created_accounting_user(run_id, request, exc)
         self._success(run_id, ProvisionStep.CREATE_ACCOUNTING_USER)
 
         return ProvisioningCheckpoint(
@@ -555,6 +597,41 @@ class ProvisioningService:
             "GATEWAY_APPLY_FAILED", {"run_id": checkpoint.run_id, "user": request.username}
         )
         self._failed(checkpoint.run_id, ProvisionStep.APPLY_GATEWAY, error)
+
+    def _compensate_created_accounting_user(
+        self, run_id: str, request: ProvisionRequest, exc: Exception
+    ) -> ProvisionOutcome:
+        """ADR-018 ``CREATED``-effect (and unclassified-exception)
+        compensation for ``CREATE_ACCOUNTING_USER``: ownership of
+        ``request.username`` is established (or cannot be ruled out), so
+        attempt to disable it (never ``DELETE`` -- AGENTS.md 铁律 4).
+
+        If disabling succeeds, this is a fully-compensated failure --
+        unwind the DB transaction and raise, exactly as this step's
+        failure handling has always behaved. If disabling itself fails,
+        the external account may still be enabled: this can never be
+        reported as a plain, fully-compensated ``FAILED`` run, so it
+        becomes ``PENDING_MANUAL`` instead (same best-effort,
+        caller-persists-after-its-own-commit pattern as
+        ``CREATE_TENANT``/the ``AMBIGUOUS`` branch above -- see ADR-017).
+        """
+        try:
+            self.accounting.disable_user(request.username)
+        except Exception:
+            self.runs.record_step(
+                run_id, ProvisionStep.CREATE_ACCOUNTING_USER, "PENDING_MANUAL"
+            )
+            return ProvisionOutcome(
+                run_id,
+                ProvisionStatus.PENDING_MANUAL,
+                pending_manual_error=(
+                    "accounting user creation failed, and disabling the "
+                    f"created user also failed: {exc}"
+                ),
+            )
+        self.state.rollback_database()
+        self._failed(run_id, ProvisionStep.CREATE_ACCOUNTING_USER, exc)
+        raise exc
 
     def _alert(self, event_type: str, payload: Mapping[str, object]) -> None:
         try:

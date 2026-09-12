@@ -1,0 +1,197 @@
+# ADR-018: `AccountingProvider.create_user()` failure ownership contract
+
+- 状态: 已接受
+- 日期: 2026-09-12
+- 决策范围: TASK-T16 Phase 2B7 独立复审（ChatGPT，针对 PR #64 exact head
+  `d03e519199699310f659bd643c5d9addbf2ee77e` 的 Major 1）明确授权的、
+  仅限于 `AccountingProvider.create_user()` 失败时 external-side-effect
+  certainty / compensation ownership 的最小 architecture correction。
+  **不**扩展成通用 provider retry/idempotency 框架，**不**引入
+  409-reconciliation（"GET 已存在用户并接管"）逻辑——那仍然是一个未做出
+  的、独立的 idempotency 架构决策，本 ADR 明确不做。
+- 前置: `ADR-016-route-identity-architecture-unblock.md` (Decision 3 —
+  `routing_principal` 契约，unchanged)，`ADR-017-provisioning-lock-hold-span-narrowing.md`
+  (run-persistence-ordering / PENDING_MANUAL 语义，unchanged，本 ADR 复用
+  其既有 `ProvisionOutcome(PENDING_MANUAL, pending_manual_error=...)`
+  模式，不重新设计)。
+
+## Context
+
+TASK-T16 Phase 2B7（PR #64）实现了 `MarzbanAccountingProvider`。其
+`create_user()` 在收到 HTTP `409`（"用户已存在"）时正确地 fail closed、
+不做任何 reconciliation。但 `ProvisioningService.provision_prepare()`
+的 `CREATE_ACCOUNTING_USER` 步骤对 **任何** `create_user()` 异常都无条件
+执行：
+
+```python
+except Exception as exc:
+    self.accounting.disable_user(request.username)
+    ...
+```
+
+当 `create_user()` 因为 `409` 失败时，`request.username` 对应的 Marzban
+用户**并非本次 provisioning 创建**——可能是数据早已存在的、与本次请求无
+关的另一条业务记录（例如用户名冲突、或历史遗留账号）。无条件
+`disable_user(request.username)` 会在这种情况下禁用一个不属于本次
+saga、且本来完全正常的外部账号，这是一个严重的 ownership 安全缺口。
+
+同样的问题也存在于 transport-ambiguous 失败：`POST /api/user` 的请求可能
+根本没有到达服务器、到达但未创建、已经创建成功但响应丢失、或服务器返回
+了 `409` 但响应丢失——在这些情况下都无法确认"本次调用是否真的创建了
+这个用户"，因此同样不能盲目 `disable_user()`。
+
+修复要求引入一个不靠猜测 HTTP 状态码、而是基于 exact-source 验证的
+"这个失败发生在 side effect 提交之前还是之后（或无法确定）"分类。
+
+## Decision: a typed three-way `AccountingCreateEffect` classification at the provider boundary
+
+`backend/app/providers/base.py` 新增：
+
+```python
+class AccountingCreateEffect(Enum):
+    NO_SIDE_EFFECT = "no_side_effect"
+    CREATED = "created"
+    AMBIGUOUS = "ambiguous"
+
+
+class AccountingCreateUserError(RuntimeError):
+    def __init__(self, message: str, *, effect: AccountingCreateEffect) -> None:
+        self.effect = effect
+        super().__init__(message)
+```
+
+这是唯一跨越 provider/domain 边界的新契约类型——`domain/provisioning.py`
+只依赖 `backend/app/providers/base.py`，永远不 import
+`backend.app.providers.accounting.marzban`（或任何其他具体 provider 模块）。
+`effect` 是一个 typed `Enum` 字段，调用方不得靠字符串 grep 或
+`status_code` 猜测语义。
+
+### 三种分类语义
+
+1. **`NO_SIDE_EFFECT`** — provider 能够（基于 exact-source 证据）证明本次
+   请求在服务端创建 side effect **之前**就已经被拒绝。
+   - 不允许 `disable_user()`。
+   - `state.rollback_database()` → 该 run 标记 `FAILED` → 原异常
+     `raise`。
+   - 不进入 `APPLY_GATEWAY`，不获取 ADR-016 named lock（`CREATE_ACCOUNTING_USER`
+     本来就在 `provision_prepare()` 里，phase B 尚未开始）。
+
+2. **`CREATED`** — provider 能够证明本次请求**已经**在服务端创建了这个
+   用户，但随后的 contract/postcondition 校验失败（例如响应缺少
+   `routing_principal`、`username` 不匹配、或返回了一个不可用的
+   `status`）。ownership 已确立：
+   - 尝试 `disable_user()`（never `DELETE`——AGENTS.md 铁律 4）。
+   - 若 `disable_user()` 成功：`state.rollback_database()` → `FAILED` →
+     原异常 `raise`（与本 ADR 之前的既有行为完全一致）。
+   - 若 `disable_user()` 本身失败：外部账号可能仍然是 enabled 状态，
+     **不得**伪装成一个已经完整补偿的普通 `FAILED`。改为
+     `PENDING_MANUAL`（复用 ADR-017 已有的
+     `ProvisionOutcome(PENDING_MANUAL, pending_manual_error=...)` 模式，
+     与 `CREATE_TENANT` 步骤的既有先例完全同构——不重新设计
+     run-persistence-ordering，见"复用 ADR-017 既有模式"一节）。
+
+3. **`AMBIGUOUS`** — provider 无法证明请求发生在 side effect 提交之前
+   还是之后（例如 dispatch 阶段本身的 transport 失败：超时/连接重置/
+   响应丢失，或一个未在 exact-source 中被证明是 pre-commit 的意外状态码）。
+   - 不自动重试 `create_user()`（保持 TASK-T16 Phase 2B7 已确立的
+     "ambiguous write 从不自动重试" 规则不变）。
+   - 不盲目 `disable_user()`（这正是本 ADR 要修复的 ownership bug）。
+   - 不继续 `APPLY_GATEWAY`，不获取 named lock。
+   - `PENDING_MANUAL`，与 `CREATE_TENANT` 同构。
+
+### 未分类（不是 `AccountingCreateUserError` 的）异常
+
+任何 provider（包括测试用的 `MockAccountingProvider`）抛出的、不是
+`AccountingCreateUserError` 的普通异常，视为与 `CREATED` 相同的处理路径
+（尝试 disable，成功则按原有方式 FAILED+raise，失败则 PENDING_MANUAL）——
+这是本 ADR 之前 `ProvisioningService` 对 `create_user()` 任何失败的既有
+默认行为，保持向后兼容（现有 `test_step_6_failure_disables_user_and_never_deletes`、
+`test_external_failure_keeps_paid_order_marks_subscription_failed_and_disables_user`
+均依赖"任意异常 → 尝试 disable → FAILED"这一既有语义，且均使用普通
+`RuntimeError` 注入，不使用 `AccountingCreateUserError`）。一个尚未升级
+到本 ADR 类型化契约的 provider 因此不会退化成"完全不补偿"——它只是拿不到
+`NO_SIDE_EFFECT`/`AMBIGUOUS` 更精确分类带来的保护，这是该 provider 自己
+应尽快迁移的技术债，而不是本 ADR 引入的新风险。
+
+## 复用 ADR-017 既有模式，不重新设计 run-persistence-ordering
+
+`CREATE_TENANT` 步骤（`provision_prepare()`）早已确立"外部 side effect
+结果不确定时不要在 provider 边界内部直接 `mark_status(PENDING_MANUAL)`，
+而是返回 `ProvisionOutcome(PENDING_MANUAL, pending_manual_error=...)`，
+由调用方 `services.confirm_payment_and_provision()` 在自己的业务提交
+(`order_state.mark_provision_pending()`) 真正完成之后，才调用
+`ProvisioningService.mark_run_pending_manual()`（best-effort）"这一完整
+的、已经过独立审查四轮打磨的 ordering 契约（见 ADR-017"PENDING_MANUAL
+terminal persistence ordering"一节）。本 ADR 的 `AMBIGUOUS`/
+`CREATED`-disable-失败 两条路径**原样复用**这个既有契约，不引入任何新的
+persistence-ordering 设计：
+
+- `provision_prepare()` 内这两条分支只做既有的 best-effort
+  `self.runs.record_step(run_id, CREATE_ACCOUNTING_USER, "PENDING_MANUAL")`，
+  不直接 `mark_status()`。
+- 返回 `ProvisionOutcome(run_id, PENDING_MANUAL, pending_manual_error=...)`。
+- `services.confirm_payment_and_provision()` 已有的
+  `if isinstance(prepared, ProvisionOutcome):` 分支（`order_state.mark_provision_pending()`
+  → `provisioning.mark_run_pending_manual()`）**不需要任何修改**——它是
+  泛化处理任意 phase-A `PENDING_MANUAL` 结果的，`CREATE_ACCOUNTING_USER`
+  产生的 `PENDING_MANUAL` 与 `CREATE_TENANT` 产生的走的是完全相同的
+  下游代码路径。
+
+### 是否需要 `state.rollback_database()`
+
+`CREATE_TENANT` 的 `PENDING_MANUAL` 分支不调用 `rollback_database()`，
+因为该步骤运行时（steps 1-6 中的第 3 步）尚未有任何 DB mutation 被
+flush。`CREATE_ACCOUNTING_USER`（第 6 步）运行时，`STORE_CREDENTIALS`
+(4)、`APPLY_FORWARDER` (5) 已经 flush 了真实的凭证/forwarder-desired-state
+mutation——这些代表已经真实发生的外部/业务进度。本 ADR 决定：
+`AMBIGUOUS`/`CREATED`-disable-失败 两条 `PENDING_MANUAL` 分支同样**不**
+调用 `rollback_database()`，让这些已经真实发生的进度随调用方
+`order_state.mark_provision_pending()` 的业务提交一并提交，而不是被
+静默丢弃——manual-review 状态的本质是"业务结果不确定，需要人工核实"，
+而不是"回滚重来"；已经真实发生的 `STORE_CREDENTIALS`/`APPLY_FORWARDER`
+进度和"accounting 侧不确定"是两件独立的事，前者的真实性不应因为后者的
+不确定性被抹去。`NO_SIDE_EFFECT`（确定失败，无 side effect）和
+`CREATED`-disable-成功（已完整补偿）两条路径则维持本 ADR 之前的既有行为：
+`rollback_database()` → `FAILED` → `raise`，把这次 provisioning 尝试
+完整地撤销。
+
+## 命名/接口最小化
+
+`AccountingProvider` Protocol（`base.py`）本身签名不变——Python
+`Protocol` 不声明异常类型，`create_user()` 仍然是
+`(username, quota_bytes, expire_at) -> AccountUserDTO`，只是其文档新增
+一句：真实 provider 在能够分类失败时应 `raise AccountingCreateUserError`
+而不是裸露的 provider-specific 异常。`MarzbanAccountingProvider`
+（`backend/app/providers/accounting/marzban.py`）是本仓库第一个、也是
+目前唯一一个产生该分类的 provider；`create_user()` 内部通过两个已有的、
+区分"是否曾经真正 dispatch 到网络层"的异常子类
+（`MarzbanAuthenticationError`——认证失败，请求从未以合法身份到达
+路由；`MarzbanTransportError`——请求已经 dispatch，但传输层失败，
+结果不确定）加上对响应状态码的 exact-source 验证结果（`400`/`409` 均已
+证明发生在 `crud.create_user()` 的 `db.commit()` 之前，因此
+`NO_SIDE_EFFECT`；其余非 `200` 状态码——包括 5xx——`crud.create_user()`
+本身在 `add_user()` 路由函数体内先于任何后续失败点执行 `db.commit()`，
+无法从状态码本身证明提交发生在此之前，因此一律 `AMBIGUOUS`，不得默认为
+`NO_SIDE_EFFECT`），把这一切映射到 `AccountingCreateEffect`。不引入任何
+新的通用 retry/backoff/idempotency-key 机制。
+
+## 不做的事（显式拒绝）
+
+- **不**实现 `409` 或任何其它状态的自动 reconciliation（GET 已存在用户
+  并"接管"/合并）——这仍然是一个未做出的 idempotency 架构决策。
+- **不**引入通用 provider retry 框架——本 ADR 严格限定在
+  `create_user()` 一个方法的失败分类。
+- **不**修改 ADR-016 Decision 3 的 `routing_principal` 契约、ADR-017 的
+  named-lock 拓扑或 run-persistence-ordering 设计——两者原样复用。
+- **不**让 `disable_user()`/`set_quota()`/`set_expire()`/
+  `get_connection_links()`/`get_usage()` 的失败处理发生任何变化——本
+  ADR 只影响 `create_user()` 的失败路径。
+
+## 重新评估条件
+
+- 若未来确有必要为 `409`（或其它确定的 pre-commit 拒绝）引入
+  reconciliation 逻辑，需要一份独立的、显式的 idempotency ADR，而不是
+  在本 ADR 或后续 PR 中静默加入。
+- 若为其它 `AccountingProvider` 实现（非 Marzban）接入本契约，且其
+  exact-source 无法证明某个状态码的 pre/post-commit 归属，应默认归类为
+  `AMBIGUOUS`，不得靠猜测归类为 `NO_SIDE_EFFECT`。

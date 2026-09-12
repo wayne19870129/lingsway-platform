@@ -1263,3 +1263,97 @@ adapter、DTO/编排改动、独立的 reconciliation 工具/作业、
     测试离线，没有连接任何真实 Marzban。
   - 既有数据 reconciliation（ADR-016 已定方向的独立工具，未实现）。
   - 生产部署。
+
+- **Phase 2B7 round 2（本轮，ADR-018——ChatGPT 对 PR #64 exact head
+  `d03e519199699310f659bd643c5d9addbf2ee77e` 的独立复审，Major 1+2）**：
+
+  **Major 1（`CREATE_ACCOUNTING_USER` compensation ownership 安全缺口）**：
+  `ProvisioningService.provision_prepare()` 此前对 `create_user()` 的
+  **任何**异常都无条件 `disable_user(request.username)`——当失败原因是
+  `409`（用户名冲突）时，`request.username` 可能是一个与本次
+  provisioning **无关**、早已存在的 Marzban 账号，无条件 disable 会
+  错误地禁用一个正常账号；transport-ambiguous 失败（POST 已 dispatch
+  但响应丢失/超时/连接重置）同样无法确认是否真的创建了用户，也不能盲目
+  disable。修复：新增 `docs/80-decisions/ADR-018-accounting-create-user-failure-contract.md`，
+  引入 `backend/app/providers/base.py::AccountingCreateEffect`
+  （`NO_SIDE_EFFECT`/`CREATED`/`AMBIGUOUS`，typed enum）+
+  `AccountingCreateUserError`（携带 `effect`），`MarzbanAccountingProvider.
+  create_user()` 按 exact-source 验证结果分类：`400`/`409`（均已证明发生
+  在 `crud.create_user()` 的 `db.commit()` 之前）→ `NO_SIDE_EFFECT`；
+  认证失败（pinned `Admin.get_current` FastAPI `Depends()` 证明恒在路由体
+  之前执行）→ `NO_SIDE_EFFECT`；transport 层异常（`MarzbanTransportError`，
+  请求已 dispatch，结果未知）→ `AMBIGUOUS`；其余非 200 状态码（含 5xx，
+  `crud.create_user()` 提交后仍可能在响应序列化/后台任务/审计阶段失败）
+  → `AMBIGUOUS`，不得默认视为 `NO_SIDE_EFFECT`；HTTP 200 但响应
+  postcondition 校验失败（`routing_principal`/`username`/`status` 不合法）
+  → `CREATED`。`ProvisioningService.provision_prepare()` 按 `effect`
+  分流：`NO_SIDE_EFFECT` 不 disable、直接 rollback+FAILED+raise；
+  `AMBIGUOUS` 不 disable、不重试、复用 ADR-017 既有的
+  `CREATE_TENANT`/`PENDING_MANUAL` 模式（`ProvisionOutcome(PENDING_MANUAL,
+  pending_manual_error=...)`，caller 业务提交后才 `mark_run_pending_manual()`）；
+  `CREATED`（以及任何未采用本契约的 provider 抛出的普通异常，向后兼容
+  既有 `MockAccountingProvider`/测试行为）尝试 `disable_user()`——成功则
+  rollback+FAILED+raise（与本 ADR 之前行为一致），disable 本身失败则同样
+  转 `PENDING_MANUAL`（外部账号可能仍是 enabled，不能伪装成已完整补偿的
+  `FAILED`）。domain 层依然只依赖 `providers/base.py`，从不 import
+  `providers.accounting.marzban`。
+
+  **Major 2（response parser 部分场景未 fail closed）**：
+  - `_expire_from_marzban()` 原先 `value <= 0` 一律映射为 `None`（"无
+    过期"），docstring 却已声明负值 invalid——实际代码与文档矛盾，会把
+    `expire=-123` 静默当成"无限期"。修复：`0` → `None`（保留"0=无限期"
+    contract），负值 → `MarzbanContractError`，不再用 `<=0` 一刀切。
+  - `_map_expire_to_marzban()` 对一个 timezone-aware 但换算后
+    epoch `<= 0` 的 datetime（例如早于或等于 1970-01-01T00:00:00Z），
+    此前会静默发送这个非正 epoch 给 Marzban，与"`0` 是无限期"的语义
+    冲突；修复为在这种情况下 fail closed（`MarzbanContractError`），不
+    静默发送。
+  - 新增 `_PINNED_USER_STATUSES`（exact-source `app/models/user.py::
+    UserStatus` 完整枚举：`active`/`disabled`/`limited`/`expired`/
+    `on_hold`）与 `_require_pinned_status()`；`_parse_account_user()`
+    与 `get_usage()` 均改用它——未知 `status` 字符串一律
+    `MarzbanContractError`，不再作为不透明字符串直接透传。
+  - `create_user()` 显式请求 `status="active"`；响应若不是
+    `"active"`（包括 `disabled`/`limited`/`expired`/`on_hold`），视为
+    "已创建但不满足本次请求的可用性 postcondition"，走上面 Major 1 的
+    `CREATED` 补偿路径，不允许继续进入 `APPLY_GATEWAY`。
+
+  **测试**：
+  - `backend/tests/unit/test_marzban_accounting_provider.py` 新增/修改
+    覆盖：409/400/5xx/认证失败的 `effect` 分类断言、routing_principal/
+    username/status 各类 postcondition 失败均断言 `effect is CREATED`、
+    负 expire 响应 fail closed、pre-epoch 请求 expire fail closed、
+    create 返回非 active 状态（`disabled`/`limited`/`expired`/
+    `on_hold`）fail closed、`get_usage()` 未知 status fail closed；
+    离线测试合计 51 条（新增 12 条）。
+  - `backend/tests/integration/test_provisioning_phase_boundary.py`
+    新增 4 条 **production-backed** 回归测试（真实
+    `MarzbanAccountingProvider` + `httpx.MockTransport`，通过完整的
+    `confirm_payment_and_provision()` 生产调用路径，对接真实 MySQL/
+    MariaDB 的 `_SqlAlchemyProvisionRuns`/`_OrderProvisioningState`，
+    不是手写 fake）：
+    1. `test_production_409_create_conflict_never_disables_an_unrelated_user`——
+       409 时零 PUT/DELETE、DB rollback、run FAILED、零
+       `GatewayRouteBinding`、named lock 从未获取。
+    2. `test_production_ambiguous_transport_failure_requires_manual_review`——
+       transport 失败时 POST 恰好一次（不重试）、零 PUT、
+       `PENDING_MANUAL`、零 `GatewayRouteBinding`、named lock 从未获取。
+    3. `test_production_created_user_with_malformed_response_is_disabled_and_failed`——
+       200+malformed 响应时恰好一次 disable PUT、从不 DELETE、disable
+       成功后 rollback+FAILED。
+    4. `test_production_created_user_disable_failure_requires_manual_review`——
+       disable 本身失败时恰好一次 disable 尝试、`PENDING_MANUAL`（不是
+       伪装成功也不是伪装成已完整补偿的 FAILED）、零
+       `GatewayRouteBinding`。
+
+  **验证**：`ruff check backend/` 全过；
+  `mypy backend/app backend/tests`（strict）无问题；
+  `pytest backend/tests/unit backend/tests/guards -q` → 195 通过
+  （0 回归）；`pytest backend/tests/integration -q` → 51 通过、1 个
+  与本次改动无关的既有环境限制失败（沙箱是 MariaDB 10.11，非真实
+  MySQL 8.4，`test_mysql_84_database_is_reachable` 的版本字符串检查）。
+
+  **仍未完成**（不得宣称"Marzban 已接入生产"，与 round 1 完全一致）：
+  `registry.py` 未改动（`ACCOUNTING_PROVIDER=marzban` 仍不可选）、无
+  patched Marzban 镜像构建/部署、无真实 staging 凭据/真实网络调用、无
+  409 reconciliation（ADR-018 明确保留为未来独立决策）、无生产部署。

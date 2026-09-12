@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
+from enum import Enum
 from typing import Protocol
 
 
@@ -205,10 +206,63 @@ class EgressProvider(Protocol):
     ) -> ReplacementDTO: ...
 
 
+class AccountingCreateEffect(Enum):
+    """ADR-018: certainty classification for an ``AccountingProvider.
+    create_user()`` failure's real external side effect. Domain
+    compensation (``ProvisioningService``) branches on this instead of
+    guessing from an HTTP status code or exception message.
+
+    - ``NO_SIDE_EFFECT``: the provider has exact-source evidence the
+      request was rejected before any user was created server-side (e.g.
+      a duplicate-username conflict). Safe to fail closed with no
+      compensation -- there is nothing to disable, and doing so anyway
+      would blindly target an unrelated, pre-existing external account.
+    - ``CREATED``: the provider has evidence a user *was* created for
+      this request, but a postcondition (response contract) failed
+      afterwards. Ownership is established -- compensation (disable,
+      never delete) is required.
+    - ``AMBIGUOUS``: the provider cannot prove which of the above
+      happened (e.g. a transport failure after the request was
+      dispatched). Never auto-retry the create, never blindly disable,
+      never proceed past this step -- requires manual review.
+    """
+
+    NO_SIDE_EFFECT = "no_side_effect"
+    CREATED = "created"
+    AMBIGUOUS = "ambiguous"
+
+
+class AccountingCreateUserError(RuntimeError):
+    """ADR-018: raised by ``AccountingProvider.create_user()`` for a
+    failure the provider can classify via :class:`AccountingCreateEffect`.
+    This is the only typed contract across the provider/domain boundary
+    for this method -- the domain layer depends on this exception and
+    ``effect``, never on a concrete provider module's own exception
+    hierarchy (e.g. ``backend.app.providers.accounting.marzban``, which
+    the domain layer must never import).
+    """
+
+    def __init__(self, message: str, *, effect: AccountingCreateEffect) -> None:
+        self.effect = effect
+        super().__init__(message)
+
+
 class AccountingProvider(Protocol):
     def create_user(
         self, username: str, quota_bytes: int, expire_at: datetime | None
-    ) -> AccountUserDTO: ...
+    ) -> AccountUserDTO:
+        """Create an accounting user.
+
+        ADR-018: when a failure's external-side-effect certainty can be
+        classified, providers should raise :class:`AccountingCreateUserError`
+        with the appropriate :class:`AccountingCreateEffect` rather than a
+        provider-specific exception -- this lets
+        ``ProvisioningService.provision_prepare()`` compensate safely
+        (never blindly disabling a username that was never created by
+        this call). A provider that raises any other exception is treated
+        conservatively as if a user may have been created (``CREATED``).
+        """
+        ...
 
     def disable_user(self, username: str) -> None: ...
 
