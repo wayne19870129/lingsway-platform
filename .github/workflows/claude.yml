@@ -13,8 +13,34 @@ on:
   pull_request_review_comment:
     types: [created]
 
+# Issue #67: this group MUST include github.actor, not just the target
+# issue/PR number. Workflow-level concurrency is evaluated the instant the
+# triggering event fires -- before the `dedup`/`claude` jobs' own `if:`
+# actor gate ever runs -- so any event that reaches this workflow at all
+# competes for cancellation here first. With only the issue/PR number in
+# the group, claude[bot]'s own "Claude Code is working..." status comment
+# (itself a new issue_comment event on the same issue/PR) joined the exact
+# same group as the real wayne19870129-triggered run and cancelled it
+# outright via cancel-in-progress, before the bot-triggered run's own job
+# gate had a chance to skip it as unauthorized. Same exposure for any other
+# non-owner commenter.
+#
+# Including github.actor (the login that authored the triggering comment,
+# already relied on by both jobs' `if:` gates below) makes an authorized
+# wayne19870129 run and a claude[bot]/unauthorized-user run land in
+# provably different groups by simple string inequality -- cancel-in-progress
+# only ever cancels another run in the *same* group, so a bot or
+# unauthorized-actor group can never cancel the owner's group, independent
+# of any timing/ordering assumption about when `if:` gates are evaluated.
+# A second, genuinely newer wayne19870129 instruction on the same issue/PR
+# still hashes to the identical group (same number, same actor) and still
+# supersedes/cancels the older owner run exactly as before.
+#
+# See docs/82-tasks/TASK-T19-claude-workflow-concurrency-actor-scoping.md
+# for the full analysis and a reproducible, non-GitHub validation of this
+# group-string behavior across owner/bot/unauthorized actors.
 concurrency:
-  group: claude-${{ github.event.issue.number || github.event.pull_request.number }}
+  group: claude-${{ github.event.issue.number || github.event.pull_request.number }}-${{ github.actor }}
   cancel-in-progress: true
 
 jobs:
