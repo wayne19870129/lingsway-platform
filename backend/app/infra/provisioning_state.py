@@ -230,11 +230,16 @@ class SqlAlchemyProvisioningState(ProvisioningState):
         return binding
 
     def desired_routing_state(
-        self, request: ProvisionRequest, endpoint: EgressEndpointDTO, tenant: TenantDTO
+        self,
+        request: ProvisionRequest,
+        endpoint: EgressEndpointDTO,
+        tenant: TenantDTO,
+        routing_principal: str,
     ) -> DesiredRoutingState:
-        binding = self.ensure_gateway_route_binding(tenant.tenant_id, endpoint)
+        del request  # ADR-016: routing_principal replaces request.username here.
+        binding = self.ensure_gateway_route_binding(routing_principal, endpoint)
         return DesiredRoutingState(
-            user_routes={request.username: binding.outbound_tag},
+            user_routes={binding.gateway_principal: binding.outbound_tag},
             outbound_tags=(binding.outbound_tag, "BLOCK"),
         )
 

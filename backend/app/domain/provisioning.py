@@ -11,6 +11,7 @@ from backend.app.domain.capacity import CapacityExceededError, ensure_capacity
 from backend.app.domain.quota import quota_gb_to_bytes
 from backend.app.providers.base import (
     AccountingProvider,
+    AccountUserDTO,
     CredentialDTO,
     DesiredForwarderState,
     DesiredRoutingState,
@@ -78,11 +79,20 @@ class ProvisioningCheckpoint:
 
     See ADR-017 for why this phase split exists and why the lock cannot
     simply be moved into ``APPLY_GATEWAY``'s own ``try`` block instead.
+
+    ``account_user`` (ADR-016 Decision 3) carries ``CREATE_ACCOUNTING_USER``'s
+    already fail-closed-validated return value across this phase boundary
+    -- ``APPLY_GATEWAY`` needs ``account_user.routing_principal`` to pass
+    to ``desired_routing_state()``, and must never recompute or guess it.
+    The full DTO is kept (not just the principal string) since ADR-016
+    requires this method's return value be preserved end to end, not
+    reduced to a single field a future caller might need more of.
     """
 
     run_id: str
     endpoint: EgressEndpointDTO
     tenant: TenantDTO
+    account_user: AccountUserDTO
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,8 +196,20 @@ class ProvisioningState(Protocol):
     ) -> DesiredForwarderState: ...
 
     def desired_routing_state(
-        self, request: ProvisionRequest, endpoint: EgressEndpointDTO, tenant: TenantDTO
-    ) -> DesiredRoutingState: ...
+        self,
+        request: ProvisionRequest,
+        endpoint: EgressEndpointDTO,
+        tenant: TenantDTO,
+        routing_principal: str,
+    ) -> DesiredRoutingState:
+        """ADR-016 Decision 3: ``routing_principal`` (the accounting
+        provider's own ``AccountUserDTO.routing_principal``, carried via
+        ``ProvisioningCheckpoint.account_user``) is the only legitimate
+        source for ``GatewayRouteBinding.gateway_principal`` and for the
+        ``DesiredRoutingState.user_routes`` key Xray actually matches on
+        -- implementations must not derive, guess, or fall back to
+        ``request.username``/an egress ``tenant.tenant_id`` here."""
+        ...
 
     def store_subscription_token(self, customer_id: str, raw_token: str) -> None: ...
 
@@ -334,9 +356,26 @@ class ProvisioningService:
 
         self._start(run_id, ProvisionStep.CREATE_ACCOUNTING_USER)
         try:
-            self.accounting.create_user(
+            account_user = self.accounting.create_user(
                 request.username, quota_gb_to_bytes(request.quota_gb), request.expire_at
             )
+            # ADR-016 Decision 3: fail-closed provider-contract validation.
+            # The domain layer trusts only an already-validated DTO -- it
+            # never computes a Marzban-style f"{id}.{username}" principal
+            # itself (that formula is the real provider's responsibility)
+            # and never falls back to request.username/an egress
+            # tenant_id when the contract is violated.
+            if account_user.username != request.username:
+                raise RuntimeError(
+                    "accounting provider contract violation: create_user() "
+                    f"returned username {account_user.username!r}, expected "
+                    f"{request.username!r}"
+                )
+            if not account_user.routing_principal.strip():
+                raise RuntimeError(
+                    "accounting provider contract violation: create_user() "
+                    "returned an empty or whitespace-only routing_principal"
+                )
         except Exception as exc:
             self.accounting.disable_user(request.username)
             self.state.rollback_database()
@@ -344,7 +383,9 @@ class ProvisioningService:
             raise
         self._success(run_id, ProvisionStep.CREATE_ACCOUNTING_USER)
 
-        return ProvisioningCheckpoint(run_id=run_id, endpoint=endpoint, tenant=tenant)
+        return ProvisioningCheckpoint(
+            run_id=run_id, endpoint=endpoint, tenant=tenant, account_user=account_user
+        )
 
     def provision_apply_gateway(
         self, checkpoint: ProvisioningCheckpoint, request: ProvisionRequest
@@ -356,14 +397,24 @@ class ProvisioningService:
         lock until their own commit/rollback for this call's
         ``GatewayRouteBinding`` mutation has completed -- see ADR-017.
         This is the only method that calls ``desired_routing_state()``.
+
+        ADR-016 Decision 3: ``checkpoint.account_user.routing_principal``
+        (already fail-closed-validated by ``provision_prepare()``'s
+        ``CREATE_ACCOUNTING_USER`` step) is passed explicitly to
+        ``desired_routing_state()`` -- this method never re-derives it,
+        never re-calls the accounting provider, and the infra layer
+        underneath ``state`` never guesses it either.
         """
         run_id = checkpoint.run_id
         endpoint = checkpoint.endpoint
         tenant = checkpoint.tenant
+        routing_principal = checkpoint.account_user.routing_principal
 
         self._start(run_id, ProvisionStep.APPLY_GATEWAY)
         try:
-            desired_routing = self.state.desired_routing_state(request, endpoint, tenant)
+            desired_routing = self.state.desired_routing_state(
+                request, endpoint, tenant, routing_principal
+            )
             candidate = self.gateway.render(desired_routing)
             validation = self.gateway.validate(candidate)
             if not validation.valid:

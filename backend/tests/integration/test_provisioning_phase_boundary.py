@@ -63,11 +63,13 @@ from backend.app.models import (
 )
 from backend.app.models.subscription import SubscriptionStatus
 from backend.app.providers.accounting.mock import MockAccountingProvider
+from backend.app.providers.base import AccountUserDTO, DesiredRoutingState
 from backend.app.providers.captcha.noop import NoopCaptchaProvider
 from backend.app.providers.egress.mock import MockEgressProvider
 from backend.app.providers.email.noop import NoopEmailProvider
 from backend.app.providers.forwarder.mock import MockForwarderProvider
 from backend.app.providers.gateway.mock import MockGatewayProvider
+from backend.app.providers.gateway.xray_file import XrayFileProvider
 from backend.app.providers.notify.noop import NoopNotifyProvider
 from backend.app.providers.payment.mock import MockPaymentProvider
 from backend.app.providers.registry import ProviderRegistry
@@ -905,9 +907,10 @@ def test_production_accounting_progress_write_failure_never_leaves_user_wrongly_
     armed = {"value": False}
 
     class ArmingAccounting(MockAccountingProvider):
-        def create_user(self, username: str, quota_bytes: int, expire_at: Any) -> None:
-            super().create_user(username, quota_bytes, expire_at)
+        def create_user(self, username: str, quota_bytes: int, expire_at: Any) -> Any:
+            result = super().create_user(username, quota_bytes, expire_at)
             armed["value"] = True
+            return result
 
     accounting = ArmingAccounting()
     with Session(engine) as db:
@@ -1387,3 +1390,304 @@ def test_production_pending_manual_preserves_external_id_when_present(
         payload = job.payload_json or "{}"
         assert "external-pending-42" in payload
         assert job.status is JobStatus.PENDING
+
+
+# ---------------------------------------------------------------------------
+# TASK-T16 Phase 2B6 (ADR-016 Decision 3): route-identity data-flow plumbing.
+# gateway_principal must equal the accounting provider's own
+# routing_principal, never accounting_user_id/username, never an egress
+# tenant_id. Production-backed: real confirm_payment_and_provision() +
+# SqlAlchemyProvisioningState, real MySQL/MariaDB.
+# ---------------------------------------------------------------------------
+
+
+def test_production_gateway_principal_is_the_provider_routing_principal_not_username_or_tenant_id(
+    engine: Engine,
+) -> None:
+    """ADR-016 Decision 3's full data flow, proven end to end through the
+    real production call path: AccountingProvider.create_user() returns a
+    routing_principal deliberately distinct from both the accounting
+    username and the egress tenant_id (MockAccountingProvider's
+    `mock-routing.<username>` contract, MockEgressProvider's
+    `tenant-<n>` ids) -- after a full successful provisioning run,
+    Subscription.accounting_user_id must still equal request.username
+    (the accounting bounded context, unchanged), while
+    GatewayRouteBinding.gateway_principal must equal the provider's
+    routing_principal (the Xray routing bounded context) -- and the two
+    persisted values must be different from each other and from the
+    egress tenant_id, proving neither was silently substituted for the
+    other anywhere in the pipeline."""
+    with Session(engine) as seed_db:
+        order, subscription, endpoint = _seed(seed_db, suffix="ROUTEIDENTITY")
+        seed_db.commit()
+        order_id = order.id
+        subscription_id = subscription.id
+        customer_id = subscription.customer_id
+
+    accounting = MockAccountingProvider()
+    egress = MockEgressProvider()
+    with Session(engine) as db:
+        state = _OrderProvisioningState(db, order_id)
+        order_state = _SqlAlchemyOrderState(db)
+        runs = _SqlAlchemyProvisionRuns(db)
+        try:
+            outcome = confirm_payment_and_provision(
+                _command(order_id),
+                _request(order_id, customer_id, username="alice"),
+                object(),
+                state,
+                runs,
+                order_state,
+                "receipt-route-identity",
+                providers=_registry(accounting=accounting, egress=egress),
+            )
+        finally:
+            runs.close()
+        # admin_confirm_payment()'s own post-processing step (ADR-014's
+        # documented accounting_user_id timing gap: it is written by the
+        # route handler after confirm_payment_and_provision() returns, not
+        # by the service function itself) -- replicated here since this
+        # test drives confirm_payment_and_provision() directly rather than
+        # through the FastAPI route.
+        subscription_row = db.scalar(
+            select(Subscription).where(Subscription.order_id == order_id)
+        )
+        assert subscription_row is not None
+        if subscription_row.accounting_user_id is None:
+            subscription_row.accounting_user_id = "alice"
+            db.commit()
+
+    assert outcome is not None
+    assert outcome.status is ProvisionStatus.SUCCEEDED
+
+    expected_routing_principal = accounting.users["alice"].routing_principal
+    assert expected_routing_principal == "mock-routing.alice"
+    egress_tenant_id = next(iter(egress.tenants))
+
+    # The three identities involved must all be distinct -- otherwise this
+    # test could pass by accident even if the pipeline silently conflated
+    # two of them.
+    assert expected_routing_principal not in {"alice", egress_tenant_id}
+    assert egress_tenant_id != "alice"
+
+    with Session(engine) as verify_db:
+        persisted_subscription = verify_db.get(Subscription, subscription_id)
+        assert persisted_subscription is not None
+        assert persisted_subscription.accounting_user_id == "alice"
+
+        binding = verify_db.scalar(
+            select(GatewayRouteBinding).where(
+                GatewayRouteBinding.subscription_id == subscription_id
+            )
+        )
+        assert binding is not None
+        assert binding.gateway_principal == expected_routing_principal
+        assert binding.gateway_principal != persisted_subscription.accounting_user_id
+        assert binding.gateway_principal != egress_tenant_id
+
+    with Session(engine) as db, gateway_route_binding_write(db, timeout_seconds=5):
+        pass
+
+
+def test_production_xray_render_uses_routing_principal_as_the_user_routes_key(
+    engine: Engine,
+) -> None:
+    """The other half of ADR-016 Decision 3's contract: it is not enough
+    for the DB row to be correct -- the *rendered* Xray candidate config
+    that XrayFileProvider.render() would ship must also key
+    routing.rules[].user on the routing_principal, not on
+    accounting_user_id/username. This renders the real
+    GatewayRouteBinding row (persisted by the production call path above)
+    into a DesiredRoutingState exactly the way
+    SqlAlchemyProvisioningState.desired_routing_state() does, and confirms
+    the resulting CandidateConfig's rule uses the routing_principal as
+    the `user` value."""
+    with Session(engine) as seed_db:
+        order, subscription, endpoint = _seed(seed_db, suffix="XRAYUSERKEY")
+        seed_db.commit()
+        order_id = order.id
+        subscription_id = subscription.id
+        customer_id = subscription.customer_id
+
+    accounting = MockAccountingProvider()
+    with Session(engine) as db:
+        state = _OrderProvisioningState(db, order_id)
+        order_state = _SqlAlchemyOrderState(db)
+        runs = _SqlAlchemyProvisionRuns(db)
+        try:
+            outcome = confirm_payment_and_provision(
+                _command(order_id),
+                _request(order_id, customer_id, username="bob"),
+                object(),
+                state,
+                runs,
+                order_state,
+                "receipt-xray-user-key",
+                providers=_registry(accounting=accounting),
+            )
+        finally:
+            runs.close()
+
+    assert outcome is not None
+    assert outcome.status is ProvisionStatus.SUCCEEDED
+    routing_principal = accounting.users["bob"].routing_principal
+
+    with Session(engine) as db:
+        binding = db.scalar(
+            select(GatewayRouteBinding).where(
+                GatewayRouteBinding.subscription_id == subscription_id
+            )
+        )
+        assert binding is not None
+        desired = DesiredRoutingState(
+            user_routes={binding.gateway_principal: binding.outbound_tag},
+            outbound_tags=(binding.outbound_tag, "BLOCK"),
+        )
+
+    candidate = XrayFileProvider(runtime=None).render(desired)  # type: ignore[arg-type]
+    rules = candidate.content["routing"]["rules"]  # type: ignore[index]
+    user_rule = next(rule for rule in rules if rule.get("user"))  # type: ignore[union-attr]
+
+    assert user_rule["user"] == [routing_principal]
+    assert user_rule["user"] != ["bob"]
+    assert user_rule["outboundTag"] == binding.outbound_tag
+
+
+def test_production_empty_routing_principal_fails_closed_before_apply_gateway(
+    engine: Engine,
+) -> None:
+    """ADR-016 Decision 3's fail-closed contract: if the accounting
+    provider returns an empty/whitespace-only routing_principal,
+    CREATE_ACCOUNTING_USER must treat it as a failure -- disable the
+    username, roll back phase-A DB state, mark the run FAILED at
+    CREATE_ACCOUNTING_USER, never reach APPLY_GATEWAY, never acquire the
+    named lock, and leave zero GatewayRouteBinding rows. No fallback to
+    username or an egress tenant_id is permitted."""
+    with Session(engine) as seed_db:
+        order, subscription, endpoint = _seed(seed_db, suffix="EMPTYPRINCIPAL")
+        seed_db.commit()
+        order_id = order.id
+        subscription_id = subscription.id
+        endpoint_id = endpoint.id
+        customer_id = subscription.customer_id
+
+    class BlankPrincipalAccounting(MockAccountingProvider):
+        def create_user(
+            self, username: str, quota_bytes: int, expire_at: Any
+        ) -> AccountUserDTO:
+            return AccountUserDTO(
+                username=username,
+                quota_bytes=quota_bytes,
+                expire_at=expire_at,
+                routing_principal="   ",
+            )
+
+    accounting = BlankPrincipalAccounting()
+    with Session(engine) as db:
+        state = _OrderProvisioningState(db, order_id)
+        order_state = _SqlAlchemyOrderState(db)
+        runs = _SqlAlchemyProvisionRuns(db)
+        try:
+            with pytest.raises(RuntimeError, match="empty or whitespace-only"):
+                confirm_payment_and_provision(
+                    _command(order_id),
+                    _request(order_id, customer_id, username="blank-principal"),
+                    object(),
+                    state,
+                    runs,
+                    order_state,
+                    "receipt-blank-principal",
+                    providers=_registry(accounting=accounting),
+                )
+        finally:
+            runs.close()
+
+    assert accounting.disabled_users == {"blank-principal"}
+
+    with Session(engine) as verify_db:
+        rolled_back_endpoint = verify_db.get(EgressEndpoint, endpoint_id)
+        assert rolled_back_endpoint is not None
+        assert rolled_back_endpoint.current_count == 0
+
+        gateway_binding_count = verify_db.scalar(
+            select(func.count())
+            .select_from(GatewayRouteBinding)
+            .where(GatewayRouteBinding.subscription_id == subscription_id)
+        )
+        assert gateway_binding_count == 0
+
+        persisted_subscription = verify_db.get(Subscription, subscription_id)
+        assert persisted_subscription is not None
+        assert persisted_subscription.status is SubscriptionStatus.PROVISION_FAILED
+
+        job = verify_db.scalar(select(Job).where(Job.dedupe_key == f"provision:{order_id}"))
+        assert job is not None
+        assert job.status is JobStatus.FAILED
+
+    # The named lock was never acquired -- a fresh acquisition must
+    # succeed immediately.
+    with Session(engine) as db, gateway_route_binding_write(db, timeout_seconds=5):
+        pass
+
+
+def test_production_username_mismatch_fails_closed_before_apply_gateway(
+    engine: Engine,
+) -> None:
+    """Same fail-closed contract as above, for the other half of ADR-016's
+    required validation: create_user() returning a username that does not
+    match request.username must also be treated as a CREATE_ACCOUNTING_USER
+    failure, not silently trusted."""
+    with Session(engine) as seed_db:
+        order, subscription, endpoint = _seed(seed_db, suffix="USERNAMEMISMATCH")
+        seed_db.commit()
+        order_id = order.id
+        subscription_id = subscription.id
+        customer_id = subscription.customer_id
+
+    class MismatchedUsernameAccounting(MockAccountingProvider):
+        def create_user(
+            self, username: str, quota_bytes: int, expire_at: Any
+        ) -> AccountUserDTO:
+            return AccountUserDTO(
+                username="someone-else",
+                quota_bytes=quota_bytes,
+                expire_at=expire_at,
+                routing_principal="mock-routing.someone-else",
+            )
+
+    accounting = MismatchedUsernameAccounting()
+    with Session(engine) as db:
+        state = _OrderProvisioningState(db, order_id)
+        order_state = _SqlAlchemyOrderState(db)
+        runs = _SqlAlchemyProvisionRuns(db)
+        try:
+            with pytest.raises(RuntimeError, match="contract violation"):
+                confirm_payment_and_provision(
+                    _command(order_id),
+                    _request(order_id, customer_id, username="username-mismatch"),
+                    object(),
+                    state,
+                    runs,
+                    order_state,
+                    "receipt-username-mismatch",
+                    providers=_registry(accounting=accounting),
+                )
+        finally:
+            runs.close()
+
+    assert accounting.disabled_users == {"username-mismatch"}
+
+    with Session(engine) as verify_db:
+        gateway_binding_count = verify_db.scalar(
+            select(func.count())
+            .select_from(GatewayRouteBinding)
+            .where(GatewayRouteBinding.subscription_id == subscription_id)
+        )
+        assert gateway_binding_count == 0
+
+        job = verify_db.scalar(select(Job).where(Job.dedupe_key == f"provision:{order_id}"))
+        assert job is not None
+        assert job.status is JobStatus.FAILED
+
+    with Session(engine) as db, gateway_route_binding_write(db, timeout_seconds=5):
+        pass

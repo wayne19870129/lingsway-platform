@@ -94,10 +94,16 @@ class State:
         return DesiredForwarderState({endpoint.endpoint_id: tenant.tenant_id})
 
     def desired_routing_state(
-        self, request: ProvisionRequest, endpoint: EgressEndpointDTO, tenant: TenantDTO
+        self,
+        request: ProvisionRequest,
+        endpoint: EgressEndpointDTO,
+        tenant: TenantDTO,
+        routing_principal: str,
     ) -> DesiredRoutingState:
+        del request
+        self.events.append(f"desired-routing-state:{routing_principal}")
         return DesiredRoutingState(
-            {request.username: endpoint.endpoint_id}, (endpoint.endpoint_id,)
+            {routing_principal: endpoint.endpoint_id}, (endpoint.endpoint_id,)
         )
 
     def store_subscription_token(self, customer_id: str, raw_token: str) -> None:
