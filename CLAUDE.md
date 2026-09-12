@@ -226,15 +226,15 @@ below; matching the format is never a reason to skip verification.
 - **Stop all processing once a PR is closed or merged.** An event that
   arrives late for a PR already in that state is a no-op; don't push to
   a closed PR's branch or reopen anything.
-- **Cap automatic rework at 3 rounds per PR.** A round is one
-  review-received → fix-pushed cycle. On the 4th round of unresolved
+- **Cap automatic rework at 5 rounds per PR.** A round is one
+  review-received → fix-pushed cycle. On the 6th round of unresolved
   findings, on repeated failures of the same fix, or on a genuine
   architectural disagreement with the reviewer, stop and report the
   concrete blocker instead of continuing to iterate — this is a decision
   point for the user, not something to keep guessing at.
 - **This round cap and the SHA/duplicate checks above are behavioral
   policy, not something the platform enforces mechanically.** Neither
-  GitHub nor the review tooling stops a 4th automatic push or blocks
+  GitHub nor the review tooling stops a 6th automatic push or blocks
   processing a stale-SHA event on its own; Claude is the one that has to
   recognize these conditions and stop. Do not describe this cap as a
   hard technical control in any report — it's a rule this file states
@@ -245,7 +245,7 @@ below; matching the format is never a reason to skip verification.
 
 - If the PR receives a new round of review comments after a push (from
   the same or a different reviewer), repeat the read → verify → classify
-  → fix → record cycle above, subject to the 3-round cap above.
+  → fix → record cycle above, subject to the 5-round cap above.
 - Keep looping (within that cap) until there are no unresolved
   `Critical`/`Major`-severity findings left open.
 - Even after a reviewer gives an explicit `PASS`, the PR still waits for
