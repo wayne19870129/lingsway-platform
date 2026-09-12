@@ -378,6 +378,36 @@ def test_create_user_400_fails_closed_as_no_side_effect() -> None:
     assert excinfo.value.effect is AccountingCreateEffect.NO_SIDE_EFFECT
 
 
+def test_create_user_422_fails_closed_as_no_side_effect() -> None:
+    """ADR-018 round 4: exact-source verified (pinned app/routers/
+    user.py::add_user -- `new_user: UserCreate` is a plain Pydantic-model
+    body parameter, not wrapped in Depends()) -- FastAPI's own request-
+    validation pipeline raises RequestValidationError, converted to this
+    422, before the route function body (and therefore before
+    crud.create_user()'s db.commit()) ever runs. Must never be treated as
+    AMBIGUOUS, never retried, never followed by a reconciliation GET, and
+    must never trigger a PUT disable or DELETE."""
+    requests: list[httpx.Request] = []
+
+    def user_response(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            422,
+            json={"detail": [{"loc": ["body", "username"], "msg": "field required"}]},
+        )
+
+    provider = _provider(_recording_handler(requests, user_response=user_response))
+
+    with pytest.raises(AccountingCreateUserError) as excinfo:
+        provider.create_user("alice", 1000, None)
+    assert excinfo.value.effect is AccountingCreateEffect.NO_SIDE_EFFECT
+
+    user_calls = [r for r in requests if r.url.path == "/api/user" or "/api/user/" in r.url.path]
+    assert len(user_calls) == 1
+    assert all(r.method != "PUT" for r in requests)
+    assert all(r.method != "DELETE" for r in requests)
+    assert all(r.method != "GET" for r in requests)
+
+
 def test_create_user_5xx_fails_closed_as_ambiguous_not_no_side_effect() -> None:
     """Major 1: crud.create_user() commits unconditionally as soon as it
     runs; a 5xx could still occur after that commit (background task

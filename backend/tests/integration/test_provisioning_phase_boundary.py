@@ -1801,6 +1801,91 @@ def test_production_409_create_conflict_never_disables_an_unrelated_user(
         pass
 
 
+def test_production_422_validation_rejection_never_disables_or_pends_manual(
+    engine: Engine,
+) -> None:
+    """ADR-018 round 4: a 422 (FastAPI's own request-validation response
+    for add_user()'s plain Pydantic-model `new_user: UserCreate` body
+    parameter -- raised before the route function body, and therefore
+    before crud.create_user()'s db.commit(), ever runs) is exact-source
+    proven NO_SIDE_EFFECT, exactly like 400/409. Must never be
+    (mis)classified AMBIGUOUS -- which would wrongly route a definite
+    pre-commit rejection into PENDING_MANUAL and keep phase-A's DB
+    progress instead of rolling it back. Must roll back phase-A DB state,
+    mark the run FAILED, never reach APPLY_GATEWAY, acquire zero named
+    locks, and leave zero GatewayRouteBinding rows."""
+    with Session(engine) as seed_db:
+        order, subscription, endpoint = _seed(seed_db, suffix="ADR018F")
+        seed_db.commit()
+        order_id = order.id
+        subscription_id = subscription.id
+        endpoint_id = endpoint.id
+        customer_id = subscription.customer_id
+
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/api/admin/token":
+            return httpx.Response(200, json={"access_token": "tok-1", "token_type": "bearer"})
+        return httpx.Response(
+            422, json={"detail": [{"loc": ["body", "username"], "msg": "field required"}]}
+        )
+
+    accounting = _marzban_provider(handler)
+    with Session(engine) as db:
+        state = _OrderProvisioningState(db, order_id)
+        order_state = _SqlAlchemyOrderState(db)
+        runs = _SqlAlchemyProvisionRuns(db)
+        try:
+            with pytest.raises(AccountingCreateUserError) as excinfo:
+                confirm_payment_and_provision(
+                    _command(order_id),
+                    _request(order_id, customer_id, username="adr018f-user"),
+                    object(),
+                    state,
+                    runs,
+                    order_state,
+                    "receipt-adr018f",
+                    providers=_registry(accounting=accounting),
+                )
+        finally:
+            runs.close()
+            accounting.close()
+
+    assert excinfo.value.effect is AccountingCreateEffect.NO_SIDE_EFFECT
+
+    post_attempts = [r for r in requests if r.method == "POST" and r.url.path == "/api/user"]
+    assert len(post_attempts) == 1
+    assert all(r.method != "PUT" for r in requests)
+    assert all(r.method != "DELETE" for r in requests)
+    assert all(r.method != "GET" for r in requests)
+
+    with Session(engine) as verify_db:
+        rolled_back_endpoint = verify_db.get(EgressEndpoint, endpoint_id)
+        assert rolled_back_endpoint is not None
+        assert rolled_back_endpoint.current_count == 0
+
+        gateway_binding_count = verify_db.scalar(
+            select(func.count())
+            .select_from(GatewayRouteBinding)
+            .where(GatewayRouteBinding.subscription_id == subscription_id)
+        )
+        assert gateway_binding_count == 0
+
+        persisted_subscription = verify_db.get(Subscription, subscription_id)
+        assert persisted_subscription is not None
+        assert persisted_subscription.status is SubscriptionStatus.PROVISION_FAILED
+
+        job = verify_db.scalar(select(Job).where(Job.dedupe_key == f"provision:{order_id}"))
+        assert job is not None
+        assert job.status is JobStatus.FAILED
+
+    # Named lock was never acquired -- a fresh acquisition succeeds immediately.
+    with Session(engine) as db, gateway_route_binding_write(db, timeout_seconds=5):
+        pass
+
+
 def test_production_ambiguous_transport_failure_requires_manual_review(
     engine: Engine,
 ) -> None:

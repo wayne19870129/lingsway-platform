@@ -554,16 +554,25 @@ class MarzbanAccountingProvider:
                 effect=AccountingCreateEffect.AMBIGUOUS,
             ) from exc
 
-        if response.status_code in (400, 409):
+        if response.status_code in (400, 409, 422):
             # Exact-source verified (pinned app/routers/user.py::add_user,
             # app/db/crud.py::create_user): a `400` (unsupported protocol)
-            # is raised before `crud.create_user()` is ever called, and a
+            # is raised before `crud.create_user()` is ever called; a
             # `409` is raised only after `crud.create_user()`'s
             # `db.commit()` itself raised `IntegrityError` and was rolled
-            # back (`db.rollback()`) -- both are proven pre-commit
-            # rejections with zero server-side side effect. No
-            # reconciliation is implemented for `409` (ADR-018 explicitly
-            # reserves that as a separate, unmade idempotency decision).
+            # back (`db.rollback()`); a `422` is FastAPI's own request
+            # -validation response for `add_user(new_user: UserCreate,
+            # ...)` -- `new_user` is a plain Pydantic-model body parameter
+            # (not wrapped in `Depends()`), so FastAPI's request pipeline
+            # validates/parses it (raising `RequestValidationError`,
+            # converted to this `422`) before the route function body --
+            # and therefore before `crud.create_user()` -- ever runs; this
+            # is a framework-level FastAPI guarantee, not Marzban's own
+            # logic, exactly like the `401`/`Admin.get_current` case
+            # above. All three are proven pre-commit rejections with zero
+            # server-side side effect. No reconciliation is implemented
+            # for `409` (ADR-018 explicitly reserves that as a separate,
+            # unmade idempotency decision).
             raise AccountingCreateUserError(
                 f"Marzban rejected create_user before creating any user "
                 f"(status {response.status_code}); no side effect occurred",

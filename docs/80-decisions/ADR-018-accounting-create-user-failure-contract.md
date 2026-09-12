@@ -33,7 +33,30 @@
   disable 失败类型），不再把 disable 异常整体丢弃，也不把任意 provider
   文本当业务数据持久化。详见下方 "Pre-dispatch request-construction
   failures" 与 "Business-facing pending reason vs. run-level diagnostic"
-  两节。）
+  两节。同日第三次修订：独立审查第三轮复审发现一个 Major——
+  `MarzbanAccountingProvider.create_user()` 只把 `400`/`409` 归类为
+  `NO_SIDE_EFFECT`，其余非 `200` 状态码一律 `AMBIGUOUS`；但重新核对
+  pinned exact source（`app/routers/user.py::add_user`）后确认，
+  `add_user(new_user: UserCreate, ...)` 的 `new_user` 是一个普通
+  Pydantic-model body 参数（没有包在 `Depends()` 里），FastAPI 请求
+  处理管线会先对它做校验/解析（校验失败抛
+  `RequestValidationError`，被 FastAPI 转换成 `422` 响应），这个过程
+  发生在路由函数体（因此也在 `crud.create_user()` 的 `db.commit()`）
+  执行之前——这是 FastAPI 框架本身的保证，不是 Marzban 自己的逻辑，
+  和本 ADR 已经用来证明 `401`（`Admin.get_current` 这个
+  `Depends()`）的推理属于同一类。因此 `422` 此前被错误分类为
+  `AMBIGUOUS`，会把一个确定无 side effect 的请求校验失败错误地送进
+  `PENDING_MANUAL`，保留 phase-A 的部分 DB 进度，而不是按
+  `NO_SIDE_EFFECT` 回滚。本轮修复：把 `422` 加入
+  `create_user()` 判定 `NO_SIDE_EFFECT` 的状态码集合
+  （`(400, 409, 422)`）。同时按审查要求重新核对了 `add_user()`
+  之外是否还有其它状态码能从 exact source 明确证明发生在 create
+  之前——确认没有：`403`/`404` 不出现在 `add_user()` 路径上，其余
+  post-commit 失败点（后台任务调度、`UserResponse.model_validate()`、
+  `report.user_created()`）仍然只能在 `crud.create_user()` 的
+  `db.commit()` 成功之后才可能触发，因此继续保持 `AMBIGUOUS`，不得
+  扩大 `NO_SIDE_EFFECT` 的范围。详见下方 "422 validation rejection is
+  NO_SIDE_EFFECT" 一节。）
 - 决策范围: TASK-T16 Phase 2B7 独立复审（ChatGPT，针对 PR #64 exact head
   `d03e519199699310f659bd643c5d9addbf2ee77e` 的 Major 1）明确授权的、
   仅限于 `AccountingProvider.create_user()` 失败时 external-side-effect
@@ -290,6 +313,52 @@ provider 实现中意外携带更敏感的内容，即使当前 Marzban 适配�
 异常文本"这条原则，同时适用于 run-level 诊断字段和业务字段，只是业务
 字段（`Subscription.provision_error`）额外要求完全静态、与 `reason`
 一一对应，不包含任何动态内容。
+
+## 422 validation rejection is NO_SIDE_EFFECT（第三次修订新增）
+
+`POST /api/user`（pinned `app/routers/user.py::add_user`）的签名是：
+
+```python
+def add_user(
+    new_user: UserCreate,
+    bg: BackgroundTasks,
+    db: Session = Depends(get_db),
+    admin: Admin = Depends(Admin.get_current),
+):
+```
+
+`new_user: UserCreate` 是一个普通的 Pydantic-model 请求体参数——**没有**
+包在 `Depends()` 里。FastAPI 的请求处理管线会在调用这个路由函数体之前，
+先把入站 JSON body 解析并校验成 `UserCreate` 实例；校验失败会抛
+`RequestValidationError`，FastAPI 的默认异常处理器把它转换成 HTTP
+`422` 响应——这整个过程完全发生在 `add_user()` 函数体（因此也在
+`crud.create_user()` 的 `db.commit()`）执行之前。这是 FastAPI 框架自身
+的请求生命周期保证，不依赖 Marzban 的任何自定义逻辑，与本 ADR 已经用来
+证明 `401`（`Admin.get_current` 这个 `Depends()` 在路由体之前执行）的
+推理属于完全同一类"框架级保证"，只是这次保证来自请求体校验而不是
+一个显式的 `Depends()`。
+
+因此 `422` 与 `400`/`409` 一样，是"确定没有 side effect"的一类失败：
+`create_user()` 现在把 `422` 加入判定 `NO_SIDE_EFFECT` 的状态码集合
+`(400, 409, 422)`。修复前，`422` 落在"其余非 200 状态码" 的
+`AMBIGUOUS` 分支里，会把一个确定的 pre-commit 拒绝错误地送进
+`PENDING_MANUAL`——不仅语义上不准确，还会让 phase-A 已经 flush 的
+`STORE_CREDENTIALS`/`APPLY_FORWARDER` 进度被保留下来（`PENDING_MANUAL`
+路径不 `rollback_database()`，见"Business-facing pending reason vs.
+run-level diagnostic"一节），而正确行为是像任何其它 `NO_SIDE_EFFECT`
+失败一样完整回滚、标记 `FAILED`。
+
+审查同时要求核实 `add_user()` 路径上是否还有其它可以从 exact source
+证明发生在 create 之前的状态码。核对结果：没有。`add_user()` 自身的
+`responses=` 声明只列出 `400`/`409`（`401` 来自路由级
+`responses={401: ...}` 和 `Admin.get_current`），FastAPI 隐式的
+`422` 来自请求体校验；`403`/`404` 不出现在 `add_user()` 路径（它们只
+出现在 `get_user`/`modify_user` 等其它路由）。`crud.create_user()`
+成功 `db.commit()` 之后的所有代码路径（`bg.add_task(...)`、
+`UserResponse.model_validate(dbuser)`、`report.user_created(...)`、
+`logger.info(...)`）仍然只能在提交**之后**失败，继续正确地保持
+`AMBIGUOUS`——`NO_SIDE_EFFECT` 的范围没有被扩大到任何缺乏 exact-source
+证据的状态码。
 
 ## 不做的事（显式拒绝）
 

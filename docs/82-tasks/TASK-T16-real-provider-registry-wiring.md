@@ -1436,3 +1436,56 @@ adapter、DTO/编排改动、独立的 reconciliation 工具/作业、
   staging 凭据/真实网络调用、无 409 reconciliation、无 Alembic/schema
   变更、无 Webshare/Xray 相关改动、无 provider lifecycle 重新设计
   （`httpx.Client` 生命周期继续作为下一阶段 blocker）、无生产部署。
+
+- **Phase 2B7 round 4（本轮，ADR-018 第三次修订——ChatGPT 对 PR #64
+  exact head `35db2bbd86c77b8aab0c6a0ca86537aa5dc85db7` 的第三次独立
+  复审，1 个 Major）**：
+
+  **Major（`POST /api/user` 的 HTTP 422 被错误分类为 AMBIGUOUS）**：
+  独立验证（先重新抓取 pinned `app/routers/user.py::add_user` 源码，
+  未直接采信 reviewer 的结论）后确认 **VALID**：`add_user(new_user:
+  UserCreate, ...)` 的 `new_user` 是一个普通 Pydantic-model 请求体
+  参数（没有包在 `Depends()` 里），FastAPI 请求处理管线会在路由函数
+  体执行之前先校验/解析它——校验失败抛 `RequestValidationError`，
+  被转换成 `422`——这发生在 `crud.create_user()` 的 `db.commit()`
+  之前，与本 ADR 已经用来证明 `401`（`Admin.get_current`
+  `Depends()`）的框架级保证属于同一类。修复前 `422` 落入
+  "其余非 200 一律 `AMBIGUOUS`" 分支，会把一个确定无 side effect 的
+  请求错误地送进 `PENDING_MANUAL`，并保留 phase-A 已 flush 的部分
+  DB 进度（`PENDING_MANUAL` 路径不 `rollback_database()`）。修复：
+  `create_user()` 判定 `NO_SIDE_EFFECT` 的状态码集合从 `(400, 409)`
+  扩展为 `(400, 409, 422)`。按审查要求同时核对了 `add_user()` 路径上
+  是否还有其它可从 exact source 证明发生在 create 之前的状态码——
+  确认没有（`403`/`404` 不出现在该路径；post-commit 之后的失败点
+  继续正确保持 `AMBIGUOUS`），未扩大 `NO_SIDE_EFFECT` 范围。详见
+  `docs/80-decisions/ADR-018-accounting-create-user-failure-contract.md`
+  第三次修订、"422 validation rejection is NO_SIDE_EFFECT" 一节。
+
+  **测试**：
+  - `backend/tests/unit/test_marzban_accounting_provider.py` 新增
+    `test_create_user_422_fails_closed_as_no_side_effect`：断言
+    `AccountingCreateUserError`、`effect is NO_SIDE_EFFECT`、恰好一次
+    `POST /api/user`、零 GET/PUT/DELETE。
+  - `backend/tests/integration/test_provisioning_phase_boundary.py`
+    新增 1 条 **production-backed** 回归
+    （`test_production_422_validation_rejection_never_disables_or_pends_manual`）：
+    真实 `MarzbanAccountingProvider` + `httpx.MockTransport`，走完整
+    `confirm_payment_and_provision()` 路径，`POST /api/user` 返回
+    `422`；断言最终抛 `AccountingCreateUserError`（`effect is
+    NO_SIDE_EFFECT`）、`Subscription.status is PROVISION_FAILED`、
+    `Job.status is FAILED`、phase-A DB mutation 回滚
+    （`EgressEndpoint.current_count == 0`）、零 `GatewayRouteBinding`、
+    零 PUT/DELETE/GET、`POST /api/user` 恰好一次、named lock 从未
+    获取、**不得**变成 `PENDING_MANUAL`。
+
+  **验证**：`ruff check backend/` 全过；
+  `mypy backend/app backend/tests`（strict）无问题；
+  `pytest backend/tests/unit backend/tests/guards -q` → 199 通过
+  （0 回归，round 3 的全部测试保持绿色）；
+  `pytest backend/tests/integration -q` → 50 通过、1 个与本次改动
+  无关的既有环境限制失败（同上，MariaDB 10.11 沙箱版本字符串检查）。
+
+  **仍未完成**（与前三轮完全一致，未扩大 scope）：
+  `registry.py` 未改动、无 patched Marzban 镜像构建/部署、无真实
+  staging 凭据/真实网络调用、无 409 reconciliation、无通用 retry
+  框架、无 Alembic/schema 变更、无生产部署。
