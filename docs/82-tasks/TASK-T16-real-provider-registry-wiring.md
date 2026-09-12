@@ -1183,3 +1183,83 @@ adapter、DTO/编排改动、独立的 reconciliation 工具/作业、
   （`infrastructure/marzban/patches/` 已有独立契约测试覆盖那一层）、
   `registry.py` 启用 marzban、既有数据 reconciliation 工具、
   DB schema/Alembic migration、生产凭据/生产网络调用、部署。
+
+- **Phase 2B7（本 PR，`MarzbanAccountingProvider` adapter 实现）**：
+  新增 `backend/app/providers/accounting/marzban.py`，完整实现
+  `AccountingProvider` contract（`create_user`/`disable_user`/
+  `set_quota`/`set_expire`/`get_connection_links`/`get_usage`），
+  对接 pinned Marzban v0.8.4（commit
+  `7f396db3e703d71a28060bc9ce4a532ec64cb1f4`，与
+  `infrastructure/marzban/patches/pinned_upstream_manifest.py` 记录的
+  同一个 pinned commit）的公开、已实测的 HTTP contract：
+  `POST /api/admin/token`（OAuth2 password-grant form，非 JSON）、
+  `POST /api/user`、`GET /api/user/{username}`、
+  `PUT /api/user/{username}`——均以 exact-source 核对（本轮直接抓取
+  `app/routers/admin.py`/`app/routers/user.py`/`app/models/admin.py`/
+  `app/models/user.py`/`app/models/proxy.py`，未凭记忆假设 API 形状）。
+
+  **已完成**：
+  - auth/token 生命周期：token 缓存复用；对已认证请求收到 401 时清除
+    缓存、重新认证一次、原请求重试一次；第二次仍 401 则 fail closed；
+    除这一条以外不自动重试任何有副作用的 POST/PUT——
+    `create_user()` 的 transport 层异常（结果不确定）绝不触发自动
+    重复 POST。
+  - `create_user()` 请求体严格遵循 pinned `UserCreate` contract
+    （`status=active`、`data_limit`、`data_limit_reset_strategy=
+    no_reset`、`expire`、`proxies`、`inbounds`）；`proxies` 对配置的
+    协议发送空对象（`{protocol: {}}`），由 Marzban 自己按
+    pinned `VLESSSettings`/`VMessSettings`/`TrojanSettings`/
+    `ShadowsocksSettings`（均 `default_factory`，exact-source 已核实）
+    生成 UUID/password，本仓库 domain 层完全不生成这类材料；
+    `inbounds` 严格解析并验证 `marzban_default_protocol`/
+    `marzban_default_inbounds_json`（invalid JSON、非 object、协议不
+    受支持、inbound 非 `list[str]`、空白 tag，全部在构造期 fail
+    closed，不静默 fallback 到任意 inbound）。
+  - 响应映射：`routing_principal` 缺失/`null`/非字符串/空白，一律
+    `MarzbanContractError`，绝不 fallback 到 `username`/`tenant_id`/
+    本地计算 `f"{id}.{username}"`；`username` 不匹配请求同样 fail
+    closed；`data_limit`/`used_traffic`/`expire`/`status` 类型/取值
+    校验齐全。`expire` 映射：`None → 0`（pinned `POST /api/user`
+    docstring 明确"Use 0 for unlimited"）；timezone-aware datetime
+    正确转 UTC epoch seconds；naive datetime 直接 fail closed（仓库
+    既有 contract 未定义"naive 按哪个时区解释"，不猜测）。
+  - `409`（用户名冲突）明确 fail closed，不做"GET 已有用户后自动认领"
+    这类幂等 reconciliation——按任务要求，这是一个尚未做出的、独立的
+    idempotency architecture decision，本 PR 不擅自决定。
+  - `disable_user()` 只 `PUT status=disabled`，绝不 `DELETE`
+    （AGENTS.md 铁律 4）；`set_quota()`/`set_expire()` 只发送完成操作
+    所需的最小 body。
+  - `get_connection_links()`/`get_usage()` 严格校验响应类型
+    （`links` 必须是 `list[str]`；`used_traffic` 必须是非负整数），
+    不静默降级为空列表/忽略 malformed item。
+  - 敏感信息永不出现在异常消息/`repr()`/日志：admin password、
+    bearer token、connection links、完整 response payload 均不进入
+    `MarzbanApiError`/`MarzbanContractError` 的公开消息或
+    `MarzbanAccountingProvider.__repr__()`（自定义 `__repr__`，不用
+    dataclass 默认逐字段输出）。
+  - 39 条离线 HTTP contract 测试（`httpx.MockTransport`，真实
+    `httpx.Client` 往返，不是直接调用 parser），覆盖本任务列出的全部
+    20 类场景：认证请求是 form 不是 JSON、bearer token 注入、token
+    缓存复用、两级 401 处理、create 请求体、routing_principal 响应
+    映射与全部 fail-closed 分支、409 策略、transport-error-不重试
+    策略、disable/quota/expire body、links/usage 映射与校验、
+    非法 `default_inbounds_json` 在构造期失败、secret 不泄漏。
+  - 顺手修正 `.env.example` 里与 `Settings.from_env()` 真实读取的
+    canonical 环境变量名不一致的历史命名（`MARZBAN_USERNAME`/
+    `MARZBAN_PASSWORD` → `MARZBAN_ADMIN_USERNAME`/
+    `MARZBAN_ADMIN_PASSWORD`）——核实过仓库内没有任何部署脚本/文档
+    依赖旧名字，纯粹是 `.env.example` 自身的历史文档错误，未新增
+    兼容旧名字的 alias。
+
+  **仍未完成**（不得宣称"Marzban 已接入生产"）：
+  - patched Marzban 镜像的构建/部署（`infrastructure/marzban/patches/`
+    仍只是补丁+验证脚本，没有任何 PR 真正构建过一个带补丁的 Marzban
+    镜像）。
+  - `registry.py` wiring——本 PR **没有**修改 `registry.py`，
+    `ACCOUNTING_PROVIDER=marzban` 依然会被 `_unsupported()` 拒绝，
+    merge 后生产环境仍然只能选中 mock accounting，不产生任何真实外部
+    副作用。这是刻意的，显式 opt-in wiring 留给下一阶段。
+  - 真实 staging 凭据、真实 Marzban 实例的 live 集成测试——本 PR 全部
+    测试离线，没有连接任何真实 Marzban。
+  - 既有数据 reconciliation（ADR-016 已定方向的独立工具，未实现）。
+  - 生产部署。
