@@ -1627,7 +1627,8 @@ adapter、DTO/编排改动、独立的 reconciliation 工具/作业、
   all-mock registry，行为与之前"内部默认构建"完全等价，不影响这些
   测试原本验证的业务逻辑。
 
-  **新增测试**（TASK-T16 Phase 2B8 专属，共 22 条）：
+  **新增测试**（TASK-T16 Phase 2B8 round 1 专属，共 18 条——round 2
+  独立复审 Minor 1 指出此前误写成"22 条"，已更正）：
   - `backend/tests/unit/test_registry.py`（+4）：
     `test_all_mock_registry_close_is_a_safe_noop`、
     `test_registry_close_calls_each_owned_providers_close_exactly_once`、
@@ -1679,3 +1680,104 @@ adapter、DTO/编排改动、独立的 reconciliation 工具/作业、
   未使用真实凭据；未构建/部署 patched Marzban 镜像；未碰生产 VPS；
   未做 Xray/Mihomo reload；未做 existing-data reconciliation；未改
   Alembic/schema；未开始生产部署。
+
+- **Phase 2B8 round 2（本轮，ChatGPT 对 PR #65 exact head
+  `a8fa12b5d180fc145f9fe1abe4ac219c2212c704` 的独立复审，3 个
+  Major + 2 个 Minor）**：
+
+  **Major 1（`get_provider_registry()` 的 fallback 路径缺少
+  cleanup owner）**：独立验证后确认 **VALID**——lifespan 未运行时
+  （例如裸 `TestClient(app)`，不经 `with` 触发生命周期事件），
+  `get_provider_registry()` 之前会惰性 `build_registry()` 并缓存到
+  `app.state`，但没有任何东西会关闭这个实例；今天因为全部
+  provider 都是 mock/noop 而无害，一旦真实 resource-owning provider
+  接入，这条路径就是一个真实可达、且没有确定性 close 的泄漏点，
+  违反 Phase 2B8 验收标准第 4 条（"为兼容测试保留的 helper 不得形成
+  新的生产资源泄漏路径"）。修复：`get_provider_registry()` 改为
+  fail closed——`app.state.provider_registry` 不存在时抛出新的
+  `ProviderRegistryNotConfigured`（`RuntimeError` 子类），不再有任何
+  隐式 fallback 构造。生产 ASGI server（uvicorn）总会跑 lifespan，
+  这条路径因此只可能在测试里触发；受影响的测试改为要么用
+  `with TestClient(app) as client:` 触发 lifespan，要么直接断言
+  `ProviderRegistryNotConfigured` 被抛出。
+
+  **Major 2（`ProviderRegistry.close()` 在某个 provider 抛异常时
+  会永久跳过后续/无法重试）**：独立验证后确认 **VALID**——原实现在
+  遍历 provider 之前就把 `_closed = True` 设成真，如果第一个
+  provider（`egress`）的 `close()` 抛异常，异常会直接向外传播，
+  `accounting`/`transport` 等后续 provider 全部被跳过；且因为
+  `_closed` 已经是 `True`，第二次调用 `close()` 会立即返回，那些被
+  跳过的 provider 永远没有机会被重新关闭。修复：`close()` 改为对
+  每个 provider 独立 `try/except`，一个 provider 失败不影响其它
+  provider 继续被尝试关闭；新增 `_closed_provider_ids`（按
+  `id(provider)` 记录已经成功关闭、或确认无需关闭的 provider），
+  保证同一个 provider 不会被重复关闭，也保证同一个对象同时填两个
+  角色时只关闭一次；只有当本轮遍历里的每一个 provider 都成功（或
+  本来就没有 `close()`）时，`_closed` 才会变成 `True`；否则把全部
+  失败收集进一个 `ExceptionGroup` 并在遍历结束后抛出——失败会被
+  完整暴露，绝不静默吞掉。
+
+  **Major 3（`backend/app/services.py` 仍保留未托管的
+  `providers or build_registry(...)` fallback）**：独立验证后确认
+  **VALID**——`build_services()`/`provision()`/
+  `confirm_payment_and_provision()`/`confirm_manual_payment()` 四个
+  函数此前都允许在 `providers` 省略时自己 `build_registry()`，且不
+  拥有、也不关闭这个自建实例；虽然本轮已经让唯一的生产调用方
+  （`admin.py::admin_confirm_payment`）显式传入了受管理的
+  registry，但只要这四个 public 函数签名仍然"允许"自建，就仍然是
+  Phase 2B8 要消灭的同一类泄漏。核实发现：这四个函数在生产代码里
+  只有 `admin_confirm_payment` 一个调用方（已修复），仓库内其余全部
+  调用（`test_services_wiring.py` 六处、
+  `test_provisioning_phase_boundary.py` 二十五处）早就显式传入了
+  `providers=`，唯一的例外是一处遗留的 `settings=None`（同一测试
+  文件），修复：把 `providers` 从 `ProviderRegistry | None = None`
+  改成必填的 `providers: ProviderRegistry`（keyword-only），彻底删除
+  `providers or build_registry(settings or get_settings())` 这行
+  fallback 和随之变成死代码的 `settings` 参数、`Settings`/
+  `get_settings`/`build_registry` import；修正那一处遗留的
+  `settings=None` 调用。
+
+  **Minor 1（测试计数与实际不符）**：round 1 的 PR/TASK 文本写
+  "22 new tests"，但列出的加总是 4+5+3+3+3=18，套件差值也是
+  199→217（=18）。本条已经是文档措辞错误，不是代码问题——本轮
+  correction 一并把最终数字改成准确值（见下方"验证"）。
+
+  **Minor 2（部分测试没有真正证明 DI 路径）**：
+  `test_multiple_requests_reuse_the_same_application_scoped_registry`
+  之前只请求 `/health`（这个路由根本不依赖 `ManagedRegistry`），
+  `test_get_provider_registry_is_the_dependency_used_by_main_app`
+  只检查了 `callable(place_order)`，两者都没有真正证明"两次 FastAPI
+  请求通过被改动的 dependency 解析到同一个 registry"。修复：改用
+  真正声明了 `registry: ManagedRegistry` 参数的路由
+  （`admin_accounting_health`，配合 `app.dependency_overrides`
+  注入一个 admin 身份）发两次真实 HTTP 请求，断言两次都成功
+  且 `app.state.provider_registry` 前后同一实例。
+
+  **测试**：
+  - `backend/tests/unit/test_registry.py` 新增 3 条：一个 provider
+    的 `close()` 抛异常时其余 provider 仍被正确关闭
+    （`test_registry_close_still_closes_every_other_provider_when_one_raises`）；
+    第二次 `close()` 只重试之前失败的 provider，不重复关闭已成功的
+    （`test_registry_close_retries_only_the_provider_that_previously_failed`）；
+    同一对象填两个角色只关闭一次
+    （`test_registry_close_closes_a_shared_provider_object_only_once`）。
+  - `backend/tests/unit/test_application_lifecycle.py`：
+    `test_registry_dependency_fails_closed_when_lifespan_did_not_run`
+    替换原来的"惰性构建"测试，断言
+    `ProviderRegistryNotConfigured` 被抛出；
+    `test_multiple_requests_reuse_the_same_application_scoped_registry`
+    改为通过 `admin_accounting_health` 真实路由验证（Minor 2）。
+  - `backend/tests/integration/test_provisioning_phase_boundary.py`：
+    删除一处遗留的 `settings=None` 调用（`confirm_payment_and_provision`
+    不再接受该参数）。
+
+  **验证**：`ruff check backend/` 全过；
+  `mypy backend/app backend/tests`（strict）无问题；
+  `pytest backend/tests/unit backend/tests/guards -q` → **220 通过**
+  （217 + 本轮新增 3 条，0 回归，round 1 的全部测试保持绿色）；
+  `pytest backend/tests/integration -q` → 50 通过、1 个与本次改动
+  无关的既有环境限制失败（同上，MariaDB 10.11 沙箱版本字符串检查）。
+  Phase 2B8 累计新增测试：18（round 1）+ 3（round 2）= **21 条**，
+  更正 round 1 文本里"22 条"的笔误（Minor 1）。
+
+  **仍未完成**：与 round 1 完全一致，未扩大 scope。

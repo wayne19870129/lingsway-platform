@@ -13,37 +13,47 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from backend.app.core.config import get_settings
 from backend.app.core.database import get_db
 from backend.app.core.security import create_access_token, decode_access_token
 from backend.app.models import Customer, CustomerRole, CustomerStatus, JwtSession
-from backend.app.providers.registry import ProviderRegistry, build_registry
+from backend.app.providers.registry import ProviderRegistry
 
 DbSession = Annotated[Session, Depends(get_db)]
 bearer = HTTPBearer(auto_error=False)
 
 
-def get_provider_registry(request: Request) -> ProviderRegistry:
-    """TASK-T16 Phase 2B8: the one place route handlers reach the
-    application-scoped ``ProviderRegistry`` -- built once by ``main.py``'s
-    ``lifespan`` and stored on ``app.state``, so every request within the
-    same process reuses the same instance (and its resources, once a
-    real resource-owning provider is wired in) instead of constructing
-    and discarding a fresh one per request.
+class ProviderRegistryNotConfigured(RuntimeError):
+    """Raised by :func:`get_provider_registry` when the application-scoped
+    ``ProviderRegistry`` was never installed on ``app.state`` -- i.e. the
+    FastAPI ``lifespan`` in ``main.py`` never ran for this app instance.
 
-    Falls back to building (and caching on ``app.state`` for subsequent
-    calls within the same process) a registry lazily if the lifespan
-    never ran -- e.g. a test constructing ``TestClient(app)`` without the
-    ``with`` context manager that triggers lifespan events. Production
-    ASGI servers (uvicorn) always run the lifespan, so this fallback is
-    purely a test-harness accommodation; today's mock/noop providers hold
-    no resources either way, so it does not weaken the ownership
-    guarantee for anything actually deployed.
+    TASK-T16 Phase 2B8 (independent-review Major 1): this dependency
+    fails closed instead of silently constructing an unmanaged fallback
+    registry that nothing would ever close. Every real ASGI server
+    (uvicorn included) always runs the lifespan, so this is only ever
+    reachable from a test that built ``TestClient(app)`` without the
+    ``with`` context manager needed to trigger startup/shutdown events --
+    such a test must either use ``with TestClient(app) as client:`` or
+    override this dependency (``app.dependency_overrides``) explicitly.
     """
-    registry = getattr(request.app.state, "provider_registry", None)
+
+
+def get_provider_registry(request: Request) -> ProviderRegistry:
+    """The one place route handlers reach the application-scoped
+    ``ProviderRegistry`` -- built exactly once by ``main.py``'s
+    ``lifespan`` and stored on ``app.state``, so every request within the
+    same process reuses the same instance (and, once a real
+    resource-owning provider is wired in, its resources) instead of each
+    route constructing and discarding its own. Raises
+    :class:`ProviderRegistryNotConfigured` (fail closed, never a silent
+    unmanaged fallback) if the lifespan never ran.
+    """
+    registry: ProviderRegistry | None = getattr(request.app.state, "provider_registry", None)
     if registry is None:
-        registry = build_registry(get_settings())
-        request.app.state.provider_registry = registry
+        raise ProviderRegistryNotConfigured(
+            "app.state.provider_registry is not set -- the FastAPI lifespan "
+            "never ran for this app instance"
+        )
     return registry
 
 

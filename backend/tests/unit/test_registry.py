@@ -163,3 +163,103 @@ def test_registry_context_manager_closes_on_exit() -> None:
     with registry:
         assert egress.close_calls == []
     assert len(egress.close_calls) == 1
+
+
+@dataclass(slots=True)
+class _FlakyCloseProvider:
+    """Raises on close() until ``fail_times`` calls have been consumed,
+    then succeeds -- lets tests drive a provider through a failed close
+    followed by a successful retry."""
+
+    fail_times: int = 0
+    close_calls: list[None] = field(default_factory=list)
+
+    def close(self) -> None:
+        self.close_calls.append(None)
+        if len(self.close_calls) <= self.fail_times:
+            raise RuntimeError("simulated close() failure")
+
+
+def test_registry_close_still_closes_every_other_provider_when_one_raises() -> None:
+    """Independent-review Major 2 (PR #65, round 1): one provider's
+    close() raising must never skip the remaining providers -- the
+    original implementation set `_closed = True` before iterating, so a
+    failure on `egress` (iterated first) silently left `accounting` and
+    every later provider permanently unclosed."""
+    failing_egress = _FlakyCloseProvider(fail_times=999)  # always fails
+    accounting = _ClosableProvider()
+    transport = _ClosableProvider()
+    defaults = _all_mock_registry()
+    registry = ProviderRegistry(
+        egress=failing_egress,  # type: ignore[arg-type]
+        accounting=accounting,  # type: ignore[arg-type]
+        gateway=defaults.gateway,
+        forwarder=defaults.forwarder,
+        payment=defaults.payment,
+        notify=defaults.notify,
+        email=defaults.email,
+        captcha=defaults.captcha,
+        storage=defaults.storage,
+        transport=transport,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(ExceptionGroup):
+        registry.close()
+
+    assert len(failing_egress.close_calls) == 1
+    assert len(accounting.close_calls) == 1
+    assert len(transport.close_calls) == 1
+
+
+def test_registry_close_retries_only_the_provider_that_previously_failed() -> None:
+    """A second close() call after a partial failure must retry only the
+    provider(s) that failed or were never attempted -- never re-close a
+    provider that already succeeded."""
+    flaky_egress = _FlakyCloseProvider(fail_times=1)  # fails once, then succeeds
+    accounting = _ClosableProvider()
+    defaults = _all_mock_registry()
+    registry = ProviderRegistry(
+        egress=flaky_egress,  # type: ignore[arg-type]
+        accounting=accounting,  # type: ignore[arg-type]
+        gateway=defaults.gateway,
+        forwarder=defaults.forwarder,
+        payment=defaults.payment,
+        notify=defaults.notify,
+        email=defaults.email,
+        captcha=defaults.captcha,
+        storage=defaults.storage,
+        transport=defaults.transport,
+    )
+
+    with pytest.raises(ExceptionGroup):
+        registry.close()
+    assert len(flaky_egress.close_calls) == 1
+    assert len(accounting.close_calls) == 1  # already succeeded on the first sweep
+
+    registry.close()  # retry: only egress needed a second attempt
+
+    assert len(flaky_egress.close_calls) == 2
+    assert len(accounting.close_calls) == 1  # never re-closed
+
+
+def test_registry_close_closes_a_shared_provider_object_only_once() -> None:
+    """If the identical provider object fills more than one registry
+    role, close() must call its close() exactly once, not once per role."""
+    shared = _ClosableProvider()
+    defaults = _all_mock_registry()
+    registry = ProviderRegistry(
+        egress=shared,  # type: ignore[arg-type]
+        accounting=shared,  # type: ignore[arg-type]
+        gateway=defaults.gateway,
+        forwarder=defaults.forwarder,
+        payment=defaults.payment,
+        notify=defaults.notify,
+        email=defaults.email,
+        captcha=defaults.captcha,
+        storage=defaults.storage,
+        transport=defaults.transport,
+    )
+
+    registry.close()
+
+    assert len(shared.close_calls) == 1

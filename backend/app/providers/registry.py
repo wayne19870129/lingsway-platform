@@ -66,15 +66,40 @@ class ProviderRegistry:
     storage: BlobStorage
     transport: TransportProvider
     _closed: bool = field(default=False, init=False, repr=False, compare=False)
+    #: ids of providers already successfully closed (or found to have no
+    #: closeable resource at all) across every close() call so far --
+    #: never re-closed, and never blocking a *different*, still-failing
+    #: provider's close attempt (independent-review Major 2).
+    _closed_provider_ids: set[int] = field(
+        default_factory=set, init=False, repr=False, compare=False
+    )
 
     def close(self) -> None:
-        """Idempotently close every provider this registry holds that
-        owns a closeable resource. Safe to call multiple times (a second
-        call is a no-op) and safe to call even though most providers
-        today have nothing to close."""
+        """Close every provider this registry holds that owns a
+        closeable resource.
+
+        Deliberately **not** short-circuited by one provider's ``close()``
+        raising: a resource-owning provider is never skipped just because
+        an earlier one in iteration order failed -- otherwise a single
+        broken provider would permanently leak every provider after it.
+        Idempotent per-provider (each provider's ``close()`` is called at
+        most once across the lifetime of this registry, tracked by
+        identity so the same object filling two roles is still only
+        closed once) and idempotent as a whole once every provider has
+        succeeded (``self._closed`` becomes ``True`` only then). Calling
+        this again after a partial failure retries only the providers
+        that failed or were not yet attempted -- never the ones that
+        already closed successfully.
+
+        Raises an ``ExceptionGroup`` wrapping every provider's ``close()``
+        failure if any occurred, only after every other provider has had
+        its own close attempted -- cleanup failures are surfaced, never
+        silently swallowed.
+        """
         if self._closed:
             return
-        self._closed = True
+        seen_this_call: set[int] = set()
+        errors: list[Exception] = []
         for provider in (
             self.egress,
             self.accounting,
@@ -87,9 +112,28 @@ class ProviderRegistry:
             self.storage,
             self.transport,
         ):
+            provider_id = id(provider)
+            if provider_id in self._closed_provider_ids or provider_id in seen_this_call:
+                # Already closed in a previous call, or the identical
+                # object fills more than one role in this registry --
+                # either way, close it at most once.
+                continue
+            seen_this_call.add(provider_id)
             closer = getattr(provider, "close", None)
-            if callable(closer):
+            if not callable(closer):
+                self._closed_provider_ids.add(provider_id)
+                continue
+            try:
                 closer()
+            except Exception as exc:  # noqa: BLE001 -- one provider's failure must never skip the rest
+                errors.append(exc)
+            else:
+                self._closed_provider_ids.add(provider_id)
+        if errors:
+            raise ExceptionGroup(
+                "ProviderRegistry.close() failed to close one or more providers", errors
+            )
+        self._closed = True
 
     def __enter__(self) -> ProviderRegistry:
         return self
