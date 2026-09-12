@@ -46,7 +46,7 @@ cat >"${WORKDIR}/exec1.json" <<EOF
   {"type": "result", "subtype": "success", "is_error": false, "num_turns": 12, "total_cost_usd": 0.234, "permission_denials": [], "modelUsage": {"claude-sonnet-5": {"contextWindow": 200000, "maxOutputTokens": 8192}, "claude-haiku-4-5-20251001": {"contextWindow": 200000, "maxOutputTokens": 8192}}}
 ]
 EOF
-out1=$(EXECUTION_FILE="${WORKDIR}/exec1.json" CONFIGURED_MODEL_SELECTOR=sonnet CONFIGURED_EFFORT=medium bash "${TARGET_SCRIPT}")
+out1=$(EXECUTION_FILE="${WORKDIR}/exec1.json" CONFIGURED_MODEL_SELECTOR=sonnet CONFIGURED_EFFORT=medium GITHUB_STEP_SUMMARY= bash "${TARGET_SCRIPT}")
 assert "scenario 1: configured selector shown" "$(echo "${out1}" | grep -q '| Configured main model selector | `sonnet` |' && echo true || echo false)"
 assert "scenario 1: configured effort shown" "$(echo "${out1}" | grep -q '| Configured effort | `medium` |' && echo true || echo false)"
 assert "scenario 1: actual main model is Sonnet, not Haiku" "$(echo "${out1}" | grep -q '| Actual initialized main model | `claude-sonnet-5` |' && echo true || echo false)"
@@ -63,7 +63,7 @@ cat >"${WORKDIR}/exec2.json" <<EOF
   {"type": "result", "subtype": "error_max_turns", "is_error": true, "num_turns": 31, "total_cost_usd": 0.64365, "permission_denials": [{"tool":"Bash"},{"tool":"Bash"}], "modelUsage": {"claude-sonnet-4-6": {"contextWindow": 200000, "maxOutputTokens": 8192}}}
 ]
 EOF
-out2=$(EXECUTION_FILE="${WORKDIR}/exec2.json" CONFIGURED_MODEL_SELECTOR=sonnet CONFIGURED_EFFORT=medium bash "${TARGET_SCRIPT}")
+out2=$(EXECUTION_FILE="${WORKDIR}/exec2.json" CONFIGURED_MODEL_SELECTOR=sonnet CONFIGURED_EFFORT=medium GITHUB_STEP_SUMMARY= bash "${TARGET_SCRIPT}")
 assert "scenario 2: configured selector still reported as requested (sonnet)" "$(echo "${out2}" | grep -q '| Configured main model selector | `sonnet` |' && echo true || echo false)"
 assert "scenario 2: actual initialized main model differs from configured selector, and is visible" "$(echo "${out2}" | grep -q '| Actual initialized main model | `claude-sonnet-4-6` |' && echo true || echo false)"
 assert "scenario 2: null actual effort reported as none, not silently omitted" "$(echo "${out2}" | grep -q '| Actual initialized effort | `none reported` |' && echo true || echo false)"
@@ -73,7 +73,7 @@ assert "scenario 2: is_error/exit subtype reported correctly" "$(echo "${out2}" 
 echo "### Scenario 3: missing execution file -> clean no-op, not an error"
 : >"${WORKDIR}/no-such-file-marker"
 rm -f "${WORKDIR}/no-such-file-marker"
-out3=$(EXECUTION_FILE="${WORKDIR}/does-not-exist.json" CONFIGURED_MODEL_SELECTOR=sonnet CONFIGURED_EFFORT=medium bash "${TARGET_SCRIPT}")
+out3=$(EXECUTION_FILE="${WORKDIR}/does-not-exist.json" CONFIGURED_MODEL_SELECTOR=sonnet CONFIGURED_EFFORT=medium GITHUB_STEP_SUMMARY= bash "${TARGET_SCRIPT}")
 assert "scenario 3: missing file produces an explanatory message, not a crash" "$(echo "${out3}" | grep -q 'Claude may not have started' && echo true || echo false)"
 
 echo
