@@ -299,6 +299,10 @@ class _FakeBind:
 class _FakeSession:
     def __init__(self, connection: _FakeLockConnection) -> None:
         self._bind = _FakeBind(connection)
+        # Real sqlalchemy.orm.Session always has this plain dict attribute;
+        # gateway_route_binding_write() uses it to record ADR-017's
+        # lock-held marker (see SESSION_INFO_LOCK_HELD_KEY).
+        self.info: dict[str, object] = {}
 
     def get_bind(self) -> _FakeBind:
         return self._bind
@@ -320,6 +324,143 @@ def test_null_from_get_lock_fails_closed_via_injection() -> None:
     assert entered_body is False
     assert connection.closed is True
     assert not any("RELEASE_LOCK" in sql for sql in connection.executed)
+
+
+class _RaisingLockConnection:
+    """Stands in for the dedicated lock Connection; never touches a real DB.
+
+    Unlike :class:`_FakeLockConnection` (which returns 0/NULL from
+    ``GET_LOCK()``), this simulates a generic DBAPI/SQLAlchemy exception
+    *raised while executing* the ``GET_LOCK()`` statement itself -- e.g. a
+    dropped connection or pool exhaustion -- which is a distinct failure
+    mode from the two documented ``GET_LOCK()`` return values.
+    """
+
+    engine = _FakeEngine()
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+        self.closed = False
+        self.invalidated = False
+
+    def execution_options(self, **_kwargs: object) -> _RaisingLockConnection:
+        return self
+
+    def execute(self, statement: object, _params: object | None = None) -> _FakeScalarResult:
+        sql = str(statement)
+        if "GET_LOCK" in sql:
+            raise self._exc
+        return _FakeScalarResult(None)
+
+    def invalidate(self) -> None:
+        self.invalidated = True
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_generic_exception_during_get_lock_is_normalized_to_lock_error() -> None:
+    """Major 1 (Work review round 2): a generic DBAPI/SQLAlchemy exception
+    raised while executing ``GET_LOCK()`` -- not just its 0/NULL return
+    values -- must also be normalized into ``GatewayRouteBindingLockError``,
+    with the original exception chained via ``from``, so callers that only
+    catch ``GatewayRouteBindingLockError`` to run their fail-closed
+    compensation (``services.confirm_payment_and_provision``) still see it
+    for this failure mode too. The public message must not embed the raw
+    DBAPI exception text -- only the chained cause carries it."""
+    original = RuntimeError("simulated DBAPI: connection reset by peer")
+    connection = _RaisingLockConnection(original)
+    session = _FakeSession(connection)
+    entered_body = False
+
+    with (
+        pytest.raises(GatewayRouteBindingLockError) as excinfo,
+        gateway_route_binding_write(session),  # type: ignore[arg-type]
+    ):
+        entered_body = True
+
+    assert entered_body is False
+    assert connection.closed is True
+    assert excinfo.value.__cause__ is original
+    assert "connection reset by peer" not in str(excinfo.value)
+
+
+def test_generic_exception_during_get_lock_invalidates_the_ambiguous_connection() -> None:
+    """Major 1 (Work review round 2): the server may have already granted
+    the lock before a generic GET_LOCK() exception happened in transit --
+    this connection's lock state is unknown, so it must be invalidated
+    (not just closed) rather than risk returning a connection the server
+    still considers the lock's holder back into the pool."""
+    connection = _RaisingLockConnection(RuntimeError("simulated transport failure"))
+    session = _FakeSession(connection)
+
+    with (
+        pytest.raises(GatewayRouteBindingLockError),
+        gateway_route_binding_write(session),  # type: ignore[arg-type]
+    ):
+        pass
+
+    assert connection.invalidated is True
+    assert connection.closed is True
+
+
+def test_get_lock_return_value_failures_do_not_invalidate_the_connection() -> None:
+    """Control case for the test above: GET_LOCK() returning 0/NULL is an
+    unambiguous, server-confirmed "no lock granted" outcome -- the
+    connection is known-clean and must not be needlessly invalidated."""
+    connection = _FakeLockConnection(get_lock_return=0)
+    session = _FakeSession(connection)
+
+    with (
+        pytest.raises(GatewayRouteBindingLockError),
+        gateway_route_binding_write(session),  # type: ignore[arg-type]
+    ):
+        pass
+
+    assert connection.closed is True
+
+
+def test_ambiguous_failure_after_real_get_lock_success_does_not_leak_the_lock(
+    engine: Engine,
+) -> None:
+    """Major 1 (Work review round 2), real MySQL: simulate the actual
+    ambiguous scenario the injected unit tests above only assert the
+    *reaction* to -- the dedicated connection genuinely acquires the real
+    named lock on the server, and only *then* does the code path raise, as
+    if the response confirming that success had been lost in transit. The
+    fix must not just raise the right exception type: it must actually
+    invalidate the connection so MySQL does not keep considering it the
+    lock's holder. Proven by using a completely independent, fresh
+    connection afterward to acquire the same lock immediately -- if the
+    ambiguous connection had merely been closed and returned to the pool
+    instead of invalidated, MySQL would still hold it as the owner (named
+    locks are not released by an ordinary close/rollback) and this second
+    acquisition would time out instead."""
+    import backend.app.infra.gateway_route_lock as lock_module
+
+    real_get_lock = lock_module._get_lock
+
+    def flaky_get_lock(connection: Any, name: str, timeout_seconds: int) -> None:
+        # Actually acquires the real named lock on the real dedicated
+        # connection first -- then fails as if the confirmation of that
+        # success never made it back to the caller.
+        real_get_lock(connection, name, timeout_seconds)
+        raise RuntimeError("simulated: response lost after the server granted the lock")
+
+    with (
+        mock.patch.object(lock_module, "_get_lock", side_effect=flaky_get_lock),
+        Session(engine) as db,
+        pytest.raises(GatewayRouteBindingLockError),
+        gateway_route_binding_write(db, timeout_seconds=5),
+    ):
+        pass
+
+    # A fresh, completely independent connection must be able to acquire
+    # the same named lock immediately -- proving the ambiguous connection
+    # was invalidated (and thus terminated, releasing the server-side
+    # lock) rather than pooled while still perceived as the holder.
+    with Session(engine) as verify_db, gateway_route_binding_write(verify_db, timeout_seconds=2):
+        pass
 
 
 def test_lock_name_is_namespaced_by_database_and_within_mysql_limit() -> None:

@@ -15,7 +15,11 @@ from sqlalchemy.orm import Session
 from backend.app.core.config import get_settings
 from backend.app.core.secrets import put_secret, reveal_secret
 from backend.app.domain.provisioning import ProvisioningState, ProvisionRequest
-from backend.app.infra.gateway_route_lock import gateway_route_binding_write
+from backend.app.infra.gateway_route_lock import (
+    GatewayRouteBindingLockError,
+    gateway_route_binding_write,
+    session_holds_gateway_route_binding_lock,
+)
 from backend.app.models import (
     EgressBinding,
     EgressEndpoint,
@@ -187,6 +191,19 @@ class SqlAlchemyProvisioningState(ProvisioningState):
     def ensure_gateway_route_binding(
         self, gateway_principal: str, endpoint: EgressEndpointDTO
     ) -> GatewayRouteBinding:
+        # ADR-017 production-bypass guard: this is the sole real writer of
+        # GatewayRouteBinding reachable from ProvisioningService. Refuse to
+        # mutate if the caller reached here without holding the ADR-016
+        # named lock on this exact session -- e.g. a convenience API
+        # (services.provision(), or ProvisioningService.provision_apply_gateway()
+        # called directly) pointed at a real SqlAlchemyProvisioningState
+        # outside confirm_payment_and_provision()'s lock-wrapped call path.
+        if not session_holds_gateway_route_binding_lock(self.db):
+            raise GatewayRouteBindingLockError(
+                "ensure_gateway_route_binding() called without the ADR-016 "
+                "named lock held on this session; refusing to mutate "
+                "GatewayRouteBinding outside gateway_route_binding_lock()"
+            )
         endpoint_id = _db_id(endpoint.endpoint_id, "endpoint_id")
         binding = self.db.scalar(
             select(GatewayRouteBinding).where(

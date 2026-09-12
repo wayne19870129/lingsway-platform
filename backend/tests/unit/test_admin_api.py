@@ -9,6 +9,8 @@ from typing import Any, cast
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from backend.app import main
@@ -102,6 +104,12 @@ class _FakeDb:
         self.order = order
         self.plan = plan
         self.subscription = subscription
+        # confirm_payment_and_provision() is monkeypatched in these tests,
+        # so _SqlAlchemyProvisionRuns's own methods are never exercised --
+        # but its constructor now eagerly opens its own dedicated Session
+        # (ADR-017's independent run-status persistence), which needs a
+        # real (if trivial) Engine to bind to.
+        self._engine = create_engine("sqlite://")
 
     def get(self, model: type[Any], identifier: int) -> Any:
         if model is Order:
@@ -118,6 +126,9 @@ class _FakeDb:
 
     def commit(self) -> None:
         return None
+
+    def get_bind(self) -> Engine:
+        return self._engine
 
 
 def _provision_fixtures() -> tuple[_FakeDb, Order, Subscription]:

@@ -1029,3 +1029,88 @@ adapter、DTO/编排改动、独立的 reconciliation 工具/作业、
   `marzban-contract` job 失败，不允许 fallback 到无 hash 安装。
   以上均已落地并在全新 venv 中端到端验证通过
   （27/27 Marzban 测试全部通过，含新增的 8 个 lock 一致性测试）。
+
+- **Phase 2B5（本 PR，narrow GatewayRouteBinding named-lock hold span）**：
+  解决 Phase 2B3 记录的、此前一直未处理的
+  provisioning named-lock 持有跨度 blocker——真实（非 mock）
+  `EgressProvider`/`AccountingProvider`/`GatewayProvider` 接入前的
+  硬前置。新增 `docs/80-decisions/ADR-017-provisioning-lock-hold-span-narrowing.md`
+  （modifying `backend/app/domain/provisioning.py` 前置要求的 ADR，
+  详细定义 phase boundary、transaction/commit/rollback/lock
+  acquire-release 各自的 owner、GET_LOCK 失败时的补偿语义、
+  30 秒 timeout 的精确含义、以及为何 `NOTIFY` 暂不移出锁）。
+
+  `ProvisioningService` 新增 `provision_prepare()`（steps 1-6，
+  `CAPACITY`..`CREATE_ACCOUNTING_USER`，从不接触
+  `GatewayRouteBinding`、从不获取 named lock）与
+  `provision_apply_gateway()`（steps 7-9，`APPLY_GATEWAY`..`NOTIFY`，
+  唯一会调用 `desired_routing_state()` 的方法，调用方必须全程持有
+  named lock）；`provision()` 保留、改写为两者的组合，对现有直接调用方
+  完全透明。新增 `ProvisioningCheckpoint`（阶段间传递 `run_id`/
+  `endpoint`/`tenant` 的不可变 continuation）与
+  `fail_apply_gateway_lock_acquisition()`（GET_LOCK 本身失败时的
+  补偿：disable accounting user、`GATEWAY_APPLY_FAILED` alert、
+  run 标记 FAILED——与 `APPLY_GATEWAY` 自身异常处理逐字节一致，避免
+  两条路径语义漂移）。
+
+  `backend/app/services.py::confirm_payment_and_provision()` 改为：
+  `provision_prepare()` 在锁外运行；仅在拿到非终态 checkpoint 后，
+  紧邻 `provision_apply_gateway()` 调用前才 `GET_LOCK`；新增
+  `except GatewayRouteBindingLockError` 分支执行上述补偿 +
+  `state.rollback_database()`，再走既有 `fail_paid_purchase()` 终态
+  事务。锁的释放点不变——仍是 `gateway_route_binding_lock()` 这个
+  `with` 块的退出，因此仍在 `activate_paid_purchase()`/commit 完成
+  之后（`gateway_route_binding_write()`自身 `finally` 的结构性保证）。
+
+  production-bypass audit（要求逐项确认，非字符串 grep）：
+  仓库范围搜索确认当前唯一真实生产路径是
+  `_OrderProvisioningState`/`confirm_payment_and_provision()`；
+  `backend/app/services.py::provision()`（独立便利函数）与直接调用
+  `ProvisioningService.provision()`均无生产调用点。为把这个不变量
+  变成结构性保证而非"目前没人接错"，新增
+  `backend/app/infra/gateway_route_lock.py::
+  session_holds_gateway_route_binding_lock()`（基于真实 SQLAlchemy
+  `Session.info` 的运行时标记，由 `gateway_route_binding_write()`
+  自己维护）与
+  `SqlAlchemyProvisioningState.ensure_gateway_route_binding()`
+  的前置检查：未持有锁时调用直接 `raise
+  GatewayRouteBindingLockError`（fail-closed，零 mutation）。
+
+  真实 MySQL（本地用 MariaDB 10.11 best-effort 验证，CI 上以真实
+  MySQL 8.4 backend job 为准——见下方"未解决项"）并发测试新增
+  `backend/tests/integration/test_provisioning_phase_boundary.py`
+  （6 个测试，均驱动真实 `confirm_payment_and_provision()` +
+  `SqlAlchemyProvisioningState`，非重新实现）：steps 1-6 在另一
+  connection 持锁期间完整跑完（证明不需要锁）；成功路径锁从
+  `APPLY_GATEWAY` mutation 持有到 commit 完成、之后立即可被其它
+  connection 获取；gateway 失败时 rollback 在锁释放前完成、零
+  partial `GatewayRouteBinding` 行残留；GET_LOCK 本身超时时零写入、
+  accounting user disabled、provisioning FAILED；`PENDING_MANUAL`
+  与 accounting-create 失败路径 lock acquire count == 0。既有
+  `test_gateway_route_binding_lock.py`（13 个测试）与
+  `test_db_adapters.py` 全部继续通过，未回退任何 PR #60 已建立的
+  writer mutual-exclusion 保证。
+
+  `DEFAULT_LOCK_TIMEOUT_SECONDS = 30` 数值本身**未改动**——ADR-017
+  明确它是 GET_LOCK 的等待获取超时（可用性参数），不是持有时长上限；
+  缩小 hold span 后，Webshare/Marzban 的慢 HTTP 调用不再计入 named-lock
+  持有时长，但真实 `GatewayProvider`（唯一仍在锁内执行的 provider）
+  的生产延迟尚无实测数据，仍需后续测量调优。
+
+  **NOTIFY 仍在锁内，未移出**：本 PR 明确只解决"steps 1-6 不持锁"这一
+  真实 provider 接入的硬前置；`NOTIFY` 移出 critical section 需要先
+  分析其失败补偿语义在锁外是否仍然一致，属于独立后续工作，ADR-017
+  记录为未解决项，不得误报"所有 external call 已移出锁"。
+
+  **本 PR 显式不做**（保持范围）：真实 Marzban/Webshare/Mihomo
+  provider 实现、`AccountUserDTO.routing_principal` 或
+  `create_user` 返回值数据链改动、`registry.py` 启用 marzban、
+  existing-data reconciliation、DB schema/Alembic migration、
+  生产凭据/生产网络调用、部署。
+
+  **未解决项**：(1) 本地验证用的是 MariaDB 10.11（沙箱环境唯一可用），
+  非仓库 CI 实际使用的真实 MySQL 8.4——GET_LOCK/RELEASE_LOCK 语义在两者
+  上被验证一致，但权威结论以 GitHub Actions 的 MySQL 8.4 backend job
+  为准，本 PR 描述中会同时报告两者结果。(2) `NOTIFY` 仍在锁内，真实
+  `NotifyProvider` 接入仍被阻塞，见上文。(3) `GatewayProvider` 真实
+  生产延迟下 30 秒 timeout 是否仍然合理，需要后续实测。

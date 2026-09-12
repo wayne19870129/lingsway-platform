@@ -30,18 +30,35 @@ from sqlalchemy.orm import Session
 #: How long GET_LOCK() blocks waiting for the lock before giving up.
 #:
 #: This is a placeholder default, not a value derived from a measured
-#: provisioning-saga latency budget: the provisioning writer currently
-#: holds this lock across the mock egress/accounting/gateway/notify calls
-#: exercised by tests, which are effectively instantaneous. Those providers
-#: are mocks -- e.g. the real Webshare transport documents a 20s per-call
-#: timeout before its own rate-limit/retry waits, well past this default.
-#: TASK-T16 records that the lock's hold span and this timeout must be
-#: re-evaluated once real (non-mock) provider wiring lands; until then,
-#: treat 30s as an easily-replaced placeholder, not a validated budget.
+#: production latency budget. It is a wait-to-acquire (availability)
+#: timeout, not a hold-duration cap -- nothing here enforces a maximum
+#: hold time; a holder keeps the lock for exactly as long as its `with`
+#: block takes. Since ADR-017 (TASK-T16 Phase 2B5) narrowed the
+#: provisioning writer's hold span, steps 1-6 (egress tenant creation,
+#: forwarder push, accounting user creation -- the Webshare/Marzban HTTP
+#: calls) no longer contribute to this lock's hold duration at all; only
+#: `GatewayProvider.render/validate/apply` and `NOTIFY` still run inside
+#: it (see ADR-017's "NOTIFY remains inside the lock" section). Neither
+#: has a real (non-mock) implementation yet, so 30s remains an
+#: easily-replaced placeholder, not a validated budget -- re-evaluate
+#: once real GatewayProvider/NotifyProvider production latency exists.
 DEFAULT_LOCK_TIMEOUT_SECONDS = 30
 
 #: MySQL's documented GET_LOCK() name length limit (in bytes/characters).
 _LOCK_NAME_MAX_LENGTH = 64
+
+#: Key set on ``session.info`` (a plain dict SQLAlchemy attaches to every
+#: ``Session`` and never touches itself) while that session's caller holds
+#: the named lock via :func:`gateway_route_binding_write`. ADR-017's
+#: production-bypass guard: ``SqlAlchemyProvisioningState.
+#: ensure_gateway_route_binding()`` checks this before mutating, so a
+#: caller that reaches it without having entered
+#: ``gateway_route_binding_lock()`` first (e.g. a convenience API pointed
+#: at a real state object outside the one sanctioned, lock-wrapped
+#: production call path) fails closed instead of silently writing
+#: unprotected. This is a real runtime check, not a naming convention or a
+#: static grep for callers.
+SESSION_INFO_LOCK_HELD_KEY = "gateway_route_binding_lock_held"
 
 
 class GatewayRouteBindingLockError(RuntimeError):
@@ -147,17 +164,112 @@ def gateway_route_binding_write(
     ``GET_LOCK()`` returning ``0`` (timeout) or ``NULL`` (error) raises
     :class:`GatewayRouteBindingLockError` *before* the caller's body ever
     runs: no ``GatewayRouteBinding`` row is touched when the lock cannot be
-    acquired.
+    acquired. So does *any other* failure encountered while acquiring the
+    lock -- resolving ``session``'s engine, opening the dedicated
+    connection, deriving the lock name, or the ``GET_LOCK()`` call itself
+    raising a DBAPI/SQLAlchemy exception (a dropped connection, a pool
+    exhaustion error, etc.) is normalized into
+    :class:`GatewayRouteBindingLockError`, with the original exception
+    chained via ``from`` (never interpolated into the public message
+    itself, which stays a stable, non-sensitive description -- the chained
+    cause is where a caller that needs the DBAPI detail, e.g. for logging,
+    finds it). Callers that only catch
+    :class:`GatewayRouteBindingLockError` to run their fail-closed
+    compensation must see it for every acquisition-stage failure, not
+    only the two "expected" ``GET_LOCK()`` return values -- ADR-017's
+    lock-acquisition-failure compensation
+    (``services.confirm_payment_and_provision``) depends on this.
+
+    If the ``GET_LOCK()`` call itself raises (as opposed to returning ``0``
+    or ``NULL``), whether the server actually granted the lock before the
+    failure happened in transit (a dropped connection, a truncated
+    response) cannot be determined from here. Since MySQL named locks are
+    connection-scoped and are not released by an ordinary
+    commit/rollback -- only by an explicit ``RELEASE_LOCK()`` or by the
+    holding connection itself terminating -- simply closing this
+    connection and returning it to the pool in that ambiguous case could
+    leave a live connection in the pool that the server still considers
+    the lock's holder, silently blocking every future acquisition attempt.
+    This function invalidates the connection instead in exactly that one
+    case (a generic exception from the ``GET_LOCK()`` call), which
+    discards the underlying physical connection rather than pooling it;
+    the two known, unambiguous outcomes -- ``GET_LOCK()`` returning ``0``
+    or ``NULL``, and any failure before ``GET_LOCK()`` is ever called --
+    do not invalidate, since the server has confirmed (or was never asked)
+    that no lock was granted to this connection.
+
+    Failures *releasing* the lock (inside :func:`_release_lock`) are
+    deliberately **not** normalized this way: a release failure is not an
+    acquisition failure, and re-labeling it as one would misrepresent
+    what actually happened to callers deciding how to react.
     """
-    bind = session.get_bind()
-    engine = bind.engine if isinstance(bind, Connection) else bind
-    lock_connection = engine.connect().execution_options(isolation_level="AUTOCOMMIT")
     try:
-        name = gateway_route_binding_lock_name(lock_connection)
-        _get_lock(lock_connection, name, timeout_seconds)
+        bind = session.get_bind()
+        engine = bind.engine if isinstance(bind, Connection) else bind
+    except Exception as exc:
+        raise GatewayRouteBindingLockError(
+            "failed to resolve the gateway route binding lock's database engine"
+        ) from exc
+
+    try:
+        raw_connection = engine.connect()
+    except Exception as exc:
+        raise GatewayRouteBindingLockError(
+            "failed to open the dedicated gateway route binding lock connection"
+        ) from exc
+    try:
+        lock_connection = raw_connection.execution_options(isolation_level="AUTOCOMMIT")
+    except Exception as exc:
+        # No lock was ever attempted on this connection -- it is safe to
+        # return to the pool via a plain close, no invalidation needed.
+        raw_connection.close()
+        raise GatewayRouteBindingLockError(
+            "failed to configure the dedicated gateway route binding lock connection"
+        ) from exc
+
+    try:
+        try:
+            name = gateway_route_binding_lock_name(lock_connection)
+        except GatewayRouteBindingLockError:
+            raise
+        except Exception as exc:
+            raise GatewayRouteBindingLockError(
+                "failed to derive the gateway route binding lock name"
+            ) from exc
+
+        try:
+            _get_lock(lock_connection, name, timeout_seconds)
+        except GatewayRouteBindingLockError:
+            # GET_LOCK() returned 0 (timeout) or NULL (error): the server
+            # confirmed no lock was granted to us. This connection's lock
+            # state is known and clean -- no need to invalidate it.
+            raise
+        except Exception as exc:
+            # The GET_LOCK() call itself raised. See this function's
+            # docstring: the server may have already granted the lock
+            # before the failure happened in transit, so this connection's
+            # lock state is unknown -- invalidate it rather than let a
+            # connection that might still be the lock's actual holder on
+            # the server go back into the pool as if nothing happened.
+            lock_connection.invalidate()
+            raise GatewayRouteBindingLockError(
+                "failed to acquire the gateway route binding lock "
+                "(connection state could not be confirmed)"
+            ) from exc
+
+        previously_held = session.info.get(SESSION_INFO_LOCK_HELD_KEY, False)
+        session.info[SESSION_INFO_LOCK_HELD_KEY] = True
         try:
             yield
         finally:
+            session.info[SESSION_INFO_LOCK_HELD_KEY] = previously_held
             _release_lock(lock_connection, name)
     finally:
         lock_connection.close()
+
+
+def session_holds_gateway_route_binding_lock(session: Session) -> bool:
+    """Whether ``session`` is currently inside a
+    :func:`gateway_route_binding_write` block -- see
+    ``SESSION_INFO_LOCK_HELD_KEY`` for why this exists."""
+    return bool(session.info.get(SESSION_INFO_LOCK_HELD_KEY, False))
