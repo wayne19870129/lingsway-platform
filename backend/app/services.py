@@ -178,14 +178,24 @@ def confirm_payment_and_provision(
             with order_state.transaction():
                 activate_paid_purchase(command, order_state)
     except GatewayRouteBindingLockError as lock_exc:
-        # ADR-017: GET_LOCK() itself failed -- provision_apply_gateway()
-        # never ran, so its own APPLY_GATEWAY exception handler (disable
-        # accounting user, alert, mark run FAILED) never ran either. Steps
-        # 1-6 already flushed DB state and made real external calls
-        # (tenant, forwarder, accounting user), which still need the same
-        # compensation and rollback any other mid-saga failure gets.
-        provisioning.fail_apply_gateway_lock_acquisition(prepared, request, lock_exc)
+        # ADR-017: GET_LOCK() itself failed (now including any acquisition-
+        # stage DBAPI/SQLAlchemy exception, normalized into this same type
+        # by gateway_route_binding_write() -- see its docstring) --
+        # provision_apply_gateway() never ran, so its own APPLY_GATEWAY
+        # exception handler (disable accounting user, alert, mark run
+        # FAILED) never ran either. Steps 1-6 already flushed DB state and
+        # made real external calls (tenant, forwarder, accounting user),
+        # which still need the same compensation and rollback any other
+        # mid-saga failure gets.
+        #
+        # Ordering matters here even though runs.mark_status() persists on
+        # its own dedicated Session (see _SqlAlchemyProvisionRuns), never
+        # entangled with `state`'s business-data transaction: roll back
+        # phase-A's uncommitted mutations on `state` first, so a concurrent
+        # reader can never observe accounting/forwarder state that's about
+        # to be discarded alongside a run already reported FAILED.
         state.rollback_database()
+        provisioning.fail_apply_gateway_lock_acquisition(prepared, request, lock_exc)
         with order_state.transaction():
             fail_paid_purchase(command, type(lock_exc).__name__, order_state)
         raise

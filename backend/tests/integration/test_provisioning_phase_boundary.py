@@ -21,13 +21,19 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
+from unittest import mock
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 import backend.app.models  # noqa: F401
+from backend.app.api.admin import (
+    _OrderProvisioningState,
+    _SqlAlchemyOrderState,
+    _SqlAlchemyProvisionRuns,
+)
 from backend.app.core.database import Base, build_engine
 from backend.app.domain.ordering import BillingCommand, BillingOrderType, PaymentConfirmation
 from backend.app.domain.provisioning import (
@@ -47,7 +53,11 @@ from backend.app.models import (
     EgressEndpoint,
     EgressGroup,
     GatewayRouteBinding,
+    Job,
+    JobStatus,
     Order,
+    OrderStatus,
+    PaymentStatus,
     Plan,
     Subscription,
 )
@@ -590,4 +600,182 @@ def test_accounting_create_failure_never_acquires_the_named_lock(engine: Engine)
     assert accounting.disabled_users == {"acct-fail"}
 
     with Session(engine) as db, gateway_route_binding_write(db, timeout_seconds=2):
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Major 1 regression (Work review round 2): GET_LOCK() itself raising a
+# generic DBAPI/SQLAlchemy exception -- not just returning 0/NULL -- must
+# still be normalized into GatewayRouteBindingLockError and drive the exact
+# same fail-closed compensation as a timeout.
+# ---------------------------------------------------------------------------
+
+
+def test_generic_acquisition_exception_rolls_back_phase_a_before_marking_failed(
+    engine: Engine,
+) -> None:
+    """A generic DBAPI/SQLAlchemy exception raised while executing
+    GET_LOCK() -- not GET_LOCK() returning 0/NULL -- must still be
+    normalized by gateway_route_binding_write() into
+    GatewayRouteBindingLockError and trigger identical fail-closed
+    compensation: phase-A's already-flushed DB state (EgressEndpoint.
+    current_count) rolled back, zero GatewayRouteBinding writes, the
+    accounting user disabled, and the run marked FAILED. Verified through
+    the real production call path (confirm_payment_and_provision ->
+    provision_apply_gateway -> gateway_route_binding_lock()) against real
+    MySQL, with only the GET_LOCK() execution itself injected to fail --
+    everything else (steps 1-6's real flush, the real rollback) runs for
+    real."""
+    with Session(engine) as seed_db:
+        order, subscription, endpoint = _seed(seed_db, suffix="GENERICACQ")
+        seed_db.commit()
+        order_id = order.id
+        subscription_id = subscription.id
+        endpoint_id = endpoint.id
+        customer_id = subscription.customer_id
+
+    accounting = MockAccountingProvider()
+    injected = RuntimeError("simulated DBAPI: connection reset by peer")
+    with Session(engine) as db:
+        state = SqlAlchemyProvisioningState(db, subscription_id)
+        order_state = _RealCommitOrderState(db)
+        runs = _Runs()
+
+        with (
+            mock.patch(
+                "backend.app.infra.gateway_route_lock._get_lock",
+                side_effect=injected,
+            ),
+            pytest.raises(GatewayRouteBindingLockError) as excinfo,
+        ):
+            confirm_payment_and_provision(
+                _command(order_id),
+                _request(order_id, customer_id, username="generic-acq"),
+                object(),
+                state,
+                runs,
+                order_state,
+                "receipt-generic-acq",
+                providers=_registry(accounting=accounting),
+            )
+
+    assert excinfo.value.__cause__ is injected
+
+    assert runs.status is ProvisionStatus.FAILED
+    assert "provision-failed" in order_state.events
+    assert accounting.disabled_users == {"generic-acq"}
+
+    with Session(engine) as db:
+        assert (
+            db.scalar(
+                select(GatewayRouteBinding).where(
+                    GatewayRouteBinding.subscription_id == subscription_id
+                )
+            )
+            is None
+        )
+        # Proves state.rollback_database() actually ran: allocate_endpoint()
+        # (steps 1-6, unlocked) flushed current_count=1 for this endpoint;
+        # if the rollback had been skipped, or ordered after some other
+        # commit, that mutation would have survived.
+        rolled_back_endpoint = db.get(EgressEndpoint, endpoint_id)
+        assert rolled_back_endpoint is not None
+        assert rolled_back_endpoint.current_count == 0
+
+    # The named lock itself must be free: the injected failure happened
+    # before GET_LOCK() ever held anything, and the dedicated lock
+    # connection must not have been left in a stale held state.
+    with Session(engine) as db, gateway_route_binding_write(db, timeout_seconds=5):
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Major 2 regression (Work review round 2): the production ProvisionRunStore
+# adapter's own FAILED status (and, for a fresh run, its own row) must
+# survive the very rollback its own lock-acquisition failure triggers --
+# proven with the real production adapters, never the in-memory _Runs fake.
+# ---------------------------------------------------------------------------
+
+
+def test_production_run_store_marks_failed_independently_of_phase_a_rollback(
+    engine: Engine,
+) -> None:
+    """Real ``_SqlAlchemyProvisionRuns``, real ``_OrderProvisioningState`` /
+    ``_SqlAlchemyOrderState``, all sharing one real MySQL ``Session`` --
+    exactly as ``admin_confirm_payment()`` wires them in production. A
+    lock-acquisition failure is manufactured the same way as the previous
+    test; a fresh, independent ``Session`` (never the one that rolled back)
+    then queries the database to confirm every acceptance criterion the
+    review demanded: phase-A business mutations rolled back,
+    ``GatewayRouteBinding`` == 0, Order/Subscription reached the
+    paid-but-unusable terminal state, the Provision Job row still exists,
+    its status is FAILED, and its error is persisted."""
+    with Session(engine) as seed_db:
+        order, subscription, endpoint = _seed(seed_db, suffix="RUNPERSIST")
+        seed_db.commit()
+        order_id = order.id
+        subscription_id = subscription.id
+        endpoint_id = endpoint.id
+        customer_id = subscription.customer_id
+
+    accounting = MockAccountingProvider()
+    injected = RuntimeError("simulated DBAPI: connection reset by peer")
+    with Session(engine) as db:
+        state = _OrderProvisioningState(db, order_id)
+        order_state = _SqlAlchemyOrderState(db)
+        runs = _SqlAlchemyProvisionRuns(db)
+        try:
+            with (
+                mock.patch(
+                    "backend.app.infra.gateway_route_lock._get_lock",
+                    side_effect=injected,
+                ),
+                pytest.raises(GatewayRouteBindingLockError),
+            ):
+                confirm_payment_and_provision(
+                    _command(order_id),
+                    _request(order_id, customer_id, username="run-persist"),
+                    object(),
+                    state,
+                    runs,
+                    order_state,
+                    "receipt-run-persist",
+                    providers=_registry(accounting=accounting),
+                )
+        finally:
+            runs.close()
+
+    # A fresh, independent Session -- distinct from the one that just
+    # rolled back -- is the only acceptable evidence for this criterion.
+    with Session(engine) as verify_db:
+        gateway_binding_count = verify_db.scalar(
+            select(func.count())
+            .select_from(GatewayRouteBinding)
+            .where(GatewayRouteBinding.subscription_id == subscription_id)
+        )
+        assert gateway_binding_count == 0
+
+        rolled_back_endpoint = verify_db.get(EgressEndpoint, endpoint_id)
+        assert rolled_back_endpoint is not None
+        assert rolled_back_endpoint.current_count == 0
+
+        persisted_order = verify_db.get(Order, order_id)
+        assert persisted_order is not None
+        assert persisted_order.status is OrderStatus.PAID
+        assert persisted_order.payment_status is PaymentStatus.PAID
+
+        persisted_subscription = verify_db.get(Subscription, subscription_id)
+        assert persisted_subscription is not None
+        assert persisted_subscription.status is SubscriptionStatus.PROVISION_FAILED
+        assert persisted_subscription.provision_error == "GatewayRouteBindingLockError"
+
+        job = verify_db.scalar(select(Job).where(Job.dedupe_key == f"provision:{order_id}"))
+        assert job is not None
+        assert job.status is JobStatus.FAILED
+        assert job.last_error_code is not None
+        assert "failed to acquire the gateway route binding lock" in job.last_error_code
+
+    assert accounting.disabled_users == {"run-persist"}
+
+    with Session(engine) as db, gateway_route_binding_write(db, timeout_seconds=5):
         pass

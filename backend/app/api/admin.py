@@ -10,6 +10,7 @@ from decimal import Decimal
 
 from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import and_, func, select
+from sqlalchemy.engine import Connection
 from sqlalchemy.orm import Session
 
 from backend.app.core.config import get_settings
@@ -188,10 +189,33 @@ class _SqlAlchemyOrderState:
 
 
 class _SqlAlchemyProvisionRuns(ProvisionRunStore):
-    """Persist saga progress in the existing generic jobs table."""
+    """Persist saga progress in the existing generic jobs table.
+
+    Uses its **own** dedicated ``Session``, opened from the same engine
+    as the request-scoped ``db`` but never shared with it, committing
+    immediately after every write. Run/job status is an audit trail that
+    must survive a rollback of the request's own business-data
+    transaction: ADR-017's lock-acquisition-failure path (and any other
+    mid-saga failure) rolls back phase-A's endpoint/credential/forwarder
+    mutations on ``db``, but the run's FAILED status -- and, for a
+    freshly-started run, the run row's own INSERT from :meth:`start` --
+    must still be durably recorded. Sharing ``db`` would mean that same
+    rollback silently erases the run's own status (or, worse, the run
+    row itself, since a same-session ``start()`` is never independently
+    committed before the saga's eventual commit/rollback).
+
+    This intentionally does **not** generalize to other ``Job`` users --
+    only this ``ProvisionRunStore`` adapter's writes are decoupled like
+    this; the ``jobs`` table and its model are unchanged.
+    """
 
     def __init__(self, db: Session) -> None:
-        self.db = db
+        bind = db.get_bind()
+        engine = bind.engine if isinstance(bind, Connection) else bind
+        self.db = Session(engine, expire_on_commit=False)
+
+    def close(self) -> None:
+        self.db.close()
 
     def _job(self, run_id: str) -> Job:
         job = self.db.get(Job, int(run_id))
@@ -215,10 +239,10 @@ class _SqlAlchemyProvisionRuns(ProvisionRunStore):
                 attempts=1,
             )
             self.db.add(job)
-            self.db.flush()
         else:
             job.status = JobStatus.RUNNING
             job.attempts += 1
+        self.db.commit()
         return str(job.id)
 
     def record_step(self, run_id: str, step: ProvisionStep, status: str) -> None:
@@ -228,6 +252,7 @@ class _SqlAlchemyProvisionRuns(ProvisionRunStore):
         if isinstance(steps, dict):
             steps[str(int(step))] = status
         job.payload_json = json.dumps(payload, sort_keys=True)
+        self.db.commit()
 
     def record_external_id(self, run_id: str, kind: str, external_id: str) -> None:
         job = self._job(run_id)
@@ -236,6 +261,7 @@ class _SqlAlchemyProvisionRuns(ProvisionRunStore):
         if isinstance(external_ids, dict):
             external_ids[kind] = external_id
         job.payload_json = json.dumps(payload, sort_keys=True)
+        self.db.commit()
 
     def mark_status(
         self, run_id: str, status: ProvisionStatus, error: str | None = None
@@ -248,13 +274,22 @@ class _SqlAlchemyProvisionRuns(ProvisionRunStore):
             ProvisionStatus.SUCCEEDED: JobStatus.SUCCEEDED,
         }[status]
         job.status = mapped
-        job.last_error_code = error
+        # `last_error_code` is a short String(80) column, not a full message
+        # store -- a real MySQL DataError here (discovered via this
+        # adapter's own integration test forcing a genuine lock-acquisition
+        # failure) would otherwise abort this commit and lose the FAILED
+        # status entirely. Truncate defensively rather than widen the
+        # schema: this is a persistence-boundary concern, not a change to
+        # what error text callers construct.
+        job.last_error_code = error[:80] if error else error
+        self.db.commit()
 
     def mark_notification_failed(self, run_id: str, error: str) -> None:
         job = self._job(run_id)
         payload = self._payload(job)
         payload["notification_error"] = error
         job.payload_json = json.dumps(payload, sort_keys=True)
+        self.db.commit()
 
 
 class _OrderProvisioningState:
@@ -616,15 +651,19 @@ def admin_confirm_payment(
             or get_settings().subscription_base_url,
         )
         state = _OrderProvisioningState(db, order_id)
-        outcome = confirm_payment_and_provision(
-            command,
-            request,
-            order,
-            state,
-            _SqlAlchemyProvisionRuns(db),
-            _SqlAlchemyOrderState(db),
-            data.payment_reference,
-        )
+        runs = _SqlAlchemyProvisionRuns(db)
+        try:
+            outcome = confirm_payment_and_provision(
+                command,
+                request,
+                order,
+                state,
+                runs,
+                _SqlAlchemyOrderState(db),
+                data.payment_reference,
+            )
+        finally:
+            runs.close()
         subscription = db.scalar(select(Subscription).where(Subscription.order_id == order.id))
         if outcome is None or subscription is None:
             raise RuntimeError("Provisioning did not return a purchase subscription")

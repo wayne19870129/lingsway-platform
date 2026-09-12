@@ -1,7 +1,32 @@
 # ADR-017: Narrow the `GatewayRouteBinding` named-lock hold span in the paid-purchase provisioning saga
 
 - 状态: 已接受
-- 日期: 2026-09-12
+- 日期: 2026-09-12（同日第二次修订：独立审查指出两处 Major——(1)
+  `gateway_route_binding_write()` 此前只把 `GET_LOCK()` 返回 0/NULL
+  转换成 `GatewayRouteBindingLockError`，acquisition 阶段本身的
+  `engine.connect()`/lock name 推导/`GET_LOCK` execute 抛出的其它
+  DBAPI/SQLAlchemy 异常会以原始异常类型传播，绕过
+  `services.confirm_payment_and_provision()` 唯一识别的
+  `except GatewayRouteBindingLockError` 补偿分支，导致 phase-A 已
+  flush 的业务 mutation 可能被后续 `fail_paid_purchase()` 的事务一并
+  误提交；(2) `fail_apply_gateway_lock_acquisition()` 补偿写入的
+  run FAILED 状态与 phase-A 业务 mutation 共享同一个未提交的
+  `db: Session`，`state.rollback_database()` 会把二者一并回滚，导致
+  "run 被标记为 FAILED 且持久化"这条验收标准在生产 adapter
+  （`_SqlAlchemyProvisionRuns`）下实际不成立，只被内存 fake 证明过。
+  本轮修复：`gateway_route_binding_write()` 把 acquisition 阶段
+  （连接、锁名推导、`GET_LOCK` 本身）的任意非
+  `GatewayRouteBindingLockError` 异常统一包装为
+  `GatewayRouteBindingLockError`（`raise ... from exc` 保留
+  chaining），RELEASE_LOCK 阶段的异常不受影响、不被这样包装；
+  `_SqlAlchemyProvisionRuns`（`backend/app/api/admin.py`）改为使用
+  与业务 `db` 完全独立的专属 `Session`，每次写入立即 commit，
+  使 run/job 状态成为不依赖业务事务提交与否的独立审计记录，
+  `confirm_payment_and_provision()` 对应把
+  `state.rollback_database()` 调整到
+  `fail_apply_gateway_lock_acquisition()` 之前执行。详见下方
+  "Lock-acquisition-stage 异常规范化" 与 "Provisioning run 状态持久化
+  独立于业务事务" 两节。）
 - 决策范围: TASK-T16 Phase 2B5. Narrows *when* the ADR-016 Decision 3
   named lock (`GET_LOCK()`/`RELEASE_LOCK()` via
   `backend/app/infra/gateway_route_lock.py`) is acquired during
@@ -352,6 +377,119 @@ is not claimed as done here.
   "nobody has wired it up yet."
 - No change to `ProvisioningState` protocol's public shape beyond what
   already existed; no change to `backend/app/providers/base.py`.
+
+## Lock-acquisition-stage exception normalization (second revision)
+
+`gateway_route_binding_write()` now treats the entire acquisition stage —
+opening the dedicated connection, deriving the lock name, and the
+`GET_LOCK()` call itself — as one fail-closed unit: any exception raised
+there, whatever its original type (a dropped connection, a pool
+exhaustion error, any other DBAPI/SQLAlchemy exception), is re-raised as
+`GatewayRouteBindingLockError` with the original chained via `raise ...
+from exc`. This is not cosmetic: `confirm_payment_and_provision()`'s
+compensation branch (disable the accounting user, alert, mark the run
+FAILED, roll back phase-A's DB state) is keyed on catching exactly
+`GatewayRouteBindingLockError` — before this fix, any acquisition-stage
+failure other than the two `GET_LOCK()` return-value cases would
+propagate as some other exception type, miss that `except` clause
+entirely, and fall through to the generic failure handler, which never
+rolled back `state`'s phase-A mutations. Because
+`GatewayRouteBindingLockError` for the `GET_LOCK()` return-value cases is
+already raised inside `_get_lock()`/`gateway_route_binding_lock_name()`,
+the normalization re-raises only exceptions of *other* types, so those
+two already-correct cases are unaffected. Failures inside
+`_release_lock()` (the lock-release stage, after the caller's body has
+already run) are deliberately left unwrapped: a release failure already
+has its own handling (connection invalidation) and is not an acquisition
+failure, so relabeling it as one would misrepresent what happened to any
+caller inspecting the exception type.
+
+## Provisioning run status persisted independently of the business transaction
+
+`_SqlAlchemyProvisionRuns` (`backend/app/api/admin.py`, the concrete
+`ProvisionRunStore` used by the paid-purchase saga) previously shared the
+same `db: Session` as `_OrderProvisioningState`/`SqlAlchemyProvisioningState`.
+`start()` only `db.add()`+`db.flush()`ed the `Job` row; `record_step()`/
+`mark_status()`/etc. only mutated it in place — none of them committed.
+That meant the run's own row (and every status update to it, including
+`FAILED`) lived in the *same* uncommitted transaction as phase-A's
+business mutations (endpoint allocation, credential storage, forwarder
+state). `state.rollback_database()` — required by the lock-acquisition-
+failure path above, and by every other mid-saga failure already —
+therefore rolled back the run's own `FAILED` marker (and, for a
+freshly-started run, the row's own `INSERT`) right along with the
+business mutations it was supposed to record failure *about*. This is
+why the "run is marked FAILED" acceptance criterion had only ever been
+proven against the in-memory `_Runs`/`FakeRuns` test doubles, never
+against the real production adapter.
+
+Fix: `_SqlAlchemyProvisionRuns` now opens its **own** dedicated `Session`
+(from the same engine as the request-scoped `db`, via `db.get_bind()`) in
+its constructor, and commits immediately after every write
+(`start`/`record_step`/`record_external_id`/`mark_status`/
+`mark_notification_failed`). The route handler
+(`admin.py::admin_confirm_payment`) closes this session in a `finally`
+after the saga call. This makes run/job status what it conceptually
+already was meant to be — a durable audit trail — independent of whether
+the business-data transaction it's reporting on ultimately commits or
+rolls back, **without** touching the shared `jobs` table's schema or any
+other `Job`-using code path; only this one `ProvisionRunStore` adapter's
+session lifecycle changed. `services.confirm_payment_and_provision()`'s
+lock-acquisition-failure branch now calls `state.rollback_database()`
+*before* `provisioning.fail_apply_gateway_lock_acquisition()` — with the
+run store's writes independently committed this ordering is no longer
+required for correctness, but it is kept because it is the more
+intuitive sequence (discard the abandoned business-data attempt, then
+record that the run failed, then close out the order's own terminal
+transaction) and matches what a human reading the code would expect.
+
+This was evaluated against, and deliberately does **not** become, a
+general `Job`-system refactor: no other `ProvisionRunStore`/`Job` caller
+changes, the `Job` model and `jobs` table are untouched, and no other
+job type's persistence semantics change.
+
+### Incidental fix surfaced by real-MySQL verification: `last_error_code` truncation
+
+Writing this section's own production-backed integration test (real
+`_SqlAlchemyProvisionRuns` against real MySQL/MariaDB, forcing a genuine
+lock-acquisition failure end-to-end) surfaced a pre-existing latent bug,
+independent of both Majors above: `Job.last_error_code` is a
+`String(80)` column, but `mark_status()` wrote the *full* exception
+message (e.g. `gateway_route_binding_write()`'s normalized message, which
+embeds the original chained exception's text) into it verbatim. Any error
+string over 80 characters — which the very message this ADR's Major 1 fix
+constructs routinely is — raised `sqlalchemy.exc.DataError: Data too long
+for column 'last_error_code'` on real MySQL/MariaDB, aborting the
+`mark_status()` commit and losing the `FAILED` status this section's fix
+exists to make durable. SQLite/mocked test paths never caught this because
+SQLite does not enforce `VARCHAR` length limits. Fixed by truncating
+defensively at the persistence boundary in `mark_status()`
+(`error[:80] if error else error`) rather than widening the schema: this
+is a `last_error_code` write-boundary concern local to this one adapter,
+not a schema or migration change, and not a general `Job`-system change.
+
+### Tests added for this revision
+
+- `backend/tests/integration/test_gateway_route_binding_lock.py::test_generic_exception_during_get_lock_is_normalized_to_lock_error`
+  — injected-contract unit-style test proving a generic (non-return-value)
+  exception raised while executing `GET_LOCK()` is normalized into
+  `GatewayRouteBindingLockError` with `from`-chaining preserved.
+- `backend/tests/integration/test_provisioning_phase_boundary.py::test_generic_acquisition_exception_rolls_back_phase_a_before_marking_failed`
+  — real MySQL/MariaDB, through the actual `confirm_payment_and_provision()`
+  call path, with only the `GET_LOCK()` execution itself injected to raise;
+  proves phase-A's flushed `EgressEndpoint.current_count` mutation is
+  rolled back, zero `GatewayRouteBinding` writes survive, the accounting
+  user is disabled, and the run is marked `FAILED`.
+- `backend/tests/integration/test_provisioning_phase_boundary.py::test_production_run_store_marks_failed_independently_of_phase_a_rollback`
+  — the production-backed acceptance test Major 2 required: real
+  `_SqlAlchemyProvisionRuns` + real `_OrderProvisioningState`/
+  `_SqlAlchemyOrderState` sharing one real MySQL `Session`, a manufactured
+  lock-acquisition failure, then a **fresh, independent** `Session`
+  verifying zero `GatewayRouteBinding` rows, the rolled-back
+  `EgressEndpoint.current_count`, `Order.status == PAID` /
+  `Subscription.status == PROVISION_FAILED` (the paid-but-unusable
+  terminal state), the `Job` row still present with `status == FAILED`,
+  and `last_error_code` persisted — never the in-memory `_Runs` fake.
 
 ## 重新评估条件
 

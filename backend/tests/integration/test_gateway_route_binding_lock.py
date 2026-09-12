@@ -326,6 +326,59 @@ def test_null_from_get_lock_fails_closed_via_injection() -> None:
     assert not any("RELEASE_LOCK" in sql for sql in connection.executed)
 
 
+class _RaisingLockConnection:
+    """Stands in for the dedicated lock Connection; never touches a real DB.
+
+    Unlike :class:`_FakeLockConnection` (which returns 0/NULL from
+    ``GET_LOCK()``), this simulates a generic DBAPI/SQLAlchemy exception
+    *raised while executing* the ``GET_LOCK()`` statement itself -- e.g. a
+    dropped connection or pool exhaustion -- which is a distinct failure
+    mode from the two documented ``GET_LOCK()`` return values.
+    """
+
+    engine = _FakeEngine()
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+        self.closed = False
+
+    def execution_options(self, **_kwargs: object) -> _RaisingLockConnection:
+        return self
+
+    def execute(self, statement: object, _params: object | None = None) -> _FakeScalarResult:
+        sql = str(statement)
+        if "GET_LOCK" in sql:
+            raise self._exc
+        return _FakeScalarResult(None)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_generic_exception_during_get_lock_is_normalized_to_lock_error() -> None:
+    """Major 1 (Work review round 2): a generic DBAPI/SQLAlchemy exception
+    raised while executing ``GET_LOCK()`` -- not just its 0/NULL return
+    values -- must also be normalized into ``GatewayRouteBindingLockError``,
+    with the original exception chained via ``from``, so callers that only
+    catch ``GatewayRouteBindingLockError`` to run their fail-closed
+    compensation (``services.confirm_payment_and_provision``) still see it
+    for this failure mode too."""
+    original = RuntimeError("simulated DBAPI: connection reset by peer")
+    connection = _RaisingLockConnection(original)
+    session = _FakeSession(connection)
+    entered_body = False
+
+    with (
+        pytest.raises(GatewayRouteBindingLockError) as excinfo,
+        gateway_route_binding_write(session),  # type: ignore[arg-type]
+    ):
+        entered_body = True
+
+    assert entered_body is False
+    assert connection.closed is True
+    assert excinfo.value.__cause__ is original
+
+
 def test_lock_name_is_namespaced_by_database_and_within_mysql_limit() -> None:
     connection = _FakeLockConnection(get_lock_return=1)
     name = gateway_route_binding_lock_name(connection)  # type: ignore[arg-type]
