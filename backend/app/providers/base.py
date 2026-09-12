@@ -85,9 +85,27 @@ class ReplacementDTO:
 
 @dataclass(frozen=True, slots=True)
 class AccountUserDTO:
+    """The accounting provider's own record of a created/updated user.
+
+    ``routing_principal`` (ADR-016 Decision 3) is the Xray
+    ``routing.rules[].user`` matching identity for this account -- for a
+    real Marzban-backed implementation this is the patched
+    ``UserResponse.routing_principal`` field
+    (``f"{marzban_db_user_id}.{username}"``), never derived or guessed by
+    this codebase. It is a **required, non-empty** field: there is no
+    default, and callers must never fall back to ``username`` or an
+    egress ``tenant_id`` when a real provider fails to supply it --
+    ADR-016's "provider/API 不返回 principal 时怎么办" section requires
+    treating that as a fail-closed ``CREATE_ACCOUNTING_USER`` failure
+    instead. ``username`` remains the separate, independent accounting
+    identity (``Subscription.accounting_user_id``) -- the two bounded
+    contexts are never merged into one field.
+    """
+
     username: str
     quota_bytes: int
     expire_at: datetime | None
+    routing_principal: str
     enabled: bool = True
 
 

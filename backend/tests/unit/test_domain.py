@@ -44,6 +44,7 @@ class FakeState:
     released_endpoints: list[str] = field(default_factory=list)
     database_rolled_back: bool = False
     stored_token: str | None = None
+    routing_principals_received: list[str] = field(default_factory=list)
 
     def mark_paid(self, order_id: str) -> None:
         self.events.append(f"paid:{order_id}")
@@ -84,10 +85,16 @@ class FakeState:
         return DesiredForwarderState({endpoint.endpoint_id: tenant.tenant_id})
 
     def desired_routing_state(
-        self, request: ProvisionRequest, endpoint: EgressEndpointDTO, tenant: TenantDTO
+        self,
+        request: ProvisionRequest,
+        endpoint: EgressEndpointDTO,
+        tenant: TenantDTO,
+        routing_principal: str,
     ) -> DesiredRoutingState:
+        del request
+        self.routing_principals_received.append(routing_principal)
         return DesiredRoutingState(
-            {request.username: endpoint.endpoint_id}, (endpoint.endpoint_id,)
+            {routing_principal: endpoint.endpoint_id}, (endpoint.endpoint_id,)
         )
 
     def store_subscription_token(self, customer_id: str, raw_token: str) -> None:

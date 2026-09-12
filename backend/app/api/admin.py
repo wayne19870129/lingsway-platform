@@ -382,9 +382,15 @@ class _OrderProvisioningState:
         return self._delegate().desired_forwarder_state(endpoint, tenant, secret_ref)
 
     def desired_routing_state(
-        self, request: ProvisionRequest, endpoint: EgressEndpointDTO, tenant: TenantDTO
+        self,
+        request: ProvisionRequest,
+        endpoint: EgressEndpointDTO,
+        tenant: TenantDTO,
+        routing_principal: str,
     ) -> DesiredRoutingState:
-        return self._delegate().desired_routing_state(request, endpoint, tenant)
+        return self._delegate().desired_routing_state(
+            request, endpoint, tenant, routing_principal
+        )
 
     def store_subscription_token(self, customer_id: str, raw_token: str) -> None:
         self._delegate().store_subscription_token(customer_id, raw_token)

@@ -18,7 +18,22 @@ class MockAccountingProvider:
         self, username: str, quota_bytes: int, expire_at: datetime | None
     ) -> AccountUserDTO:
         raise_injected(self.failures, "create_user")
-        user = AccountUserDTO(username, quota_bytes, expire_at)
+        # Deliberately distinct from both `username` and any egress
+        # tenant_id (ADR-016) -- a real Marzban-backed implementation's
+        # routing_principal is a Marzban-generated value, never
+        # recomputed from username here. Using something that looks
+        # like `username` (e.g. `f"{username}.suffix"`) would let a bug
+        # that silently falls back to username slip past tests that only
+        # check "is a routing_principal present", not "is it actually
+        # the provider's own value" -- this mock exists to catch exactly
+        # that class of bug.
+        principal = f"mock-routing.{username}"
+        user = AccountUserDTO(
+            username=username,
+            quota_bytes=quota_bytes,
+            expire_at=expire_at,
+            routing_principal=principal,
+        )
         self.users[username] = user
         return user
 
@@ -28,21 +43,33 @@ class MockAccountingProvider:
         current = self.users.get(username)
         if current is not None:
             self.users[username] = AccountUserDTO(
-                current.username, current.quota_bytes, current.expire_at, enabled=False
+                username=current.username,
+                quota_bytes=current.quota_bytes,
+                expire_at=current.expire_at,
+                routing_principal=current.routing_principal,
+                enabled=False,
             )
 
     def set_quota(self, username: str, quota_bytes: int) -> None:
         raise_injected(self.failures, "set_quota")
         current = self.users[username]
         self.users[username] = AccountUserDTO(
-            current.username, quota_bytes, current.expire_at, current.enabled
+            username=current.username,
+            quota_bytes=quota_bytes,
+            expire_at=current.expire_at,
+            routing_principal=current.routing_principal,
+            enabled=current.enabled,
         )
 
     def set_expire(self, username: str, expire_at: datetime) -> None:
         raise_injected(self.failures, "set_expire")
         current = self.users[username]
         self.users[username] = AccountUserDTO(
-            current.username, current.quota_bytes, expire_at, current.enabled
+            username=current.username,
+            quota_bytes=current.quota_bytes,
+            expire_at=expire_at,
+            routing_principal=current.routing_principal,
+            enabled=current.enabled,
         )
 
     def get_connection_links(self, username: str) -> list[str]:

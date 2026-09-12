@@ -1114,3 +1114,72 @@ adapter、DTO/编排改动、独立的 reconciliation 工具/作业、
   为准，本 PR 描述中会同时报告两者结果。(2) `NOTIFY` 仍在锁内，真实
   `NotifyProvider` 接入仍被阻塞，见上文。(3) `GatewayProvider` 真实
   生产延迟下 30 秒 timeout 是否仍然合理，需要后续实测。
+
+- **Phase 2B6（本 PR，route identity / routing_principal 内部数据流
+  管道）**：按 ADR-016 Decision 3 已经定好的精确契约，打通
+  `AccountingProvider.create_user()` → `AccountUserDTO.routing_principal`
+  → `ProvisioningCheckpoint` → `provision_apply_gateway()` →
+  `ProvisioningState.desired_routing_state()` →
+  `GatewayRouteBinding.gateway_principal` →
+  `DesiredRoutingState.user_routes` key → Xray `routing.rules[].user`
+  这条完整数据链——**只做本仓库内部 contract/dataflow 改动，不实现
+  真实 Marzban HTTP adapter**（ADR-016 Candidate B 的 Marzban 补丁/
+  真实 provider 实现仍是独立的后续任务）。
+
+  `backend/app/providers/base.py::AccountUserDTO` 新增必填字段
+  `routing_principal: str`（无 default，不允许 `None`，不允许静默回退
+  `username`/`tenant_id`）；`MockAccountingProvider.create_user()`
+  返回确定性但与 `username`/egress `tenant_id` 均不同的
+  `f"mock-routing.{username}"`（`disable_user`/`set_quota`/
+  `set_expire` 全部改为 keyword 构造并完整保留原 `routing_principal`，
+  不重新计算）。
+
+  `ProvisioningCheckpoint` 新增 `account_user: AccountUserDTO`
+  字段（保留完整 DTO，不只是一个字符串，遵照 ADR-016"必须保留
+  create_user() 返回值"的要求）。`provision_prepare()` 的
+  `CREATE_ACCOUNTING_USER` 步骤不再丢弃 `create_user()` 返回值，新增
+  fail-closed contract 校验：返回的 `username` 必须等于
+  `request.username`、`routing_principal` 必须是非空/非纯空白字符串
+  ——任一校验失败都当作该步骤的 failure 处理（disable user、
+  `state.rollback_database()`、run 标记 FAILED、不返回 checkpoint、
+  不进入 `APPLY_GATEWAY`、不获取 named lock、零
+  `GatewayRouteBinding` mutation），不允许 fallback。
+
+  `ProvisioningState.desired_routing_state()`（protocol 和
+  `SqlAlchemyProvisioningState`/`_OrderProvisioningState` 两个实现）
+  新增第四个参数 `routing_principal: str`，由
+  `provision_apply_gateway()` 从
+  `checkpoint.account_user.routing_principal` 显式传入——domain 层
+  自己不计算 Marzban 公式，infra 层也不重新调用
+  accounting provider 或重新猜 principal。
+  `SqlAlchemyProvisioningState.desired_routing_state()`
+  内部调用 `ensure_gateway_route_binding(routing_principal, endpoint)`
+  （此前错误地传入 `tenant.tenant_id`，即 Webshare 出口租户 id）；
+  `DesiredRoutingState.user_routes` 的 key 也从 `request.username`
+  改为 `binding.gateway_principal`——两处统一使用同一个
+  routing principal，消除"DB 写 routing_principal 但即时 candidate
+  仍写 username"这种双重语义。`Subscription.accounting_user_id`
+  的语义/写入时机（`admin_confirm_payment` 里、accounting username）
+  完全不变，未触碰 schema，未新增 Alembic migration。
+
+  新增 6 条真实 MySQL/MariaDB production-backed 集成测试（驱动真实
+  `confirm_payment_and_provision()` + `SqlAlchemyProvisioningState`）：
+  证明一次成功开通后 `Subscription.accounting_user_id ==
+  request.username` 且 `GatewayRouteBinding.gateway_principal` 等于
+  provider 返回的 `routing_principal`，两者与 egress tenant_id 三者
+  互不相同；证明用真实 `GatewayRouteBinding` 行渲染出的
+  `XrayFileProvider.render()` 候选配置里 `routing.rules[].user` 的值
+  就是 `routing_principal`，不是 `username`；证明 provider 返回空/
+  纯空白 `routing_principal`，以及返回 `username` 不匹配的
+  `AccountUserDTO`，两种场景下都会在 `CREATE_ACCOUNTING_USER`
+  fail-closed（disable user、DB 回滚、run FAILED、零
+  `GatewayRouteBinding` 写入、named lock 从未获取）。既有全部单元/
+  集成测试（含 ADR-017 的 FAILED/SUCCEEDED/PENDING_MANUAL
+  run-persistence-ordering 测试、ADR-016/017 建立的 named-lock
+  writer 互斥测试）继续通过，未回退任何既有保证。
+
+  **本 PR 显式不做**（保持范围）：真实 Marzban-backed
+  `AccountingProvider` 实现、Marzban `UserResponse` 补丁本身
+  （`infrastructure/marzban/patches/` 已有独立契约测试覆盖那一层）、
+  `registry.py` 启用 marzban、既有数据 reconciliation 工具、
+  DB schema/Alembic migration、生产凭据/生产网络调用、部署。
