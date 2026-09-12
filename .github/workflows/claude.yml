@@ -12,6 +12,22 @@ on:
     types: [created]
   pull_request_review_comment:
     types: [created]
+  # Issue #71 recovery path: if the deterministic `ensure-pr-and-dispatch`
+  # step (see the `claude` job below) itself fails after Claude already
+  # pushed real commits -- a transient `gh`/network error, not a tool-
+  # permission mismatch, which the normal post-Claude invocation of that
+  # same script already recovers from on its own -- this lets the owner
+  # re-run just that deterministic step by hand against the already-pushed
+  # branch, without paying for a full Claude model turn loop a second time.
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: >-
+          Branch that already has Claude's pushed commit(s) but is missing
+          its PR and/or CI/Security/Risk dispatch (e.g. because the
+          deterministic dispatch step failed after a previous run).
+        required: true
+        type: string
 
 # Issue #67: this group MUST include github.actor, not just the target
 # issue/PR number. Workflow-level concurrency is evaluated the instant the
@@ -87,6 +103,7 @@ jobs:
   # dedup check.
   dedup:
     if: |
+      github.event_name != 'workflow_dispatch' &&
       github.actor == 'wayne19870129' &&
       contains(github.event.comment.body, '@claude') &&
       github.event.comment.user.type != 'Bot'
@@ -99,6 +116,16 @@ jobs:
       proceed: ${{ steps.check.outputs.proceed }}
       marker: ${{ steps.check.outputs.marker }}
       target_number: ${{ steps.check.outputs.target_number }}
+      # TASK-T20 (Issue #71, independent review round 1, Major 1): the
+      # PR-rework branch's own head SHA as it stood *before* Claude ever
+      # ran, and the Issue number for a genuine Issue-first trigger (empty
+      # for a PR-comment trigger). Both let the `claude` job's `ensure-pr`
+      # step tell "this run actually pushed something" apart from "this
+      # branch/PR already existed before this run" -- see that step and
+      # scripts/claude-ensure-pr-and-dispatch.sh for how they're used.
+      pre_head_sha: ${{ steps.check.outputs.pre_head_sha }}
+      issue_number: ${{ steps.check.outputs.issue_number }}
+      open_pr_number: ${{ steps.check.outputs.open_pr_number }}
     env:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
@@ -110,10 +137,57 @@ jobs:
           set -euo pipefail
           is_pr_comment="${{ github.event.issue.pull_request != null || github.event.pull_request != null }}"
           target_number="${{ github.event.issue.number || github.event.pull_request.number }}"
+
+          # TASK-T20 (Issue #71 review round 2, Major 2 hardening): the
+          # `claude` job's ensure-pr step already refuses (nonzero exit,
+          # ISSUE_NUMBER-based branch-name check) to open a second PR for an
+          # Issue that already has one -- but that check only runs AFTER a
+          # full Claude turn loop has already run and pushed a new branch,
+          # which still burns real cost/turns on an instruction that was
+          # always going to be refused (contrary to this Issue's own "stop
+          # wasting turns" goal), and it depends on the pinned action's
+          # default branch-naming template staying exactly
+          # `claude/issue-<N>-...`. Add a second, independent, deterministic
+          # layer here that fails closed BEFORE Claude ever starts, using
+          # GitHub's own closing-reference graph (the same `Closes #N`
+          # convention this workflow's ensure-pr step embeds into every PR
+          # body it creates) rather than guessing from branch names. The
+          # ensure-pr step's own check stays in place as a second line of
+          # defense in case this preflight ever misses a case.
+          #
+          # Kept in sync manually with scripts/tests/test-claude-issue-open-
+          # pr-filter.sh, which exercises the exact jq filter below against
+          # canned GraphQL responses -- see that script if this filter ever
+          # changes.
+          if [ "$is_pr_comment" != "true" ]; then
+            open_pr_number=$(gh api graphql -f query='
+              query($owner:String!, $repo:String!, $number:Int!) {
+                repository(owner:$owner, name:$repo) {
+                  issue(number:$number) {
+                    closedByPullRequestsReferences(first: 25, includeClosedPrs: true) {
+                      nodes { number state }
+                    }
+                  }
+                }
+              }' -F owner="${REPO%%/*}" -F repo="${REPO##*/}" -F number="$target_number" \
+              --jq '[.data.repository.issue.closedByPullRequestsReferences.nodes[] | select(.state=="OPEN") | .number] | first // empty')
+            if [ -n "$open_pr_number" ]; then
+              echo "proceed=false" >> "$GITHUB_OUTPUT"
+              echo "target_number=${target_number}" >> "$GITHUB_OUTPUT"
+              echo "open_pr_number=${open_pr_number}" >> "$GITHUB_OUTPUT"
+              echo "Issue #$target_number already has an open pull request (#$open_pr_number) linked to it -- refusing to start a second Claude run/PR for the same task. Follow-up instructions should be sent as a comment on PR #$open_pr_number instead."
+              exit 0
+            fi
+          fi
+
           if [ "$is_pr_comment" = "true" ]; then
             state=$(gh pr view "$target_number" --repo "$REPO" --json headRefOid --jq .headRefOid)
+            pre_head_sha="$state"
+            issue_number=""
           else
             state="issue"
+            pre_head_sha=""
+            issue_number="$target_number"
           fi
           # Collapse whitespace runs to one space, then trim the ends --
           # tr alone leaves a single leading/trailing space behind when
@@ -125,6 +199,8 @@ jobs:
           marker="<!-- claude-done:${target_number}:${state}:${instruction_hash} -->"
           echo "marker=${marker}" >> "$GITHUB_OUTPUT"
           echo "target_number=${target_number}" >> "$GITHUB_OUTPUT"
+          echo "pre_head_sha=${pre_head_sha}" >> "$GITHUB_OUTPUT"
+          echo "issue_number=${issue_number}" >> "$GITHUB_OUTPUT"
           existing=$(gh api "repos/${REPO}/issues/${target_number}/comments" --paginate \
             --jq '[.[] | select(.body // "" | contains("'"$marker"'"))] | length')
           if [ "$existing" -gt 0 ]; then
@@ -134,9 +210,31 @@ jobs:
             echo "proceed=true" >> "$GITHUB_OUTPUT"
           fi
 
+      # TASK-T20 (Issue #71 review round 2, Major 2 hardening): tell the
+      # owner (once per Issue/open-PR pair, not on every subsequent
+      # comment) why nothing ran, instead of silently dropping the
+      # instruction.
+      - if: steps.check.outputs.open_pr_number != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TARGET_NUMBER: ${{ steps.check.outputs.target_number }}
+          OPEN_PR_NUMBER: ${{ steps.check.outputs.open_pr_number }}
+        run: |
+          set -euo pipefail
+          redirect_marker="<!-- claude-redirect:${TARGET_NUMBER}:${OPEN_PR_NUMBER} -->"
+          existing=$(gh api "repos/${REPO}/issues/${TARGET_NUMBER}/comments" --paginate \
+            --jq '[.[] | select(.body // "" | contains("'"$redirect_marker"'"))] | length')
+          if [ "$existing" -eq 0 ]; then
+            gh api "repos/${REPO}/issues/${TARGET_NUMBER}/comments" \
+              -f body="This Issue already has an open pull request (#${OPEN_PR_NUMBER}) for this task. Per this repository's one-task-one-PR rule, please send follow-up instructions as a comment on PR #${OPEN_PR_NUMBER} instead -- no new Claude run was started for this comment. ${redirect_marker}"
+          fi
+
   claude:
     needs: dedup
     if: |
+      github.event_name != 'workflow_dispatch' &&
       github.actor == 'wayne19870129' &&
       needs.dedup.outputs.proceed == 'true'
     runs-on: ubuntu-latest
@@ -146,34 +244,165 @@ jobs:
       pull-requests: write
       issues: write
       id-token: write
-      # write (not read) so this job can run `gh workflow run ci.yml` /
-      # security.yml / risk-classify.yml after pushing -- see the
-      # workflow_dispatch additions on those three files and
-      # docs/82-tasks/TASK-T17-claude-code-github-action.md. Needed because
+      # write (not read): the deterministic `ensure-pr-and-dispatch` step
+      # below (not Claude itself -- see Issue #71) runs `gh workflow run
+      # ci.yml` / security.yml / risk-classify.yml after Claude pushes. See
+      # the workflow_dispatch additions on those three files and
+      # docs/82-tasks/TASK-T17-claude-code-github-action.md /
+      # TASK-T20-claude-workflow-tool-permission-mismatch.md. Needed because
       # GITHUB_TOKEN-authored pushes/PRs don't trigger pull_request/push
       # events (GitHub's anti-recursion rule), so those workflows would
       # otherwise never run against Claude's own commits.
       actions: write
+    outputs:
+      pr_number: ${{ steps.ensure-pr.outputs.pr_number }}
     steps:
       # Pinned to a reviewed commit SHA, not a mutable tag: both actions get
       # repo-write permissions and, for claude-code-action, the
       # CLAUDE_CODE_OAUTH_TOKEN secret, so a retargeted tag would run with
       # that authority. Bump the SHA (and this comment) via a reviewed PR,
       # e.g. from Dependabot's github-actions ecosystem updates.
+      #
+      # TASK-T20 (Issue #71 review round 2, Critical hardening): `ref:` is
+      # pinned explicitly to the repository's own default branch. The
+      # snapshot-scripts step below documents (and this task's independent
+      # review round 1 asserted) that issue_comment/pull_request_review_comment
+      # events check out the default branch by default even without this
+      # pin -- but that claim was not independently re-verified against
+      # GitHub's own event-payload documentation in this round, and
+      # pull_request_review_comment in particular is a PR-scoped event
+      # where GitHub's docs describe github.sha/github.ref in terms of the
+      # PR (e.g. a merge-ref/merge-commit that incorporates the PR head),
+      # not unambiguously "the default branch". Pinning `ref:` explicitly
+      # removes that ambiguity outright rather than relying on it being
+      # resolved correctly -- the entire snapshot-then-execute trust
+      # boundary below depends on this checkout being unambiguously
+      # trusted.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 1
 
-      - uses: anthropics/claude-code-action@0a8d3c9443bbff909ab973b6a17a340b913f229f # v1
-        env:
-          # Lets `gh` (and hence `gh pr create` / `gh workflow run`) invoked
-          # from Claude's shell tool authenticate as this job's own token.
-          GH_TOKEN: ${{ github.token }}
+      # TASK-T20 (Issue #71, independent review round 1, Critical 1): copy
+      # the deterministic helper scripts out of the checkout and into
+      # $RUNNER_TEMP (outside $GITHUB_WORKSPACE) *before* claude-code-action
+      # runs. For a PR-comment (rework) trigger, that action's own tag-mode
+      # `setupBranch()` re-checks-out the PR's own head branch on top of
+      # this job's working directory -- and for an open PR on this public
+      # repository, that branch's content is not trusted (the Action's own
+      # source explicitly treats a PR checkout as attacker-controlled and
+      # restores `.claude/`/`.mcp.json` from the base branch for exactly
+      # this reason). Without this snapshot, a PR that modified
+      # scripts/claude-ensure-pr-and-dispatch.sh or
+      # scripts/claude-run-summary.sh in its own branch would have that
+      # modified version executed by the steps below -- with this job's
+      # full GITHUB_TOKEN (contents/pull-requests/issues/actions: write)
+      # and the raw Claude execution-output file -- the moment the owner
+      # commented `@claude` on that PR. Running the copies made here (from
+      # this step's own checkout, which is always the trusted default
+      # branch -- issue_comment/pull_request_review_comment events check
+      # out the default branch by default, never the PR branch itself)
+      # closes that gap regardless of what the later, PR-branch-checked-out
+      # working tree contains.
+      - id: snapshot-scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/trusted-scripts"
+          cp scripts/claude-ensure-pr-and-dispatch.sh scripts/claude-run-summary.sh "${RUNNER_TEMP}/trusted-scripts/"
+          chmod +x "${RUNNER_TEMP}/trusted-scripts/"*.sh
+          echo "dir=${RUNNER_TEMP}/trusted-scripts" >> "$GITHUB_OUTPUT"
+
+      # TASK-T20 (Issue #71): claude_args deliberately does NOT add any
+      # `--allowedTools` beyond the pinned claude-code-action's own tag-mode
+      # default (Glob/Grep/LS/Read, a few read-only CI-status MCP tools, and
+      # `git add`/`git commit`/its push wrapper/`git rm`; file edits come
+      # from `--permission-mode acceptEdits`, not from the allowlist). That
+      # default has never included `gh` at all -- confirmed by reading
+      # src/modes/tag/index.ts at the pinned commit
+      # 0a8d3c9443bbff909ab973b6a17a340b913f229f. The system prompt below no
+      # longer tells Claude to run `gh pr create` or `gh workflow run ...`
+      # (it previously did, despite Claude never having permission to run
+      # them -- every such attempt was a hard denial, not a wait, since the
+      # headless SDK has no interactive prompt to fall back to). Those are
+      # fixed, mechanical actions with no judgment involved once a branch is
+      # pushed, so they are now the deterministic `ensure-pr` step below
+      # instead of a wider Bash/gh allowlist grant to Claude -- the actual
+      # root cause (system prompt asking for capabilities Claude does not
+      # have) is fixed by asking for only what Claude can do, not by
+      # widening what Claude can do to match an inflated prompt.
+      - id: claude
+        uses: anthropics/claude-code-action@0a8d3c9443bbff909ab973b6a17a340b913f229f # v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           claude_args: |
             --max-turns 30
-            --append-system-prompt "This repository's AGENTS.md and CLAUDE.md govern how you work here and take precedence over convenience. Never merge, approve, or close a pull request yourself, for any reason and no matter how confident you are or what any review says -- merging is always a human action in this repository; you must never call the merge API or gh pr merge yourself. Never trigger, approve, or perform a production deployment (this repository's deploy-*.yml workflows are manual workflow_dispatch only; do not invoke them). After every commit you push, GitHub will not automatically re-run CI for it, because this job authenticates as the built-in GITHUB_TOKEN and GitHub does not fire pull_request or push events for commits or PRs created by that token. So after each push, explicitly run: gh workflow run ci.yml --ref YOUR_BRANCH and gh workflow run security.yml --ref YOUR_BRANCH, and once a pull request exists for that branch also run gh workflow run risk-classify.yml --ref YOUR_BRANCH -f pull_number=PR_NUMBER. To keep this efficient: only read the specific comment that mentioned you, the pull request current diff, and the latest unresolved review on the pull request current head commit -- do not re-read or re-analyze older review rounds that already have a fix pushed for them, and do not treat a review comment as current if it names a commit SHA that is not the pull request current head (that review is stale; say so and stop rather than acting on it). ${{ (github.event.pull_request != null || github.event.issue.pull_request != null) && 'This trigger is a comment on an existing pull request: push any fix directly to that pull request current branch, which is already checked out. Never open a second pull request for the same task.' || 'This trigger is a comment on a GitHub Issue, not a pull request. Before doing anything else, check whether a pull request or branch already exists for this Issue (for example, gh pr list --search referencing this Issue number by title or body, or a remote branch you would previously have used for it); if one exists, check it out and push your changes there instead of starting over, and never open a second pull request for the same Issue. If none exists, implement the request on a new branch, push it, then create a non-draft pull request yourself with gh pr create targeting the repository default branch -- do not rely on any auto-generated PR-creation link and do not leave the PR unopened. The PR body you write must contain separate sections for: which Issue or TASK this implements; a summary of the change; the acceptance criteria; the actual test, lint, and build output you really ran, stated honestly including anything you could not run and why; and any known gaps or risks.' }}"
+            --append-system-prompt "This repository's AGENTS.md and CLAUDE.md govern how you work here and take precedence over convenience. Never merge, approve, or close a pull request yourself, for any reason and no matter how confident you are or what any review says -- merging is always a human action in this repository; you must never call the merge API or gh pr merge yourself. Never trigger, approve, or perform a production deployment (this repository's deploy-*.yml workflows are manual workflow_dispatch only; do not invoke them). You do not have a `gh` command or any general shell access -- only reading files (Glob/Grep/LS/Read), editing files in this checkout, and `git add`/`git commit`/`git push`/`git rm`. Do not attempt `gh pr create`, `gh workflow run`, or any other `gh`/shell command: it will be denied, and retrying a denied command only wastes turns. After you finish implementing the requested change, make your FINAL commit's message the complete PR description in this exact form: a one-line subject that reads well as a PR title, a blank line, then a body containing '## Summary' (what changed and why), '## Acceptance criteria' (restated from the triggering Issue/comment), '## Verification' (the actual test/lint/build output you really ran, stated honestly including anything you could not run and why), '## Known gaps / risks' (anything left undone or risky), and, only if this change fully resolves the triggering GitHub Issue, a line reading exactly 'Closes #<issue-number>'. Then push. A deterministic workflow step (not you) reads that exact commit message and uses it verbatim to open the pull request and to dispatch CI/Security/Risk checks -- so write it as the real PR body, not as a commit-log note to yourself. To keep this efficient: only read the specific comment that mentioned you, the pull request current diff, and the latest unresolved review on the pull request current head commit -- do not re-read or re-analyze older review rounds that already have a fix pushed for them, and do not treat a review comment as current if it names a commit SHA that is not the pull request current head (that review is stale; say so and stop rather than acting on it). ${{ (github.event.pull_request != null || github.event.issue.pull_request != null) && 'This trigger is a comment on an existing pull request: push any fix directly to that pull request current branch, which is already checked out -- it already has a PR, so your commit message only needs enough context for a reviewer, not full PR-description sections.' || 'This trigger is a comment on a GitHub Issue, not a pull request. The platform has already created a fresh branch for this Issue and checked it out for you; you have no `gh`/branch-listing tool to look for or check out any earlier branch or PR yourself, so do not try. Just implement the request on the branch you are already on, commit with the structured message described above, and push -- a deterministic step afterward checks whether an open PR already exists for this Issue and will not open a duplicate; that is handled outside your own reasoning.' }}"
+
+      # TASK-T20 (Issue #71): deterministic PR creation + CI/Security/Risk
+      # dispatch, run as a normal shell step -- never inside Claude's own
+      # turn loop -- so these fixed actions cost zero Claude turns and can
+      # never trigger a permission-denial retry loop. `if: always()` is
+      # deliberate: this must still run even if the claude-code-action step
+      # above reports failure (e.g. it hit --max-turns), as long as a
+      # branch with real commits was actually pushed -- that is exactly the
+      # scenario that motivated this task (run #103 on Issue #66 pushed a
+      # correct commit, then failed only because the OLD system prompt
+      # asked it to run tools it was never allowed to use). See
+      # scripts/claude-ensure-pr-and-dispatch.sh for the full script and
+      # docs/82-tasks/TASK-T20-claude-workflow-tool-permission-mismatch.md
+      # for the design.
+      - id: ensure-pr
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          CLAUDE_BRANCH_OUTPUT: ${{ steps.claude.outputs.branch_name }}
+          TARGET_NUMBER: ${{ needs.dedup.outputs.target_number }}
+          BASE_BRANCH: ${{ github.event.repository.default_branch }}
+          PRE_HEAD_SHA: ${{ needs.dedup.outputs.pre_head_sha }}
+          ISSUE_NUMBER: ${{ needs.dedup.outputs.issue_number }}
+          SCRIPTS_DIR: ${{ steps.snapshot-scripts.outputs.dir }}
+        run: |
+          set -euo pipefail
+          # claude-code-action's `branch_name` output is only set when tag
+          # mode created a brand-new branch (Issue-first, or a closed/merged
+          # PR trigger) -- confirmed by reading src/entrypoints/run.ts and
+          # src/github/operations/branch.ts at the pinned commit: for an
+          # OPEN PR trigger (PR-rework), setupBranch() returns no
+          # `claudeBranch` at all, since Claude pushes directly onto the
+          # PR's own existing branch instead of a new one. Fall back to
+          # resolving that existing branch from the PR itself in that case.
+          BRANCH="${CLAUDE_BRANCH_OUTPUT}"
+          if [ -z "${BRANCH}" ] && [ -n "${TARGET_NUMBER}" ]; then
+            BRANCH=$(gh pr view "${TARGET_NUMBER}" --repo "${REPO}" --json headRefName --jq .headRefName 2>/dev/null || true)
+          fi
+          if [ -z "${BRANCH}" ]; then
+            echo "Could not determine a branch (no new branch reported, and #${TARGET_NUMBER:-<none>} is not an open PR) -- nothing to do."
+            exit 0
+          fi
+          export BRANCH
+          # Run the copy snapshotted before claude-code-action could switch
+          # this checkout to a PR's own (possibly untrusted) branch -- see
+          # the snapshot-scripts step above.
+          bash "${SCRIPTS_DIR}/claude-ensure-pr-and-dispatch.sh"
+
+      # TASK-T20 (Issue #71): observability without exposing secrets or tool
+      # output -- see scripts/claude-run-summary.sh. Deliberately does not
+      # enable claude-code-action's own `display_report`/`show_full_output`
+      # inputs, which render the full turn-by-turn transcript (including
+      # tool call results) into the public step summary/log; this instead
+      # surfaces only model/turns/cost/permission-denials/exit-subtype.
+      - if: always()
+        shell: bash
+        env:
+          EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
+          SCRIPTS_DIR: ${{ steps.snapshot-scripts.outputs.dir }}
+        # Runs the copy snapshotted before claude-code-action could switch
+        # this checkout to a PR's own (possibly untrusted) branch -- see the
+        # snapshot-scripts step above.
+        run: bash "${SCRIPTS_DIR}/claude-run-summary.sh"
 
       # Records that this exact instruction was actually completed, so the
       # `dedup` job's check on the next event skips a true duplicate --
@@ -183,7 +412,25 @@ jobs:
       # comment`) since it works identically for an Issue number or a PR
       # number -- both a PR-rework completion and an Issue-first-trigger
       # completion post their marker through this same step.
-      - if: success() && needs.dedup.outputs.marker != ''
+      #
+      # TASK-T20 (Issue #71): the condition is no longer a bare `success()`.
+      # A run that hit --max-turns (or any other Claude-side failure) after
+      # already pushing real commits that the ensure-pr step above turned
+      # into an actual PR (or successfully reused/dispatched an existing
+      # one) has still genuinely completed this instruction -- marking it
+      # done avoids a duplicate/repeated delivery of the same instruction
+      # paying for a full model rerun of work that is already done (see
+      # this task's "failure recovery" requirement). A run that failed
+      # before ever pushing anything (ensure-pr found no branch, no commits
+      # ahead of base, or -- independent review round 1, Major 1 -- a
+      # PR-rework branch whose head is unchanged from before this run, so
+      # nothing this run did, not just the pre-existing PR -- and so never
+      # set pr_number) is correctly left unmarked, so a genuine retry can
+      # still happen.
+      - if: |
+          always() &&
+          needs.dedup.outputs.marker != '' &&
+          (steps.claude.outputs.conclusion == 'success' || steps.ensure-pr.outputs.pr_number != '')
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -194,3 +441,42 @@ jobs:
           set -euo pipefail
           gh api "repos/${REPO}/issues/${TARGET_NUMBER}/comments" \
             -f body="Claude finished processing this instruction. ${MARKER}"
+
+  # TASK-T20 (Issue #71) recovery path: re-run only the deterministic
+  # PR-creation + CI/Security/Risk dispatch logic against an already-pushed
+  # branch, without invoking claude-code-action at all -- so a transient
+  # `gh`/network failure in the `claude` job's own `ensure-pr` step (the
+  # normal path already recovers on its own from the tool-permission-
+  # mismatch failure mode this task exists to fix) never requires paying
+  # for a full Claude model turn loop just to retry a plain `gh` call.
+  # Owner-only by convention (workflow_dispatch itself already requires
+  # repository write access to trigger), consistent with every other actor
+  # check in this file.
+  claude-recovery:
+    if: github.event_name == 'workflow_dispatch' && github.actor == 'wayne19870129'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+      actions: write
+    steps:
+      # TASK-T20 (Issue #71 review round 2, Critical hardening/verification
+      # ask): this job never invokes claude-code-action, so its checkout
+      # never gets switched to a PR branch by that action -- but `ref:` is
+      # pinned explicitly to the repository's own default branch anyway, as
+      # defense in depth, so that even a `workflow_dispatch` API call
+      # naming an unexpected `ref` cannot make this job execute
+      # scripts/claude-ensure-pr-and-dispatch.sh from anywhere other than
+      # the trusted default branch.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 1
+      - shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ inputs.branch }}
+          BASE_BRANCH: ${{ github.event.repository.default_branch }}
+        run: bash scripts/claude-ensure-pr-and-dispatch.sh
