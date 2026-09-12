@@ -1,6 +1,9 @@
 """Provider assembly driven exclusively by :class:`Settings`."""
 
-from dataclasses import dataclass
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from types import TracebackType
 
 from backend.app.core.config import Settings
 from backend.app.providers.accounting.mock import MockAccountingProvider
@@ -31,8 +34,27 @@ class ProviderConfigurationError(ValueError):
     """Raised when settings select an unavailable provider implementation."""
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class ProviderRegistry:
+    """The complete set of providers selected for one process/application
+    lifetime.
+
+    TASK-T16 Phase 2B8: this is also the sole ownership boundary for any
+    resource a provider creates for itself (e.g. an ``httpx.Client`` a
+    provider builds because none was injected). ``ProviderRegistry`` does
+    not need to know which concrete providers own a closeable resource --
+    :meth:`close` duck-types: any provider exposing a callable ``close``
+    attribute gets it called once. Mock/noop providers (everything
+    ``build_registry()`` assembles today) simply have no ``close`` method
+    and are silently skipped, so this costs nothing before a real,
+    resource-owning provider is ever wired in.
+
+    Not a frozen dataclass (unlike before Phase 2B8): :meth:`close` must
+    mutate ``_closed`` to stay idempotent. Nothing else about equality/
+    construction changes for existing callers -- every field is still a
+    plain keyword-constructible attribute.
+    """
+
     egress: EgressProvider
     accounting: AccountingProvider
     gateway: GatewayProvider
@@ -43,6 +65,43 @@ class ProviderRegistry:
     captcha: CaptchaProvider
     storage: BlobStorage
     transport: TransportProvider
+    _closed: bool = field(default=False, init=False, repr=False, compare=False)
+
+    def close(self) -> None:
+        """Idempotently close every provider this registry holds that
+        owns a closeable resource. Safe to call multiple times (a second
+        call is a no-op) and safe to call even though most providers
+        today have nothing to close."""
+        if self._closed:
+            return
+        self._closed = True
+        for provider in (
+            self.egress,
+            self.accounting,
+            self.gateway,
+            self.forwarder,
+            self.payment,
+            self.notify,
+            self.email,
+            self.captcha,
+            self.storage,
+            self.transport,
+        ):
+            closer = getattr(provider, "close", None)
+            if callable(closer):
+                closer()
+
+    def __enter__(self) -> ProviderRegistry:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        del exc_type, exc, traceback
+        self.close()
 
 
 def build_registry(settings: Settings) -> ProviderRegistry:

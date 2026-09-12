@@ -14,7 +14,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.orm import Session
 
 from backend.app.core.config import get_settings
-from backend.app.dependencies import AdminCustomer, DbSession
+from backend.app.dependencies import AdminCustomer, DbSession, ManagedRegistry
 from backend.app.domain.capacity import CapacityExceededError
 from backend.app.domain.ordering import BillingCommand, BillingOrderType, PaymentConfirmation
 from backend.app.domain.provisioning import (
@@ -54,7 +54,6 @@ from backend.app.providers.base import (
     EgressEndpointDTO,
     TenantDTO,
 )
-from backend.app.providers.registry import build_registry
 from backend.app.schemas.admin import PaymentConfirmation as PaymentConfirmationRequest
 from backend.app.schemas.admin import ProvisionResult
 from backend.app.schemas.public import SubscriptionRead
@@ -673,6 +672,7 @@ def admin_confirm_payment(
     data: PaymentConfirmationRequest,
     db: DbSession,
     _: AdminCustomer,
+    registry: ManagedRegistry,
 ) -> ProvisionResult:
     order = db.get(Order, order_id)
     if order is None:
@@ -711,6 +711,7 @@ def admin_confirm_payment(
                 runs,
                 _SqlAlchemyOrderState(db),
                 data.payment_reference,
+                providers=registry,
             )
         finally:
             runs.close()
@@ -738,20 +739,22 @@ def admin_confirm_payment(
 
 
 @router.get("/admin/accounting/health")
-def admin_accounting_health(_: AdminCustomer) -> dict[str, str]:
-    healthy = build_registry(get_settings()).transport.health_check()
+def admin_accounting_health(_: AdminCustomer, registry: ManagedRegistry) -> dict[str, str]:
+    healthy = registry.transport.health_check()
     return {"status": "ok" if healthy else "unavailable"}
 
 
 @router.post("/admin/subscriptions/{subscription_id}/sync-usage", response_model=SubscriptionRead)
-def admin_sync_usage(subscription_id: int, db: DbSession, _: AdminCustomer) -> Subscription:
+def admin_sync_usage(
+    subscription_id: int, db: DbSession, _: AdminCustomer, registry: ManagedRegistry
+) -> Subscription:
     subscription = db.get(Subscription, subscription_id)
     if subscription is None:
         raise HTTPException(status_code=404, detail="Subscription not found")
     if not subscription.accounting_user_id:
         raise HTTPException(status_code=409, detail="Subscription has no accounting identity")
     try:
-        usage = build_registry(get_settings()).accounting.get_usage(subscription.accounting_user_id)
+        usage = registry.accounting.get_usage(subscription.accounting_user_id)
         period = subscription.current_period
         if period is None:
             raise ValueError("Subscription has no active usage period")

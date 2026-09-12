@@ -8,17 +8,46 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from backend.app.core.config import get_settings
 from backend.app.core.database import get_db
 from backend.app.core.security import create_access_token, decode_access_token
 from backend.app.models import Customer, CustomerRole, CustomerStatus, JwtSession
+from backend.app.providers.registry import ProviderRegistry, build_registry
 
 DbSession = Annotated[Session, Depends(get_db)]
 bearer = HTTPBearer(auto_error=False)
+
+
+def get_provider_registry(request: Request) -> ProviderRegistry:
+    """TASK-T16 Phase 2B8: the one place route handlers reach the
+    application-scoped ``ProviderRegistry`` -- built once by ``main.py``'s
+    ``lifespan`` and stored on ``app.state``, so every request within the
+    same process reuses the same instance (and its resources, once a
+    real resource-owning provider is wired in) instead of constructing
+    and discarding a fresh one per request.
+
+    Falls back to building (and caching on ``app.state`` for subsequent
+    calls within the same process) a registry lazily if the lifespan
+    never ran -- e.g. a test constructing ``TestClient(app)`` without the
+    ``with`` context manager that triggers lifespan events. Production
+    ASGI servers (uvicorn) always run the lifespan, so this fallback is
+    purely a test-harness accommodation; today's mock/noop providers hold
+    no resources either way, so it does not weaken the ownership
+    guarantee for anything actually deployed.
+    """
+    registry = getattr(request.app.state, "provider_registry", None)
+    if registry is None:
+        registry = build_registry(get_settings())
+        request.app.state.provider_registry = registry
+    return registry
+
+
+ManagedRegistry = Annotated[ProviderRegistry, Depends(get_provider_registry)]
 
 
 @dataclass(frozen=True, slots=True)

@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from backend.app import main
 from backend.app.api import admin as admin_api
+from backend.app.core.config import Settings
 from backend.app.dependencies import AuthContext, get_auth_context
 from backend.app.domain.capacity import CapacityExceededError
 from backend.app.domain.provisioning import ProvisionOutcome, ProvisionStatus
@@ -31,6 +32,7 @@ from backend.app.models import (
     SubscriptionStatus,
 )
 from backend.app.providers.base import CapacityDTO
+from backend.app.providers.registry import build_registry
 from backend.app.schemas.admin import PaymentConfirmation
 
 ADMIN_ENDPOINTS = [
@@ -185,6 +187,7 @@ def test_confirm_payment_success_calls_provisioning_saga(
         PaymentConfirmation(payment_reference="reference-001"),
         cast(Session, db),
         Customer(),
+        build_registry(Settings()),
     )
     assert calls == ["ProvisionRequest"]
     assert result.subscription_url == "https://example.invalid/s/token"
@@ -215,6 +218,7 @@ def test_confirm_payment_capacity_failure_is_rejected_before_payment(
             PaymentConfirmation(payment_reference="reference-002"),
             cast(Session, db),
             Customer(),
+            build_registry(Settings()),
         )
     assert raised.value.status_code == 409
     assert order.status is OrderStatus.PENDING

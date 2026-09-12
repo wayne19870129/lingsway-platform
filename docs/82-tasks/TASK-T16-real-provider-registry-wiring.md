@@ -1489,3 +1489,193 @@ adapter、DTO/编排改动、独立的 reconciliation 工具/作业、
   `registry.py` 未改动、无 patched Marzban 镜像构建/部署、无真实
   staging 凭据/真实网络调用、无 409 reconciliation、无通用 retry
   框架、无 Alembic/schema 变更、无生产部署。
+
+- **Phase 2B8（本 PR）：Provider lifecycle / ownership 基础设施**
+
+  **背景**：PR #64（TASK-T16 Phase 2B7）合入 `main`
+  （`46577b137102b40d67d1bab35fbb45844cf47a99`）后，
+  `MarzbanAccountingProvider` 已经具备 `_owns_client`/`close()`，但
+  `backend/app/providers/registry.py` 的 `ProviderRegistry` 本身
+  没有任何 ownership/生命周期概念——它是一个纯数据容器
+  （`@dataclass(frozen=True, slots=True)`），而
+  `build_registry()` 在生产 API 路径（`public.py`/`admin.py`/
+  `subscription.py`/`services.py`）和 scheduler
+  （`workers/scheduler.py`）里，都是**每次调用都现造一个新实例**，
+  从不持有、也从不关闭。今天因为 `build_registry()` 只能装配
+  mock/noop provider（全部无状态、无需关闭），这不产生真实资源泄漏；
+  但这是真实 provider（`MarzbanAccountingProvider`、
+  `SubscriptionTransportProvider`，两者都持有/可能持有一个长期
+  `httpx.Client`）接入 registry 之前必须先解决的 blocker——否则每个
+  HTTP 请求、每个 60/300 秒的 scheduler tick，都会创建一个永远不会
+  被 `close()` 的新 `httpx.Client`。
+
+  **本阶段目标**：只解决这一个 blocker，不启用任何真实 provider，不
+  产生任何真实外部副作用。
+
+  **本阶段边界（严格执行下面"明确禁止"一节）**：不修改
+  `ACCOUNTING_PROVIDER=marzban` 的可用性、不启用 Webshare/
+  `XrayFileProvider`/`MihomoForwarderProvider`/
+  `SubscriptionTransportProvider`、不连接真实 Marzban/Webshare、不用
+  真实凭据、不构建/部署 patched Marzban 镜像、不碰生产 VPS、不做
+  Xray/Mihomo reload、不做 existing-data reconciliation、不改
+  Alembic/schema、不开始生产部署、不做与 lifecycle 无关的重构
+  （尤其不碰 subscription parsing/节点解析/transport 业务逻辑本身）。
+
+  **验收标准**：
+  1. 重新枚举并覆盖全部生产 `build_registry()` 调用点（不只是已知的
+     几个），包括 `backend/app/api/public.py`、
+     `backend/app/api/admin.py`、`backend/app/api/subscription.py`、
+     `backend/app/services.py`、`backend/app/workers/scheduler.py`。
+  2. `ProviderRegistry` 获得明确的 ownership/lifecycle：
+     resource-owning provider 有确定的关闭路径；`close()` 幂等；
+     同一个 owned resource 不 double-close；provider 自己创建的
+     client 由 provider/registry 生命周期关闭；外部注入的 client
+     不被 provider 擅自关闭；`build_registry()` 本身继续保持"构造时
+     无 network/Docker/filesystem/shell I/O"的既有契约（不变）。
+  3. FastAPI backend 有明确的 application/process 生命周期：进程
+     启动时创建受管理的 `ProviderRegistry`，HTTP 请求复用同一个实例，
+     进程关闭时确定性 `close()`，不允许 `/orders`、subscription feed、
+     admin usage sync、health 等请求各自重复创建从不关闭的
+     `httpx.Client`。
+  4. 生产 API 路径里的临时 `build_registry(get_settings())` 全部替换
+     为显式复用同一个受管理 registry；为兼容既有单元测试保留的
+     helper/factory 不得形成新的生产资源泄漏路径。
+  5. Scheduler 生命周期：一个 scheduler 进程只创建一次
+     `ProviderRegistry`，loop 多轮复用；正常退出、异常退出都在
+     `finally` 等确定性路径关闭；非 `--loop` 的 one-shot 模式也必须
+     关闭；不允许每个 tick 创建一个新的长期 `httpx.Client` 却从不
+     `close()`。
+  6. 检查并修复目前已经持有/可能持有长期 resource 的 provider：
+     `MarzbanAccountingProvider`（已有 `_owns_client`/`close()`，补
+     测试证明自建 client 会被关闭、注入 client 不被误关、close 多次
+     安全）；`SubscriptionTransportProvider`（当前 `client or
+     httpx.Client(...)` 但完全没有 ownership/close 语义——确认是
+     同一类资源泄漏问题，做最小修复：记录 `_owns_client`，新增
+     确定性、幂等的 `close()`，不改动其 subscription 解析/节点逻辑/
+     transport 业务行为）。
+  7. 新增测试证明：all-mock/noop registry 继续可以在无 network、无
+     Docker、无真实文件系统依赖环境下构造；多个 FastAPI 请求复用同一
+     application-scoped registry；shutdown 对 owned provider/client
+     只执行一次正确关闭；外部注入 client 不被误关；scheduler 连续
+     执行至少两个 batch 时只创建一个 registry；scheduler 正常/异常
+     退出最终都会关闭 registry；one-shot scheduler 同样关闭；本轮
+     重构没有改变 provisioning、payment、routing、named-lock、
+     rollback 现有语义（即 ADR-016/017/018 相关测试全部保持绿色）。
+  8. 若发现必须修改 `backend/app/domain/**` 或
+     `backend/app/providers/base.py` 才能完成 lifecycle 设计：立即
+     停止代码实现，先确认是否需要新 ADR（AGENTS.md 铁律第 5 条），
+     不得直接改。（结果：本阶段最终**未**触碰这两处——lifecycle 是
+     纯 infrastructure 层的 registry/API-wiring/scheduler 关注点，
+     不涉及任何新的架构决策，ADR-016/017/018 均不受影响，未新增
+     ADR。）
+
+  **实现摘要**：
+  - `backend/app/providers/registry.py`：`ProviderRegistry` 从
+    `@dataclass(frozen=True, slots=True)` 改为 `@dataclass(slots=True)`
+    （不再 frozen，仅为了让 `close()` 能设置一个私有 `_closed` 标记）。
+    新增 `close()`：对持有的十个 provider 逐一 duck-type 检测
+    `close` 属性，存在则调用；用 `_closed` 标记保证幂等（第二次及以后
+    的调用直接返回，不重复关闭）。新增 `__enter__`/`__exit__`，
+    `ProviderRegistry` 因此也是一个 context manager。不需要知道具体
+    哪个 provider 拥有可关闭资源——今天全部 mock/noop provider 都没有
+    `close()` 方法，被安全跳过。
+  - `backend/app/main.py`：新增 `lifespan()`（`@asynccontextmanager`），
+    在 FastAPI 启动时 `build_registry(get_settings())` 一次，存到
+    `app.state.provider_registry`；`finally` 块保证进程关闭时
+    `registry.close()` 总会执行，即使某个请求处理中抛出异常。
+    `app = FastAPI(..., lifespan=lifespan)`。
+  - `backend/app/dependencies.py`：新增 `get_provider_registry(request)`
+    读取 `request.app.state.provider_registry`；若 lifespan 未运行
+    （例如测试用裸 `TestClient(app)`，不经过 `with` 触发生命周期事件），
+    惰性构建一次并缓存到 `app.state` 上，保证同一进程内后续调用仍拿到
+    同一实例。`ManagedRegistry = Annotated[ProviderRegistry,
+    Depends(get_provider_registry)]` 供路由函数直接声明为参数类型。
+  - `backend/app/api/public.py`/`subscription.py`/`admin.py`：
+    `place_order`/`payment_notice`/`get_subscription`/
+    `admin_confirm_payment`/`admin_accounting_health`/
+    `admin_sync_usage` 六个函数新增 `registry: ManagedRegistry` 参数，
+    全部内部 `build_registry(get_settings())` 调用点替换为直接读取
+    该参数；`admin_confirm_payment` 额外把 `registry` 通过
+    `confirm_payment_and_provision(..., providers=registry)` 显式传入
+    （`services.py` 三个函数早就有 `providers: ProviderRegistry | None`
+    可选参数，本轮不改 `services.py` 本身，只是不再让生产路径依赖它的
+    默认值）。移除三个文件里因此变成未使用的 `build_registry`/
+    `get_settings` import。
+  - `backend/app/workers/scheduler.py`：`main()` 改为在
+    `argparse` 解析后先 `build_scheduler_registry()` 一次，`while`
+    循环（含非 `--loop` 的单次执行）用
+    `run_batch(registry_factory=lambda: registry)`
+    复用同一个已构建实例，`try/finally` 保证正常 `return`、
+    `--loop` 达到条件退出、以及循环体内任何异常都会在退出前
+    `registry.close()`。`run_batch()`/`build_scheduler_registry()`
+    自身签名未变，向后兼容 `test_scheduler.py` 原有测试。
+  - `backend/app/providers/transport/subscription.py`：
+    `SubscriptionTransportProvider.__init__` 新增 `self._owns_client
+    = client is None`（`MarzbanAccountingProvider` 已有的同一模式）
+    和 `self._closed = False`；新增 `close()`，幂等，只关闭自建的
+    client，从不关闭外部注入的 client。未改动其订阅解析/节点解析/
+    transport 业务逻辑本身。
+  - `backend/app/providers/accounting/marzban.py`：未改动代码（其
+    `_owns_client`/`close()` 已在 Phase 2B7 实现），本阶段只补测试。
+
+  **测试影响**：因为 `place_order`/`payment_notice`/`get_subscription`/
+  `admin_confirm_payment` 这四个路由函数被直接（绕过 FastAPI DI）
+  调用的既有测试（`test_order_subscription_api.py`、
+  `test_admin_api.py`、`test_db_adapters.py`，共 8 处调用点）现在
+  必须显式传入一个 `registry` 参数，已全部更新为传入
+  `build_registry(Settings())`（或该文件已有等价 helper）构造的
+  all-mock registry，行为与之前"内部默认构建"完全等价，不影响这些
+  测试原本验证的业务逻辑。
+
+  **新增测试**（TASK-T16 Phase 2B8 专属，共 22 条）：
+  - `backend/tests/unit/test_registry.py`（+4）：
+    `test_all_mock_registry_close_is_a_safe_noop`、
+    `test_registry_close_calls_each_owned_providers_close_exactly_once`、
+    `test_registry_close_is_idempotent_never_double_closes`、
+    `test_registry_context_manager_closes_on_exit`。
+  - `backend/tests/unit/test_application_lifecycle.py`（新文件，+5）：
+    多个请求复用同一 application-scoped registry、lifespan 正常关闭时
+    `close()` 恰好一次、lifespan 在请求处理抛异常时仍然
+    `close()`（依赖 `@asynccontextmanager` 自身的 `finally` 语义）、
+    lifespan 未运行时 `get_provider_registry()` 惰性构建并在同进程内
+    复用、`get_provider_registry` 确实是 `main.py` 路由实际绑定的
+    依赖（非同名重复定义）。
+  - `backend/tests/unit/test_scheduler.py`（+3）：one-shot 模式
+    只构建一次 registry 且退出时关闭、`--loop` 连续至少两个 batch
+    只构建一次 registry（`registries_used` 全部是同一实例）、
+    `run_batch()` 抛异常时 `main()` 仍在 `finally` 关闭 registry。
+  - `backend/tests/unit/test_marzban_accounting_provider.py`（+3）：
+    自建 client 被 `close()` 关闭、注入 client 不被误关、`close()`
+    可安全重复调用。
+  - `backend/tests/unit/test_transport_provider.py`（+3）：
+    `SubscriptionTransportProvider` 同上三条（新增
+    `_owns_client`/`close()` 后首次获得测试覆盖）。
+  - 既有测试文件里新增/调整的 8 处调用点不计入上面的"新增测试"
+    条数，但同样在下面的验证结果里通过。
+
+  **验证**：
+  - `ruff check backend/` → All checks passed!
+  - `mypy backend/app backend/tests`（strict）→
+    Success: no issues found in 94 source files。
+  - `pytest backend/tests/unit backend/tests/guards -q` → **217 通过**
+    （199 既有 + 18 本阶段新增，0 回归）。
+  - `pytest backend/tests/integration -q`（本地 MariaDB 10.11，
+    `TEST_DATABASE_URL` 已设置）→ **50 通过、1 个失败**——失败项是
+    `test_mysql_84_database_is_reachable` 的 `VERSION()` 字符串检查
+    （沙箱是 MariaDB 10.11，非真实 MySQL 8.4），与本次改动完全无关的
+    既有环境限制，**本地未验证**真实 MySQL 8.4；ADR-016/017/018
+    相关的全部 provisioning/payment/routing/named-lock/rollback
+    production-backed 测试均在本次运行中保持绿色（未被本轮改动
+    影响其语义）。最终以 GitHub CI 的真实 MySQL 8.4 backend job 结果
+    为准。
+  - GitHub CI / Security / Risk classification：将在推送后、拿到
+    exact head SHA 后报告实际结果。
+
+  **仍未完成**（严格保持本阶段边界，未扩大 scope）：
+  `ACCOUNTING_PROVIDER=marzban` 依然不可选（`build_registry()` 本身
+  未改动，继续只能装配 mock/noop）；未启用 Webshare/
+  `XrayFileProvider`/`MihomoForwarderProvider`/
+  `SubscriptionTransportProvider`；未连接任何真实 Marzban/Webshare；
+  未使用真实凭据；未构建/部署 patched Marzban 镜像；未碰生产 VPS；
+  未做 Xray/Mihomo reload；未做 existing-data reconciliation；未改
+  Alembic/schema；未开始生产部署。

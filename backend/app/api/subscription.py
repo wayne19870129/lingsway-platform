@@ -9,8 +9,7 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from sqlalchemy import select
 
-from backend.app.core.config import get_settings
-from backend.app.dependencies import CurrentCustomer, DbSession
+from backend.app.dependencies import CurrentCustomer, DbSession, ManagedRegistry
 from backend.app.domain.ordering import BillingOrderType
 from backend.app.domain.subscription_render import render_subscription
 from backend.app.infra.provisioning_state import SqlAlchemyProvisioningState
@@ -24,7 +23,6 @@ from backend.app.models import (
     Subscription,
     SubscriptionStatus,
 )
-from backend.app.providers.registry import build_registry
 from backend.app.schemas.public import (
     BillingOrderRequest,
     OrderRead,
@@ -176,7 +174,9 @@ def _utc(value: datetime) -> datetime:
 
 
 @subscription_feed_router.get("/s/{token}")
-def get_subscription(token: str, request: Request, db: DbSession) -> Response:
+def get_subscription(
+    token: str, request: Request, db: DbSession, registry: ManagedRegistry
+) -> Response:
     token_hash = hashlib.sha256(token.replace("\\", "").encode()).hexdigest()
     subscription = db.scalar(
         select(Subscription).where(
@@ -196,7 +196,7 @@ def get_subscription(token: str, request: Request, db: DbSession) -> Response:
     expire_at = int(_utc(subscription.service_expire_at).timestamp())
     userinfo = f"upload=0; download={used_bytes}; total={quota_bytes}; expire={expire_at}"
     user_agent = request.headers.get("user-agent", "")
-    links = build_registry(get_settings()).accounting.get_connection_links(
+    links = registry.accounting.get_connection_links(
         subscription.accounting_user_id
     )
     rendered = render_subscription(

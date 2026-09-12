@@ -691,3 +691,56 @@ def test_401_error_message_never_exposes_bearer_token() -> None:
 
     assert "token-1" not in str(excinfo.value)
     assert "token-2" not in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# TASK-T16 Phase 2B8: provider resource lifecycle (_owns_client / close()).
+# ---------------------------------------------------------------------------
+
+
+def test_close_closes_a_self_created_client() -> None:
+    """When no client is injected, MarzbanAccountingProvider builds its
+    own httpx.Client -- close() must actually close that owned client."""
+    provider = MarzbanAccountingProvider(
+        base_url=_BASE_URL,
+        admin_username=_ADMIN_USERNAME,
+        admin_password=_ADMIN_PASSWORD,
+        default_protocol="vless",
+        default_inbounds_json=_INBOUNDS_JSON,
+    )
+    assert provider._owns_client is True  # noqa: SLF001
+    client = provider._client  # noqa: SLF001
+    assert client.is_closed is False
+
+    provider.close()
+
+    assert client.is_closed is True
+
+
+def test_close_never_closes_an_injected_client() -> None:
+    """An externally injected client is the injecting caller's own
+    resource -- close() must never close it out from under them."""
+    injected_client = httpx.Client(transport=httpx.MockTransport(_recording_handler([])))
+    provider = _provider(_recording_handler([]), client=injected_client)
+    assert provider._owns_client is False  # noqa: SLF001
+
+    provider.close()
+
+    assert injected_client.is_closed is False
+    injected_client.close()
+
+
+def test_close_is_idempotent_and_safe_to_call_multiple_times() -> None:
+    provider = MarzbanAccountingProvider(
+        base_url=_BASE_URL,
+        admin_username=_ADMIN_USERNAME,
+        admin_password=_ADMIN_PASSWORD,
+        default_protocol="vless",
+        default_inbounds_json=_INBOUNDS_JSON,
+    )
+
+    provider.close()
+    provider.close()
+    provider.close()
+
+    assert provider._client.is_closed is True  # noqa: SLF001

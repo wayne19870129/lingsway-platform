@@ -165,11 +165,26 @@ class SubscriptionTransportProvider:
     ) -> None:
         self.provider_code = provider_code
         self._url = subscription_url
+        # TASK-T16 Phase 2B8: this provider must never close a client it
+        # did not create itself -- an injected client (e.g. a shared
+        # pool, or a test's httpx.MockTransport-backed client) outlives
+        # this provider and is the injecting caller's own resource.
+        self._owns_client = client is None
         self._client = client or httpx.Client(timeout=20.0, follow_redirects=True)
         self._cache_path = cache_path
         self._enabled = True
         self._endpoints: list[TransportEndpointDTO] = []
         self._capacity: TransportCapacityDTO | None = None
+        self._closed = False
+
+    def close(self) -> None:
+        """Idempotent: closes the self-created client at most once, and
+        never closes a client this provider did not create."""
+        if self._closed:
+            return
+        self._closed = True
+        if self._owns_client:
+            self._client.close()
 
     def health_check(self) -> bool:
         return self._enabled and bool(self._endpoints)

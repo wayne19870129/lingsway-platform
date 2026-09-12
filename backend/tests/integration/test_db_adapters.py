@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 import backend.app.models  # noqa: F401
 from backend.app.api.public import place_order
+from backend.app.core.config import Settings
 from backend.app.core.database import Base, build_engine
 from backend.app.core.secrets import reveal_secret
 from backend.app.infra.provisioning_state import (
@@ -47,6 +48,7 @@ from backend.app.providers.base import (
     TenantDTO,
 )
 from backend.app.providers.forwarder.mihomo import MihomoForwarderProvider, MihomoRuntimeError
+from backend.app.providers.registry import build_registry
 from backend.app.schemas.public import OrderCreate
 from ops.forwarder.render_mihomo_config import render_mihomo_document
 
@@ -359,6 +361,7 @@ def test_place_order_precheck_does_not_reserve_or_bind_the_endpoint(db: Session)
         OrderCreate(plan_id=plan.id, client_request_id="nomutate-request-001"),
         db,
         customer,
+        build_registry(Settings()),
     )
 
     db.expire_all()

@@ -108,3 +108,50 @@ def test_failed_sync_preserves_last_known_good_provider_file(tmp_path: Path) -> 
     with pytest.raises(ValueError):
         adapter.sync_nodes()
     assert "OLD" in target.read_text()
+
+
+# ---------------------------------------------------------------------------
+# TASK-T16 Phase 2B8: provider resource lifecycle (_owns_client / close()).
+# ---------------------------------------------------------------------------
+
+
+def test_close_closes_a_self_created_client() -> None:
+    """When no client is injected, SubscriptionTransportProvider builds
+    its own httpx.Client -- close() must actually close that owned
+    client. Previously this provider had no ownership tracking or close()
+    at all, leaking one httpx.Client per instance."""
+    adapter = SubscriptionTransportProvider("PROVIDER_A", "https://provider.invalid/private")
+    assert adapter._owns_client is True  # noqa: SLF001
+    client = adapter._client  # noqa: SLF001
+    assert client.is_closed is False
+
+    adapter.close()
+
+    assert client.is_closed is True
+
+
+def test_close_never_closes_an_injected_client() -> None:
+    """An externally injected client is the injecting caller's own
+    resource -- close() must never close it out from under them."""
+    injected_client = httpx.Client(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, text="proxies: []\n"))
+    )
+    adapter = SubscriptionTransportProvider(
+        "PROVIDER_A", "https://provider.invalid/private", client=injected_client
+    )
+    assert adapter._owns_client is False  # noqa: SLF001
+
+    adapter.close()
+
+    assert injected_client.is_closed is False
+    injected_client.close()
+
+
+def test_close_is_idempotent_and_safe_to_call_multiple_times() -> None:
+    adapter = SubscriptionTransportProvider("PROVIDER_A", "https://provider.invalid/private")
+
+    adapter.close()
+    adapter.close()
+    adapter.close()
+
+    assert adapter._client.is_closed is True  # noqa: SLF001
