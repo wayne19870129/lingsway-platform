@@ -125,6 +125,7 @@ jobs:
       # scripts/claude-ensure-pr-and-dispatch.sh for how they're used.
       pre_head_sha: ${{ steps.check.outputs.pre_head_sha }}
       issue_number: ${{ steps.check.outputs.issue_number }}
+      open_pr_number: ${{ steps.check.outputs.open_pr_number }}
     env:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
@@ -136,6 +137,49 @@ jobs:
           set -euo pipefail
           is_pr_comment="${{ github.event.issue.pull_request != null || github.event.pull_request != null }}"
           target_number="${{ github.event.issue.number || github.event.pull_request.number }}"
+
+          # TASK-T20 (Issue #71 review round 2, Major 2 hardening): the
+          # `claude` job's ensure-pr step already refuses (nonzero exit,
+          # ISSUE_NUMBER-based branch-name check) to open a second PR for an
+          # Issue that already has one -- but that check only runs AFTER a
+          # full Claude turn loop has already run and pushed a new branch,
+          # which still burns real cost/turns on an instruction that was
+          # always going to be refused (contrary to this Issue's own "stop
+          # wasting turns" goal), and it depends on the pinned action's
+          # default branch-naming template staying exactly
+          # `claude/issue-<N>-...`. Add a second, independent, deterministic
+          # layer here that fails closed BEFORE Claude ever starts, using
+          # GitHub's own closing-reference graph (the same `Closes #N`
+          # convention this workflow's ensure-pr step embeds into every PR
+          # body it creates) rather than guessing from branch names. The
+          # ensure-pr step's own check stays in place as a second line of
+          # defense in case this preflight ever misses a case.
+          #
+          # Kept in sync manually with scripts/tests/test-claude-issue-open-
+          # pr-filter.sh, which exercises the exact jq filter below against
+          # canned GraphQL responses -- see that script if this filter ever
+          # changes.
+          if [ "$is_pr_comment" != "true" ]; then
+            open_pr_number=$(gh api graphql -f query='
+              query($owner:String!, $repo:String!, $number:Int!) {
+                repository(owner:$owner, name:$repo) {
+                  issue(number:$number) {
+                    closedByPullRequestsReferences(first: 25, includeClosedPrs: true) {
+                      nodes { number state }
+                    }
+                  }
+                }
+              }' -F owner="${REPO%%/*}" -F repo="${REPO##*/}" -F number="$target_number" \
+              --jq '[.data.repository.issue.closedByPullRequestsReferences.nodes[] | select(.state=="OPEN") | .number] | first // empty')
+            if [ -n "$open_pr_number" ]; then
+              echo "proceed=false" >> "$GITHUB_OUTPUT"
+              echo "target_number=${target_number}" >> "$GITHUB_OUTPUT"
+              echo "open_pr_number=${open_pr_number}" >> "$GITHUB_OUTPUT"
+              echo "Issue #$target_number already has an open pull request (#$open_pr_number) linked to it -- refusing to start a second Claude run/PR for the same task. Follow-up instructions should be sent as a comment on PR #$open_pr_number instead."
+              exit 0
+            fi
+          fi
+
           if [ "$is_pr_comment" = "true" ]; then
             state=$(gh pr view "$target_number" --repo "$REPO" --json headRefOid --jq .headRefOid)
             pre_head_sha="$state"
@@ -164,6 +208,27 @@ jobs:
             echo "Already completed this exact instruction for #$target_number at state $state -- duplicate/repeat, skipping."
           else
             echo "proceed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # TASK-T20 (Issue #71 review round 2, Major 2 hardening): tell the
+      # owner (once per Issue/open-PR pair, not on every subsequent
+      # comment) why nothing ran, instead of silently dropping the
+      # instruction.
+      - if: steps.check.outputs.open_pr_number != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TARGET_NUMBER: ${{ steps.check.outputs.target_number }}
+          OPEN_PR_NUMBER: ${{ steps.check.outputs.open_pr_number }}
+        run: |
+          set -euo pipefail
+          redirect_marker="<!-- claude-redirect:${TARGET_NUMBER}:${OPEN_PR_NUMBER} -->"
+          existing=$(gh api "repos/${REPO}/issues/${TARGET_NUMBER}/comments" --paginate \
+            --jq '[.[] | select(.body // "" | contains("'"$redirect_marker"'"))] | length')
+          if [ "$existing" -eq 0 ]; then
+            gh api "repos/${REPO}/issues/${TARGET_NUMBER}/comments" \
+              -f body="This Issue already has an open pull request (#${OPEN_PR_NUMBER}) for this task. Per this repository's one-task-one-PR rule, please send follow-up instructions as a comment on PR #${OPEN_PR_NUMBER} instead -- no new Claude run was started for this comment. ${redirect_marker}"
           fi
 
   claude:
@@ -197,8 +262,25 @@ jobs:
       # CLAUDE_CODE_OAUTH_TOKEN secret, so a retargeted tag would run with
       # that authority. Bump the SHA (and this comment) via a reviewed PR,
       # e.g. from Dependabot's github-actions ecosystem updates.
+      #
+      # TASK-T20 (Issue #71 review round 2, Critical hardening): `ref:` is
+      # pinned explicitly to the repository's own default branch. The
+      # snapshot-scripts step below documents (and this task's independent
+      # review round 1 asserted) that issue_comment/pull_request_review_comment
+      # events check out the default branch by default even without this
+      # pin -- but that claim was not independently re-verified against
+      # GitHub's own event-payload documentation in this round, and
+      # pull_request_review_comment in particular is a PR-scoped event
+      # where GitHub's docs describe github.sha/github.ref in terms of the
+      # PR (e.g. a merge-ref/merge-commit that incorporates the PR head),
+      # not unambiguously "the default branch". Pinning `ref:` explicitly
+      # removes that ambiguity outright rather than relying on it being
+      # resolved correctly -- the entire snapshot-then-execute trust
+      # boundary below depends on this checkout being unambiguously
+      # trusted.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 1
 
       # TASK-T20 (Issue #71, independent review round 1, Critical 1): copy
@@ -379,8 +461,17 @@ jobs:
       pull-requests: write
       actions: write
     steps:
+      # TASK-T20 (Issue #71 review round 2, Critical hardening/verification
+      # ask): this job never invokes claude-code-action, so its checkout
+      # never gets switched to a PR branch by that action -- but `ref:` is
+      # pinned explicitly to the repository's own default branch anyway, as
+      # defense in depth, so that even a `workflow_dispatch` API call
+      # naming an unexpected `ref` cannot make this job execute
+      # scripts/claude-ensure-pr-and-dispatch.sh from anywhere other than
+      # the trusted default branch.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 1
       - shell: bash
         env:

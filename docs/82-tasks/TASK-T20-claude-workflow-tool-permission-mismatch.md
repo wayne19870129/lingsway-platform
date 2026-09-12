@@ -426,14 +426,98 @@ stub):(a) PR-rework 分支 head 与 `PRE_HEAD_SHA` 相同 → 确认脚本
 格式是否与本任务的假设完全一致,仍然是
 `unverified until post-merge live test` 的一部分。
 
+## Round 2(并发写入协调 + 补强 Critical/Major 2)
+
+处理这一轮时发现:在本次改动准备 push 之前,**另一个并发 session**
+(`session_01SF6n1UCB3rgpkyfRoS3wUB`,大概率是 owner 在 PR #72 上对
+round 1 审查发的真实 `@claude` 回复触发的那次 workflow 运行本身)已经
+独立 push 了一个提交(`4390431`),同样针对 round 1 审查的三个
+Critical/Major finding 做了修复。两次修复是**独立完成、设计不完全
+相同**的:
+
+- Critical(信任边界):两者设计等价——都新增了"在
+  `claude-code-action` 运行之前,把两个脚本从可信 checkout 复制到
+  `$RUNNER_TEMP`,之后只执行这份快照"的机制。采用远端已经 push 的
+  版本(`snapshot-scripts` step / `SCRIPTS_DIR`),未重复实现。
+- Major 1(false completion marker):两者设计等价——都是"记录 Claude
+  运行前的 PR head SHA,运行后比较是否真的前进了"。采用远端已经 push
+  的版本(`dedup` job 输出 `pre_head_sha`,复用它已经在算的
+  `gh pr view --json headRefOid` 调用,比本任务另起一个独立 step 更
+  精简),未重复实现。
+- Major 2(同一 Issue 第二个 PR):**两者设计不同**。远端版本在
+  `ensure-pr` 脚本里,根据 tag mode 默认分支命名模板
+  (`claude/issue-<N>-...`)做事后检测——即使检测到重复也已经先花掉了
+  一整轮 Claude 模型执行成本,且依赖"默认命名模板不变"这个未强制的
+  假设。本任务在此基础上**新增了一层更早、更省成本、不依赖命名假设**
+  的确定性 preflight:`dedup` job 在 Issue-first 触发时,用 GitHub 官方
+  的 `closedByPullRequestsReferences` 关系图查询该 Issue 是否已有
+  `OPEN` 状态的关联 PR,有则在 Claude 启动前就 fail closed(不消耗
+  任何 Claude turn),并发一条去重后的引导评论。远端已经验证过的
+  分支名检测逻辑**保留未删除**,作为 preflight 万一漏判时的第二道
+  防线——两层机制职责不同、不冲突,不是重复实现。
+
+此外,针对 round 1 审查中"Critical 修复依赖 `issue_comment`/
+`pull_request_review_comment` 事件默认 checkout 到 default branch"这个
+**未经独立核实的假设**(本任务在这个环境里没有 `gh`/无法访问
+`docs.github.com` 来做权威核实,`pull_request_review_comment` 是
+PR 归属事件,`github.sha`/`github.ref` 在 GitHub 官方文档里的描述并不
+是无歧义的"default branch"),`claude` job 与 `claude-recovery` job 的
+两处 `actions/checkout` 都补充了显式
+`ref: ${{ github.event.repository.default_branch }}`——不管那个假设
+本身是否成立,这个 pin 都能让"snapshot 阶段的 checkout 一定是可信内容"
+这件事不再依赖假设。
+
+新增以下此前 CI 里完全没有的**行为级回归测试**(round 1 的
+Minor finding 明确指出"CI 绿不能证明这些新脚本正确",round 1 修复只
+扩大了 `shellcheck`/`bash -n` 的静态检查范围,没有新增任何真正运行
+这些脚本的测试):
+
+- `scripts/tests/test-claude-workflow-trust-boundary.sh`——静态断言
+  `claude.yml` 的形状(snapshot step 先于 `claude-code-action`、
+  `ensure-pr`/run-summary 只执行 `$SCRIPTS_DIR` 快照、两处 checkout 都
+  pin 了 `ref:`),防止 Critical 修复被后续改动悄悄撤销。
+- `scripts/tests/test-claude-ensure-pr-and-dispatch.sh`——针对**当前
+  实际脚本**(而不是本任务自己另起一套设计)跑 5 个场景:正常新建
+  PR、复用已有 PR、无新 commit 不动作、Major 1 回归(PR-rework 分支在
+  本次运行前就已经 ahead of base 且 head 未变 → 不创建/不 dispatch/
+  不报告 `pr_number`)、Major 2 回归(Issue 已有另一个分支的 open PR →
+  非零退出、不创建第二个 PR)。
+- `scripts/tests/test-claude-issue-open-pr-filter.sh`——针对本轮新增
+  的 GraphQL preflight jq filter,覆盖单个 open PR、无关联 PR、仅
+  merged/closed 关联 PR、混合状态四种响应形状。
+
+`ci.yml` 新增 `claude-workflow-scripts` job,在 CI 里实际执行上述三个
+测试脚本(而不是只依赖 PR 描述里的一次性本地运行记录)。
+
+以下仍然是 `unverified until post-merge live test`(在这个环境里无法
+触发真实 GitHub Actions/GraphQL 调用来端到端验证):
+
+- `pull_request_review_comment` 事件下,不显式 `ref:` 的
+  `actions/checkout` 到底会检出什么内容——本任务加了显式 `ref:` pin
+  绕开了这个问题,而不是解决了对这个问题本身的核实。
+- `gh api graphql` 对 `closedByPullRequestsReferences` 的真实查询在
+  这个仓库上返回的实际 JSON 形状,与本任务基于 GraphQL 字段文档、以及
+  `issue_read` 工具对 Issue #71 返回的
+  `closed_by_pull_requests.references` 字段做的推断完全一致。
+- Issue-first preflight 的引导评论在真实仓库上确实只发一次(去重逻辑
+  与 `dedup` job 已有的 marker 去重模式一致,但没有触发过第二次真实
+  事件来验证)。
+- 两层 Major 2 防线(preflight + 分支名检测)在真实并发场景下的实际
+  交互顺序(理论上 preflight 应该总是先挡住,分支名检测理论上不会被
+  触发到,但没有真实并发事件验证过)。
+
 ## 允许修改的文件
 
 - `.github/workflows/claude.yml`
 - `.github/workflows/ci.yml`(round 1 review 新增:shellcheck 覆盖
-  `scripts/*.sh`)
+  `scripts/*.sh`;round 2 新增:`claude-workflow-scripts` job 实际运行
+  三个回归测试脚本)
 - `scripts/claude-ensure-pr-and-dispatch.sh`(新增,round 1 review 后
   修改)
 - `scripts/claude-run-summary.sh`(新增)
+- `scripts/tests/test-claude-workflow-trust-boundary.sh`(round 2 新增)
+- `scripts/tests/test-claude-ensure-pr-and-dispatch.sh`(round 2 新增)
+- `scripts/tests/test-claude-issue-open-pr-filter.sh`(round 2 新增)
 - `docs/82-tasks/TASK-T20-claude-workflow-tool-permission-mismatch.md`
   (本文件,新增)
 
