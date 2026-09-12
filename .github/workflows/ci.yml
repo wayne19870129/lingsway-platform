@@ -98,6 +98,12 @@ jobs:
         run: bash scripts/tests/test-claude-ensure-pr-and-dispatch.sh
       - name: Same-Issue duplicate-PR prevention preflight filter
         run: bash scripts/tests/test-claude-issue-open-pr-filter.sh
+      # TASK-T21 (Issue #68): actually run the model/effort configuration
+      # regression tests in CI, not just report a one-off local run.
+      - name: Model/effort configuration static guard
+        run: bash scripts/tests/test-claude-workflow-model-config.sh
+      - name: Run-summary configured-vs-actual model/effort + modelUsage regression
+        run: bash scripts/tests/test-claude-run-summary.sh
 
   backend:
     runs-on: ubuntu-latest
