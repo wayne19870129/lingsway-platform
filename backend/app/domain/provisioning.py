@@ -59,6 +59,14 @@ class ProvisionOutcome:
     run_id: str
     status: ProvisionStatus
     subscription_url: str | None = None
+    #: Set only when ``status`` is ``PENDING_MANUAL`` -- the original
+    #: external-tenant-creation error text (``ExternalTenantCreationError``
+    #: or any other exception ``CREATE_TENANT`` caught), preserved here so
+    #: the caller can persist it on the run's terminal status *after* its
+    #: own business-data commit completes, without provision_prepare()
+    #: having to durably write it first (ADR-017 run-persistence-ordering
+    #: revision -- see ``ProvisioningService.mark_run_pending_manual``).
+    pending_manual_error: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,11 +214,15 @@ class ProvisioningService:
         separately so it can acquire the named lock only around the
         second one -- see ADR-017. This composition has no separate
         business-data commit step of its own (unlike the paid-purchase
-        path's ``activate_paid_purchase``), so :meth:`mark_apply_gateway_succeeded`
-        is called immediately once ``provision_apply_gateway`` returns.
+        path's ``activate_paid_purchase``/``mark_provision_pending``), so
+        :meth:`mark_apply_gateway_succeeded`/:meth:`mark_run_pending_manual`
+        are called immediately once ``provision_prepare``/
+        ``provision_apply_gateway`` return -- there is nothing else to
+        wait for in this path.
         """
         prepared = self.provision_prepare(request)
         if isinstance(prepared, ProvisionOutcome):
+            self.mark_run_pending_manual(prepared.run_id, prepared.pending_manual_error)
             return prepared
         outcome = self.provision_apply_gateway(prepared, request)
         self.mark_apply_gateway_succeeded(outcome.run_id)
@@ -264,15 +276,33 @@ class ProvisioningService:
                 request.username, request.quota_gb, request.thread_limit
             )
         except ExternalTenantCreationError as exc:
+            # Best-effort progress bookkeeping only (record_external_id/
+            # record_step already swallow their own persistence failures
+            # per ProvisionRunStore's contract) -- the terminal
+            # PENDING_MANUAL status is deliberately *not* durably written
+            # here. This is a legitimate, real business outcome (external
+            # tenant creation result is unconfirmed, needs manual review),
+            # not a failure: persisting it before the caller's own
+            # business-data commit (order_state.mark_provision_pending())
+            # would let the run's terminal status race ahead of the real
+            # business state, exactly like the SUCCEEDED case (ADR-017
+            # run-persistence-ordering revision) -- worse, if this write
+            # itself failed here, the resulting exception would propagate
+            # out of provision_prepare() and be caught by the caller's
+            # generic failure handler, mislabeling a manual-review outcome
+            # as PROVISION_FAILED. See
+            # ProvisioningService.mark_run_pending_manual().
             if exc.external_id is not None:
                 self.runs.record_external_id(run_id, "egress_tenant", exc.external_id)
             self.runs.record_step(run_id, ProvisionStep.CREATE_TENANT, "PENDING_MANUAL")
-            self.runs.mark_status(run_id, ProvisionStatus.PENDING_MANUAL, str(exc))
-            return ProvisionOutcome(run_id, ProvisionStatus.PENDING_MANUAL)
+            return ProvisionOutcome(
+                run_id, ProvisionStatus.PENDING_MANUAL, pending_manual_error=str(exc)
+            )
         except Exception as exc:
             self.runs.record_step(run_id, ProvisionStep.CREATE_TENANT, "PENDING_MANUAL")
-            self.runs.mark_status(run_id, ProvisionStatus.PENDING_MANUAL, str(exc))
-            return ProvisionOutcome(run_id, ProvisionStatus.PENDING_MANUAL)
+            return ProvisionOutcome(
+                run_id, ProvisionStatus.PENDING_MANUAL, pending_manual_error=str(exc)
+            )
         self.runs.record_external_id(run_id, "egress_tenant", tenant.tenant_id)
         self._success(run_id, ProvisionStep.CREATE_TENANT)
 
@@ -425,6 +455,25 @@ class ProvisioningService:
         except Exception:
             return
 
+    def mark_run_pending_manual(self, run_id: str, error: str | None) -> None:
+        """Persist the run's terminal PENDING_MANUAL status.
+
+        Callers **must** call this only after their own business-data
+        commit for the pending-manual outcome (``order_state.
+        mark_provision_pending()`` in the paid-purchase saga) has already
+        completed -- same ordering contract as
+        :meth:`mark_apply_gateway_succeeded`. Best-effort, for the same
+        reason: by the time a caller reaches this point, the real
+        business truth (a legitimate manual-review state, not a failure)
+        has already been durably recorded, so a failure persisting this
+        audit status must never be allowed to look like that outcome
+        needs to be undone or reinterpreted as ``FAILED``.
+        """
+        try:
+            self.runs.mark_status(run_id, ProvisionStatus.PENDING_MANUAL, error)
+        except Exception:
+            return
+
     def fail_apply_gateway_lock_acquisition(
         self, checkpoint: ProvisioningCheckpoint, request: ProvisionRequest, error: Exception
     ) -> None:
@@ -438,8 +487,17 @@ class ProvisioningService:
         performs the identical compensation (disable the accounting user
         created in phase A, raise the same alert, mark the run FAILED at
         the same step) so the two failure paths cannot semantically drift
-        apart. The caller is still responsible for rolling back the DB
-        transaction (``state.rollback_database()``) after this returns.
+        apart.
+
+        The caller **must** call ``state.rollback_database()`` itself
+        *before* calling this method, not after: this method's own
+        ``_failed()`` call durably persists the run's terminal ``FAILED``
+        status, which must never be observable ahead of the rollback for
+        the same failure (ADR-017 run-persistence-ordering revision). See
+        ``services.confirm_payment_and_provision()``'s
+        ``except GatewayRouteBindingLockError`` branch for the actual
+        call order: rollback, then this method, then the business-side
+        ``fail_paid_purchase()``.
         """
         self.accounting.disable_user(request.username)
         self._alert(

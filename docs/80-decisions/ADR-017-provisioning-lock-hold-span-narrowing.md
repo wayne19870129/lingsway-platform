@@ -64,7 +64,32 @@
   `activate_paid_purchase` 提交本身失败）补上 run 的终态 FAILED 记录。
   详见下方 "Lock acquisition ambiguous-failure connection invalidation"
   与 "Run-persistence ownership and terminal-status ordering (third
-  revision)" 两节。）
+  revision)" 两节。同日第四次修订：独立审查指出第三次修订遗漏了
+  `PENDING_MANUAL` 这第三种 terminal run status——`provision_prepare()`
+  的 `CREATE_TENANT` 两个异常分支此前仍然在返回
+  `ProvisionOutcome(PENDING_MANUAL)` 之前，先在内部
+  durable `runs.mark_status(PENDING_MANUAL, ...)`，早于
+  `services.confirm_payment_and_provision()` 随后才执行的
+  `order_state.mark_provision_pending()` 业务提交；更严重的是，若这次
+  `mark_status()` 自身提交失败，异常会从 `provision_prepare()` 逃逸，
+  被外层 Phase-A 通用异常分支捕获并整体转换成
+  `PROVISION_FAILED`——把一个"外部 tenant 创建结果不确定、需要人工
+  介入"的正常业务结果，仅因为 audit 写入失败就误判为失败订单。本轮
+  修复：`ProvisionOutcome` 新增 `pending_manual_error` 字段，
+  `CREATE_TENANT` 的两个异常分支只做 best-effort 的
+  `record_external_id`/`record_step`，不再内部
+  `mark_status(PENDING_MANUAL)`；新增
+  `ProvisioningService.mark_run_pending_manual()`（best-effort，
+  与 `mark_apply_gateway_succeeded()` 同构），由
+  `confirm_payment_and_provision()` 仅在
+  `order_state.mark_provision_pending()` 业务提交真正完成之后才调用。
+  同时修正了本节下方 "Failure acquiring the lock itself" 一段过时的
+  执行顺序描述（此前误写成先 `fail_apply_gateway_lock_acquisition()`
+  再 `state.rollback_database()`，与自第二次修订起就已正确的真实实现
+  顺序不符），以及 `fail_apply_gateway_lock_acquisition()` 文档字符串
+  中"调用方在本方法返回后才需要 rollback"这句过时描述。详见下方
+  "PENDING_MANUAL terminal persistence ordering (fourth revision)"
+  一节。）
 - 决策范围: TASK-T16 Phase 2B5. Narrows *when* the ADR-016 Decision 3
   named lock (`GET_LOCK()`/`RELEASE_LOCK()` via
   `backend/app/infra/gateway_route_lock.py`) is acquired during
@@ -247,16 +272,25 @@ provision_prepare() [steps 1-6, unlocked]
   -> fail_paid_purchase()'s own independent terminal transaction
 ```
 
-Failure acquiring the lock itself (new scenario — see below):
+Failure acquiring the lock itself (new scenario — see below). **Sequence
+corrected in the run-persistence-ordering revision**: `state.
+rollback_database()` runs *before* `fail_apply_gateway_lock_acquisition()`
+(and therefore before that method's own `_failed()` call durably persists
+the run's terminal `FAILED` status) — not after, as an earlier revision
+of this ADR incorrectly still showed here. This is the same ordering
+invariant as every other `FAILED` write in this saga (see "Run-persistence
+ownership and terminal-status ordering" below): `FAILED` must never be
+observable ahead of the rollback for the same failure.
 
 ```
 provision_prepare() [steps 1-6, unlocked; already flushed DB state and
                       created real external side effects: egress tenant,
                       forwarder config, accounting user]
   -> GET_LOCK() raises GatewayRouteBindingLockError
+  -> state.rollback_database()  (undoes phase A's flushed DB state, still
+                                  holding the lock)
   -> ProvisioningService.fail_apply_gateway_lock_acquisition():
        accounting.disable_user(); alert("GATEWAY_APPLY_FAILED"); mark run FAILED
-  -> state.rollback_database()  (undoes phase A's flushed DB state)
   -> fail_paid_purchase()'s own independent terminal transaction
 ```
 
@@ -708,6 +742,119 @@ All five tests above use the real `_SqlAlchemyProvisionRuns` +
 sharing one real MySQL/MariaDB `Session`, per the review's explicit
 requirement that the in-memory `_Runs`/`FakeRuns` test double cannot be
 used as evidence for these production transaction invariants.
+
+## PENDING_MANUAL terminal persistence ordering (fourth revision)
+
+The third revision's ownership contract explicitly named `FAILED` and
+`SUCCEEDED` as the two terminal statuses whose persistence ordering
+matters, but `ProvisionRunStore.mark_status()`'s own signature has always
+accepted a third: `PENDING_MANUAL` — set when `CREATE_TENANT` cannot
+confirm whether external tenant creation actually succeeded, and the
+order needs manual review rather than being treated as failed. This
+status was missed by the third revision's fix: `provision_prepare()`'s
+two `CREATE_TENANT` exception branches still called
+`self.runs.mark_status(run_id, ProvisionStatus.PENDING_MANUAL, str(exc))`
+directly, before returning the terminal `ProvisionOutcome` to their
+caller — durably persisting the run's `PENDING_MANUAL` status *before*
+`services.confirm_payment_and_provision()`'s own
+`order_state.mark_provision_pending()` business-data commit ever ran.
+Two concrete problems followed from this, exactly mirroring Major 2
+Case A/B from the third revision but for a third status neither of those
+fixes covered:
+
+- If `order_state.mark_provision_pending()`'s business commit
+  subsequently failed for any reason, the `Job` would already be durably
+  `PENDING_MANUAL` for a business outcome that never actually got
+  recorded — the same terminal-status race the `SUCCEEDED` fix
+  eliminated, just for a different status.
+- Worse: if `mark_status(PENDING_MANUAL, ...)`'s own commit failed
+  (a transient run-store DB issue, nothing to do with the actual
+  provisioning outcome), that exception propagated directly out of
+  `provision_prepare()` — a method whose *only* other failure mode is a
+  genuine step failure — and was caught by
+  `confirm_payment_and_provision()`'s Phase-A generic
+  `except Exception as exc:` handler, which unconditionally treats
+  anything reaching it as a saga failure: `state.rollback_database()`
+  followed by `fail_paid_purchase()` marking the order/subscription
+  `PROVISION_FAILED`. A legitimate "external tenant creation result is
+  unconfirmed, needs human review" outcome would have been silently
+  reclassified as an outright failure, purely because of an unrelated
+  audit-write hiccup — precisely the failure mode the third revision's
+  "run persistence failure must never change real saga/external-side-
+  effect semantics" principle was meant to rule out everywhere, not just
+  for `FAILED`/`SUCCEEDED`.
+
+Fix, matching the `SUCCEEDED` pattern exactly:
+
+- `ProvisionOutcome` gained a new field, `pending_manual_error: str |
+  None = None`, set only when `status` is `PENDING_MANUAL` — the minimal,
+  typed way to carry `CREATE_TENANT`'s original error text (preserving
+  `ExternalTenantCreationError`'s message, and its `external_id` via the
+  existing best-effort `record_external_id()` call, unchanged) across the
+  phase boundary without durably writing it first.
+- `provision_prepare()`'s two `CREATE_TENANT` exception branches no
+  longer call `mark_status()` at all. They still perform their existing
+  best-effort progress bookkeeping (`record_external_id()` when an
+  `external_id` is present, `record_step(..., "PENDING_MANUAL")`) and
+  return `ProvisionOutcome(run_id, ProvisionStatus.PENDING_MANUAL,
+  pending_manual_error=str(exc))`.
+- New `ProvisioningService.mark_run_pending_manual(run_id, error)` —
+  best-effort, identical shape to `mark_apply_gateway_succeeded()`: it
+  catches and discards any failure persisting the status, because by the
+  time a caller reaches it, the real business truth has already been
+  durably recorded, so an audit-write hiccup must never look like that
+  legitimate outcome needs to be undone or reinterpreted as failed.
+- `services.confirm_payment_and_provision()` calls it only immediately
+  after `with order_state.transaction(): order_state.
+  mark_provision_pending(...)` returns without raising — never before.
+  If that business commit itself fails, the exception propagates before
+  `mark_run_pending_manual()` is ever reached, so the `Job` can never end
+  up prematurely `PENDING_MANUAL` for a business state that was never
+  actually recorded.
+- The non-phase-split `ProvisioningService.provision()` composition
+  (which has no separate business-commit boundary for the pending-manual
+  case, same as for `SUCCEEDED`) calls `mark_run_pending_manual()`
+  immediately once `provision_prepare()` returns a `ProvisionOutcome`.
+
+This round also corrected two pieces of now-stale documentation the
+review flagged: the "Failure acquiring the lock itself" sequence diagram
+earlier in this ADR (previously still showing
+`fail_apply_gateway_lock_acquisition()` running *before*
+`state.rollback_database()`, which stopped being true as of the second
+revision's fix but was never corrected in the diagram itself), and
+`fail_apply_gateway_lock_acquisition()`'s own docstring (previously
+stating the caller rolls back *after* calling it, when the caller has
+rolled back *before* calling it since the second revision). Neither
+correction changes any behavior — both were prose catching up to code
+that was already correct.
+
+### Tests added for this revision
+
+All using the real `_SqlAlchemyProvisionRuns` + `_OrderProvisioningState`/
+`_SqlAlchemyOrderState` production adapters sharing one real MySQL/MariaDB
+`Session` — never the in-memory `_Runs`/`FakeRuns` test double, per the
+review's explicit requirement for these transaction-ordering acceptance
+criteria:
+
+- `test_production_pending_manual_persists_only_after_business_commit`
+  — the real `ExternalTenantCreationError` path through
+  `confirm_payment_and_provision()`: the business `mark_provision_pending()`
+  commit succeeds, the named lock is never acquired, and the `Job` ends
+  up `PENDING` with the original error text preserved.
+- `test_production_pending_manual_business_commit_failure_never_leaves_job_prematurely_pending`
+  — forces `order_state.mark_provision_pending()`'s own commit to fail:
+  the `Job` must never have been written to `PENDING` at all (it stays at
+  whatever `start()` initialized it to).
+- `test_production_pending_manual_run_persistence_failure_never_flips_business_state_to_failed`
+  — the business commit succeeds first, then the run-store's own
+  `mark_status(PENDING_MANUAL, ...)` commit is forced to fail: the
+  business state (order/subscription) must remain in its legitimate
+  pending-manual state, never `PROVISION_FAILED`.
+- `test_production_pending_manual_preserves_external_id_when_present`
+  — an `ExternalTenantCreationError` carrying an `external_id`: proves
+  the `external_id` is still recorded (best-effort, as
+  `record_external_id()` always has been) even with `mark_status()` no
+  longer called from inside `provision_prepare()`.
 
 ## 重新评估条件
 

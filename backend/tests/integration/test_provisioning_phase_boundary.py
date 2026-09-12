@@ -1131,3 +1131,259 @@ def test_production_run_store_marks_succeeded_only_after_business_commit(
 
     with Session(engine) as db, gateway_route_binding_write(db, timeout_seconds=5):
         pass
+
+
+# ---------------------------------------------------------------------------
+# Major regression (Work review round 4): PENDING_MANUAL terminal
+# persistence ordering. Production-backed: never the in-memory _Runs fake.
+# ---------------------------------------------------------------------------
+
+
+class _PartiallyCreatedEgress(MockEgressProvider):
+    """CREATE_TENANT raises ExternalTenantCreationError, optionally with an
+    external_id -- the scenario provision_prepare() cannot continue past
+    without human review."""
+
+    def __init__(self, external_id: str | None = "external-pending-1") -> None:
+        super().__init__()
+        self._external_id = external_id
+
+    def create_tenant(self, label: str, quota_gb: Decimal, thread_limit: int) -> Any:
+        raise ExternalTenantCreationError("provider response lost", self._external_id)
+
+
+def test_production_pending_manual_persists_only_after_business_commit(
+    engine: Engine,
+) -> None:
+    """Review round 4 test A, production-backed: the real
+    ExternalTenantCreationError path through confirm_payment_and_provision()
+    -- the business mark_provision_pending() commit succeeds, the named
+    lock is never acquired (PENDING_MANUAL is reached entirely within
+    provision_prepare()), and the run's terminal status ends up `PENDING`
+    only after that business commit, never before it."""
+    with Session(engine) as seed_db:
+        order, subscription, endpoint = _seed(seed_db, suffix="PENDINGORDER")
+        seed_db.commit()
+        order_id = order.id
+        subscription_id = subscription.id
+        customer_id = subscription.customer_id
+
+    with Session(engine) as db:
+        state = _OrderProvisioningState(db, order_id)
+        order_state = _SqlAlchemyOrderState(db)
+        runs = _SqlAlchemyProvisionRuns(db)
+        try:
+            outcome = confirm_payment_and_provision(
+                _command(order_id),
+                _request(order_id, customer_id, username="pending-order"),
+                object(),
+                state,
+                runs,
+                order_state,
+                "receipt-pending-order",
+                providers=_registry(egress=_PartiallyCreatedEgress()),
+            )
+        finally:
+            runs.close()
+
+    assert outcome is not None
+    assert outcome.status is ProvisionStatus.PENDING_MANUAL
+    assert outcome.pending_manual_error is not None
+    assert "provider response lost" in outcome.pending_manual_error
+
+    with Session(engine) as verify_db:
+        persisted_order = verify_db.get(Order, order_id)
+        assert persisted_order is not None
+        assert persisted_order.status is OrderStatus.PAID
+        assert persisted_order.payment_status is PaymentStatus.PAID
+
+        persisted_subscription = verify_db.get(Subscription, subscription_id)
+        assert persisted_subscription is not None
+        assert persisted_subscription.provision_error is not None
+
+        job = verify_db.scalar(select(Job).where(Job.dedupe_key == f"provision:{order_id}"))
+        assert job is not None
+        assert job.status is JobStatus.PENDING
+
+    # PENDING_MANUAL never touches the named lock -- a fresh acquisition
+    # must succeed immediately.
+    with Session(engine) as db, gateway_route_binding_write(db, timeout_seconds=5):
+        pass
+
+
+def test_production_pending_manual_business_commit_failure_never_leaves_job_prematurely_pending(
+    engine: Engine,
+) -> None:
+    """Review round 4 test B, production-backed: force
+    order_state.mark_provision_pending()'s own business commit to fail.
+    The Job must never have been written to PENDING at all -- it must
+    still be exactly whatever start() initialized it to (RUNNING)."""
+    with Session(engine) as seed_db:
+        order, subscription, endpoint = _seed(seed_db, suffix="PENDBIZFAIL")
+        seed_db.commit()
+        order_id = order.id
+        customer_id = subscription.customer_id
+
+    with Session(engine) as db:
+        state = _OrderProvisioningState(db, order_id)
+        order_state = _SqlAlchemyOrderState(db)
+        runs = _SqlAlchemyProvisionRuns(db)
+
+        real_commit = db.commit
+        calls = {"n": 0}
+
+        def flaky_commit() -> None:
+            calls["n"] += 1
+            # Commit #1 is record_payment()+prepare_purchase()'s; commit #2
+            # is mark_provision_pending()'s own -- the one this test
+            # targets.
+            if calls["n"] == 2:
+                raise RuntimeError("simulated pending commit failure")
+            real_commit()
+
+        db.commit = flaky_commit  # type: ignore[method-assign]
+
+        try:
+            with pytest.raises(RuntimeError, match="simulated pending commit failure"):
+                confirm_payment_and_provision(
+                    _command(order_id),
+                    _request(order_id, customer_id, username="pend-biz-fail"),
+                    object(),
+                    state,
+                    runs,
+                    order_state,
+                    "receipt-pend-biz-fail",
+                    providers=_registry(egress=_PartiallyCreatedEgress()),
+                )
+        finally:
+            db.commit = real_commit  # type: ignore[method-assign]
+            runs.close()
+
+    with Session(engine) as verify_db:
+        job = verify_db.scalar(select(Job).where(Job.dedupe_key == f"provision:{order_id}"))
+        assert job is not None
+        # The forbidden outcome this test guards against: a durable
+        # PENDING status for a business commit that never actually
+        # completed. mark_run_pending_manual() is only ever reached after
+        # that commit succeeds, so it must never have run here.
+        assert job.status is not JobStatus.PENDING
+        assert job.status is JobStatus.RUNNING
+
+
+def test_production_pending_manual_run_persistence_failure_never_flips_business_state_to_failed(
+    engine: Engine,
+) -> None:
+    """Review round 4 test C, production-backed: the business
+    mark_provision_pending() commit succeeds first; only *then* is the
+    run-store's own mark_status(PENDING_MANUAL, ...) commit forced to
+    fail. The business state (order/subscription) must remain in its
+    legitimate pending-manual state -- never reinterpreted as
+    PROVISION_FAILED just because an unrelated audit write failed."""
+    with Session(engine) as seed_db:
+        order, subscription, endpoint = _seed(seed_db, suffix="PENDRUNFAIL")
+        seed_db.commit()
+        order_id = order.id
+        subscription_id = subscription.id
+        customer_id = subscription.customer_id
+
+    armed = {"value": False}
+
+    class ArmingOrderState(_SqlAlchemyOrderState):
+        def mark_provision_pending(self, command: BillingCommand, error: str) -> None:
+            super().mark_provision_pending(command, error)
+            armed["value"] = True
+
+    with Session(engine) as db:
+        state = _OrderProvisioningState(db, order_id)
+        order_state = ArmingOrderState(db)
+        runs = _SqlAlchemyProvisionRuns(db)
+
+        real_runs_commit = runs.db.commit
+
+        def flaky_runs_commit() -> None:
+            if armed["value"]:
+                armed["value"] = False
+                raise RuntimeError("simulated PENDING_MANUAL persistence failure")
+            real_runs_commit()
+
+        runs.db.commit = flaky_runs_commit  # type: ignore[method-assign]
+
+        try:
+            outcome = confirm_payment_and_provision(
+                _command(order_id),
+                _request(order_id, customer_id, username="pend-run-fail"),
+                object(),
+                state,
+                runs,
+                order_state,
+                "receipt-pend-run-fail",
+                providers=_registry(egress=_PartiallyCreatedEgress()),
+            )
+        finally:
+            runs.close()
+
+    # The run-store persistence hiccup must not have surfaced as an
+    # exception (mark_run_pending_manual() is best-effort) or changed the
+    # returned outcome.
+    assert outcome is not None
+    assert outcome.status is ProvisionStatus.PENDING_MANUAL
+
+    with Session(engine) as verify_db:
+        persisted_order = verify_db.get(Order, order_id)
+        assert persisted_order is not None
+        assert persisted_order.status is OrderStatus.PAID
+        assert persisted_order.payment_status is PaymentStatus.PAID
+        assert persisted_order.status is not OrderStatus.ACTIVATED
+
+        persisted_subscription = verify_db.get(Subscription, subscription_id)
+        assert persisted_subscription is not None
+        assert persisted_subscription.status is not SubscriptionStatus.PROVISION_FAILED
+        assert persisted_subscription.provision_error is not None
+
+    with Session(engine) as db, gateway_route_binding_write(db, timeout_seconds=5):
+        pass
+
+
+def test_production_pending_manual_preserves_external_id_when_present(
+    engine: Engine,
+) -> None:
+    """Review round 4 test D, production-backed: an
+    ExternalTenantCreationError carrying an external_id must still have
+    that external_id recorded (best-effort, as record_external_id()
+    always has been) even though mark_status() is no longer called from
+    inside provision_prepare() itself."""
+    with Session(engine) as seed_db:
+        order, subscription, endpoint = _seed(seed_db, suffix="PENDEXTID")
+        seed_db.commit()
+        order_id = order.id
+        customer_id = subscription.customer_id
+
+    with Session(engine) as db:
+        state = _OrderProvisioningState(db, order_id)
+        order_state = _SqlAlchemyOrderState(db)
+        runs = _SqlAlchemyProvisionRuns(db)
+        try:
+            outcome = confirm_payment_and_provision(
+                _command(order_id),
+                _request(order_id, customer_id, username="pend-ext-id"),
+                object(),
+                state,
+                runs,
+                order_state,
+                "receipt-pend-ext-id",
+                providers=_registry(
+                    egress=_PartiallyCreatedEgress(external_id="external-pending-42")
+                ),
+            )
+        finally:
+            runs.close()
+
+    assert outcome is not None
+    assert outcome.status is ProvisionStatus.PENDING_MANUAL
+
+    with Session(engine) as verify_db:
+        job = verify_db.scalar(select(Job).where(Job.dedupe_key == f"provision:{order_id}"))
+        assert job is not None
+        payload = job.payload_json or "{}"
+        assert "external-pending-42" in payload
+        assert job.status is JobStatus.PENDING

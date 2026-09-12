@@ -151,6 +151,14 @@ def confirm_payment_and_provision(
             order_state.mark_provision_pending(
                 command, "external tenant creation requires review"
             )
+        # ADR-017 run-persistence-ordering revision: the run's terminal
+        # PENDING_MANUAL status is only ever recorded here, after the
+        # business commit above has actually completed -- never inside
+        # provision_prepare() itself. mark_run_pending_manual() is
+        # best-effort (never raises), so a Job-write hiccup at this point
+        # cannot turn this already-committed, legitimate manual-review
+        # business state into anything else.
+        provisioning.mark_run_pending_manual(prepared.run_id, prepared.pending_manual_error)
         return prepared
 
     # ADR-017/ADR-016: desired_routing_state() (invoked from
