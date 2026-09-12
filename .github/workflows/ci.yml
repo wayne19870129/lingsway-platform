@@ -61,10 +61,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Shellcheck deployment scripts
+      - name: Shellcheck deployment and workflow-helper scripts
+        # TASK-T20 (Issue #71, independent review round 1, Minor): also
+        # covers scripts/*.sh -- the claude.yml workflow-helper scripts
+        # (deterministic PR-creation/dispatch and run-summary, added by
+        # TASK-T20) and the concurrency-group validation script (TASK-T19)
+        # -- so a regression in any of them is caught automatically instead
+        # of relying only on the manual checks reported in each of those
+        # PRs.
         run: |
-          bash -n deploy/bootstrap.sh deploy/rollback.sh deploy/lib/*.sh
-          shellcheck --severity=error deploy/bootstrap.sh deploy/rollback.sh deploy/lib/*.sh
+          bash -n deploy/bootstrap.sh deploy/rollback.sh deploy/lib/*.sh scripts/*.sh
+          shellcheck --severity=error deploy/bootstrap.sh deploy/rollback.sh deploy/lib/*.sh scripts/*.sh
 
   backend:
     runs-on: ubuntu-latest

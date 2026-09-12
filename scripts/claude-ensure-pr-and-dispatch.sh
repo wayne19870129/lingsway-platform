@@ -43,6 +43,32 @@
 # of this same script already created one for an Issue-first trigger), that
 # PR is reused rather than duplicated -- "one task, one PR" (CLAUDE.md) is
 # preserved across retries and across the normal/recovery invocation paths.
+#
+# Independent review (PR #72, round 1) found two further correctness gaps,
+# both fixed below:
+#   - PRE_HEAD_SHA (optional): the PR-rework branch's own head SHA captured
+#     BEFORE Claude ran (see claude.yml's `dedup` job). A PR-rework branch is
+#     *always* ahead of base (that's what makes it an open PR), so the old
+#     "commits ahead of base" check alone could not tell "Claude pushed a
+#     real fix this run" apart from "Claude's step failed before pushing
+#     anything, and this is just the PR's pre-existing history." If the
+#     branch's current head still equals PRE_HEAD_SHA, this run added
+#     nothing new, and the script exits without touching the PR or
+#     dispatching checks -- and, critically, without setting `pr_number`, so
+#     claude.yml's completion marker is correctly left unset for a genuine
+#     retry, instead of a stale PR number being taken as proof this run
+#     completed anything.
+#   - ISSUE_NUMBER (optional, Issue-first triggers only): before creating a
+#     brand-new PR, refuse if an open PR already exists for the same Issue
+#     on a *different* branch. The pinned claude-code-action creates a new,
+#     uniquely-timestamped branch on every Issue-first trigger and never
+#     searches for or reuses an earlier one (see the TASK doc), so without
+#     this guard a second, differently-worded `@claude` comment on the same
+#     still-open Issue could open a second PR for what CLAUDE.md's "one
+#     task, one PR" rule treats as the same task. Detected by the default
+#     tag-mode branch naming template (`{{prefix}}issue-{{number}}-...` with
+#     this workflow's unmodified default `branch_prefix: claude/`) --
+#     documented assumption, not a hardcoded requirement of the Action.
 set -euo pipefail
 
 : "${REPO:?REPO is required (owner/repo)}"
@@ -62,9 +88,24 @@ if [ "${commit_count}" -eq 0 ]; then
   exit 0
 fi
 
+current_head=$(git rev-parse "origin/${BRANCH}")
+if [ -n "${PRE_HEAD_SHA:-}" ] && [ "${current_head}" = "${PRE_HEAD_SHA}" ]; then
+  echo "Branch '${BRANCH}' head (${current_head}) is unchanged from before this run -- this run pushed nothing new, nothing to do."
+  exit 0
+fi
+
 pr_number=$(gh pr list --repo "${REPO}" --head "${BRANCH}" --state all --json number --jq '.[0].number // empty')
 
 if [ -z "${pr_number}" ]; then
+  if [ -n "${ISSUE_NUMBER:-}" ]; then
+    existing_for_issue=$(gh pr list --repo "${REPO}" --state open --json number,headRefName \
+      | jq -r --arg prefix "claude/issue-${ISSUE_NUMBER}-" \
+          '[.[] | select(.headRefName | startswith($prefix))] | (.[0].number // empty)')
+    if [ -n "${existing_for_issue}" ]; then
+      echo "Refusing to open a second PR for Issue #${ISSUE_NUMBER}: PR #${existing_for_issue} is already open for it on a different branch. Push follow-up work to PR #${existing_for_issue} instead (one task, one PR)." >&2
+      exit 1
+    fi
+  fi
   echo "No existing PR for branch '${BRANCH}' -- creating one from its latest commit."
   # The latest commit's subject/body become the PR title/body: Claude is
   # instructed (see claude.yml's system prompt) to make its final commit

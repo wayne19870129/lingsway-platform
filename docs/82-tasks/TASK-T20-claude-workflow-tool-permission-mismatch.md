@@ -339,10 +339,100 @@ Issue-first 触发来验证——`unverified until post-merge live test`:
   run-claude-sdk.ts` 里手写的 `sanitizeSdkOutput()` 函数对这些字段名
   的引用)。
 
+## Round 1 独立审查(PR #72,head `e5358912ea241b4f96a59e098869417f49471070`)
+
+**Critical 1(post-Claude 确定性 helper 脚本在攻击者可控的 PR checkout
+里执行)**:独立验证后确认 **VALID**——`issue_comment`/
+`pull_request_review_comment` 事件下,`actions/checkout`(不指定
+`ref:`)检出的是仓库默认分支,不是 PR 分支;但 pinned action 的
+`setupBranch()` 对 open PR 触发会自己 `git fetch`+`checkout` 到那个
+PR 自己的分支上,覆盖掉 job 工作目录里的内容。对于这个公开仓库上的
+一个 fork/外部 PR,如果它在自己的分支里改过
+`scripts/claude-ensure-pr-and-dispatch.sh` 或
+`scripts/claude-run-summary.sh`,一旦 owner 在这个 PR 上评论
+`@claude`(合法触发),后续 `ensure-pr`/run-summary 两个 step 会直接
+执行**攻击者修改过的版本**,而且带着这个 job 完整的
+`contents/pull-requests/issues/actions: write` token 和原始
+execution_file——正是 pinned action 自己会对 `.claude/`/`.mcp.json`
+做"从 base 分支还原"这个动作所防的同一类攻击面,只是我们自己新增的
+两个脚本没有同样处理。
+
+修复:新增 `snapshot-scripts` step,在 `claude-code-action` 运行**之前**
+(此时 checkout 仍然是可信的默认分支)把这两个脚本复制到
+`$RUNNER_TEMP`(在 `$GITHUB_WORKSPACE` 之外,不会被后续的 PR 分支
+checkout 覆盖),后续的 `ensure-pr`/run-summary 两个 step 都改成执行
+这份快照,而不是 `scripts/` 目录里当前工作树的内容。`claude-recovery`
+job 本身从不调用 `claude-code-action`,checkout 全程停留在可信内容
+上,不需要同样的快照。
+
+**Major 1(PR-rework 场景下,即使 Claude 这一轮什么都没推,也可能被
+误判为"已完成")**:独立验证后确认 **VALID**——脚本原来只检查"这个
+PR 分支是否比 base 多至少一个 commit",但对一个已存在的 open PR 来说
+这永远为真(不然它一开始就不会是一个 PR),所以这个检查无法区分
+"Claude 这一轮真的推了新东西"和"Claude 这一轮在推之前就失败了,分支
+还是之前的老样子"。后一种情况下 `ensure-pr` 仍然会找到已存在的 PR、
+输出非空的 `pr_number`,而 completion marker 的判定条件把
+"`pr_number` 非空"当成"这一轮真的完成了"的证据——这正是仓库之前修过
+的同一类"假成功 marker"问题。
+
+修复:`dedup` job 新增 `pre_head_sha` 输出(PR-rework 场景下就是它
+已经在算的 `state`,即 Claude 运行之前这个 PR 分支的真实 head
+SHA;Issue-first 场景下为空,因为分支还不存在)。`ensure-pr` 脚本
+新增 `PRE_HEAD_SHA` 输入,在确认分支比 base 多 commit 之后,额外比较
+分支的**当前** head 和 `PRE_HEAD_SHA`:如果两者相同,说明这一轮什么
+新东西都没推(不只是分支比 base 多 commit),直接退出、不碰 PR、不
+dispatch、也不输出 `pr_number`——completion marker 因此正确地保持
+未设置,允许后续真正的重试。
+
+**Major 2(新 system prompt 里"同一个 Issue 上不同指令各自拥有分支/
+PR 是本仓库约定"这句话,和 `CLAUDE.md` 现有的"一个任务一个 PR,不得
+为同一任务开第二个 PR"直接矛盾)**:独立验证后确认 **VALID**——这句
+话是本任务自己在 prompt 里断言的一个解释,并没有真的去核实或对齐
+`CLAUDE.md` 现有文本,而 pinned action 对 Issue-first 触发确实总是
+建一个全新、带时间戳的分支、从不搜索或复用同一 Issue 更早的分支/
+PR——如果同一个还开着的 Issue 上出现第二条措辞不同的 `@claude`
+指令,确实可能真的开出第二个 PR,违反"一个任务一个 PR"。
+
+修复:删除 system prompt 里那句自行断言的"约定",改成准确描述
+Claude 没有工具去检查/复用旧分支这件事本身,并说明"是否已经有开着的
+PR"由后续确定性 step 处理,不需要 Claude 自己操心。`ensure-pr` 脚本
+新增 `ISSUE_NUMBER` 输入(`dedup` job 新增的第二个输出,Issue-first
+场景下等于目标 Issue 编号,PR-rework 场景下为空):在准备为一个
+Issue-first 分支创建**全新** PR 之前,先按 tag mode 默认分支命名模板
+(`claude/issue-<N>-...`,本仓库未覆盖 `branch_prefix`/
+`branch_name_template`,因此默认值可信)搜索是否已经有一个 open PR
+挂在**另一个**分支上、属于同一个 Issue——如果有,直接以非零状态退出、
+拒绝创建第二个 PR,并在日志里指出应该去哪个已存在的 PR 上继续。
+
+**Minor(新脚本没有被现有 CI 的 shellcheck job 自动检查)**:审查明确
+标注"不阻塞本次合并",但既然是对这次高风险 workflow 改动的合理补强
+建议,直接采纳:把 `.github/workflows/ci.yml` 的 `shellcheck` job 检查
+范围从只有 `deploy/*.sh` 扩展到同时包含 `scripts/*.sh`(涵盖本任务的
+两个新脚本,以及 TASK-T19 已有的 `validate-claude-workflow-concurrency.sh`)。
+
+**验证**:`python3 -c "yaml.safe_load(...)"` 对 `claude.yml`/`ci.yml`
+均通过;`bash -n` + `shellcheck --severity=error` 对
+`deploy/*.sh`/`scripts/*.sh` 全部无 error。针对三个修复分别新增了
+本地场景测试(用临时 bare git 仓库 + 模拟真实 `--jq` 语义的 `gh`
+stub):(a) PR-rework 分支 head 与 `PRE_HEAD_SHA` 相同 → 确认脚本
+不调用任何 `gh` 命令、安全退出;(b) 同一分支上真的有新 commit → 确认
+仍然正常复用已有 PR 并 dispatch 三个 workflow;(c) Issue-first 新分支,
+但另一个分支上已经有该 Issue 的 open PR → 确认脚本以非零状态拒绝创建
+第二个 PR;另外重新跑了一遍原有的"全新创建 PR"场景,确认没有回归。
+
+**仍需 post-merge 验证**:新增的三条(Critical 1 的快照路径、Major 1
+的 `PRE_HEAD_SHA` 比较、Major 2 的同 Issue 查重)都只在本地用模拟数据
+验证过,真实 pinned action 产生的 `branch_name`/`headRefOid`/分支命名
+格式是否与本任务的假设完全一致,仍然是
+`unverified until post-merge live test` 的一部分。
+
 ## 允许修改的文件
 
 - `.github/workflows/claude.yml`
-- `scripts/claude-ensure-pr-and-dispatch.sh`(新增)
+- `.github/workflows/ci.yml`(round 1 review 新增:shellcheck 覆盖
+  `scripts/*.sh`)
+- `scripts/claude-ensure-pr-and-dispatch.sh`(新增,round 1 review 后
+  修改)
 - `scripts/claude-run-summary.sh`(新增)
 - `docs/82-tasks/TASK-T20-claude-workflow-tool-permission-mismatch.md`
   (本文件,新增)
