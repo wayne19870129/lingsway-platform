@@ -12,6 +12,7 @@ import yaml
 from backend.app.domain.capacity import CapacityExceededError
 from backend.app.domain.provisioning import (
     ExternalTenantCreationError,
+    PendingManualReason,
     ProvisioningService,
     ProvisionOutcome,
     ProvisionRequest,
@@ -26,6 +27,9 @@ from backend.app.domain.subscription_render import (
 )
 from backend.app.providers.accounting.mock import MockAccountingProvider
 from backend.app.providers.base import (
+    AccountingCreateEffect,
+    AccountingCreateUserError,
+    AccountUserDTO,
     CredentialDTO,
     DesiredForwarderState,
     DesiredRoutingState,
@@ -210,6 +214,90 @@ def test_step_6_failure_disables_user_and_never_deletes() -> None:
         service(accounting=accounting).provision(request())
 
     assert accounting.disabled_users == {"customer-1"}
+    assert accounting.delete_calls == []
+
+
+@dataclass(slots=True)
+class _NoSideEffectAccounting(TrackingAccounting):
+    """ADR-018 round 2 (Major 1): simulates a pre-dispatch
+    request-construction failure (e.g. a naive/pre-epoch expire_at) --
+    the kind of failure that never reaches the network, and must
+    therefore be classified NO_SIDE_EFFECT, never treated as CREATED."""
+
+    def create_user(
+        self, username: str, quota_bytes: int, expire_at: datetime | None
+    ) -> AccountUserDTO:
+        raise AccountingCreateUserError(
+            "simulated pre-dispatch validation failure",
+            effect=AccountingCreateEffect.NO_SIDE_EFFECT,
+        )
+
+
+def test_step_6_no_side_effect_never_disables() -> None:
+    accounting = _NoSideEffectAccounting()
+    state = FakeState()
+    runs = FakeRuns()
+
+    with pytest.raises(AccountingCreateUserError, match="pre-dispatch"):
+        service(accounting=accounting, state=state, runs=runs).provision(request())
+
+    assert accounting.disabled_users == set()
+    assert accounting.delete_calls == []
+    assert state.database_rolled_back is True
+    assert runs.status is ProvisionStatus.FAILED
+
+
+@dataclass(slots=True)
+class _AmbiguousAccounting(TrackingAccounting):
+    def create_user(
+        self, username: str, quota_bytes: int, expire_at: datetime | None
+    ) -> AccountUserDTO:
+        raise AccountingCreateUserError(
+            "simulated transport failure after dispatch",
+            effect=AccountingCreateEffect.AMBIGUOUS,
+        )
+
+
+def test_step_6_ambiguous_never_disables_and_uses_correct_pending_reason() -> None:
+    accounting = _AmbiguousAccounting()
+    state = FakeState()
+    runs = FakeRuns()
+
+    outcome = service(accounting=accounting, state=state, runs=runs).provision(request())
+
+    assert outcome.status is ProvisionStatus.PENDING_MANUAL
+    assert outcome.reason is PendingManualReason.ACCOUNTING_CREATE_AMBIGUOUS
+    assert accounting.disabled_users == set()
+    assert accounting.delete_calls == []
+    assert "lock:acquire" not in state.events
+
+
+@dataclass(slots=True)
+class _CreatedDisableFailsAccounting(TrackingAccounting):
+    def create_user(
+        self, username: str, quota_bytes: int, expire_at: datetime | None
+    ) -> AccountUserDTO:
+        raise AccountingCreateUserError(
+            "simulated postcondition failure",
+            effect=AccountingCreateEffect.CREATED,
+        )
+
+    def disable_user(self, username: str) -> None:
+        raise RuntimeError("simulated disable failure")
+
+
+def test_step_6_created_disable_failure_uses_correct_pending_reason() -> None:
+    accounting = _CreatedDisableFailsAccounting()
+    state = FakeState()
+    runs = FakeRuns()
+
+    outcome = service(accounting=accounting, state=state, runs=runs).provision(request())
+
+    assert outcome.status is ProvisionStatus.PENDING_MANUAL
+    assert outcome.reason is PendingManualReason.ACCOUNTING_COMPENSATION_FAILED
+    assert outcome.pending_manual_error is not None
+    assert "AccountingCreateUserError" in outcome.pending_manual_error
+    assert "RuntimeError" in outcome.pending_manual_error
     assert accounting.delete_calls == []
 
 

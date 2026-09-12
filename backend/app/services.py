@@ -22,6 +22,7 @@ from backend.app.domain.ordering import (
     fail_paid_purchase,
 )
 from backend.app.domain.provisioning import (
+    PENDING_MANUAL_BUSINESS_MESSAGES,
     ProvisioningService,
     ProvisioningState,
     ProvisionOutcome,
@@ -147,10 +148,20 @@ def confirm_payment_and_provision(
     if isinstance(prepared, ProvisionOutcome):
         # PENDING_MANUAL: terminal, and reached without ever touching the
         # named lock -- do not proceed to phase B.
+        # ADR-018 Major 2: the business-facing Subscription.provision_error
+        # message is looked up from prepared.reason's fixed, safe mapping
+        # -- never hardcoded to "external tenant creation" (that was only
+        # ever true for the original CREATE_TENANT PENDING_MANUAL source;
+        # ADR-018 added two more: an ambiguous accounting create, and a
+        # failed disable compensation) and never derived from
+        # prepared.pending_manual_error's free-text provider diagnostic.
+        business_message = (
+            PENDING_MANUAL_BUSINESS_MESSAGES[prepared.reason]
+            if prepared.reason is not None
+            else "provisioning requires manual review"
+        )
         with order_state.transaction():
-            order_state.mark_provision_pending(
-                command, "external tenant creation requires review"
-            )
+            order_state.mark_provision_pending(command, business_message)
         # ADR-017 run-persistence-ordering revision: the run's terminal
         # PENDING_MANUAL status is only ever recorded here, after the
         # business commit above has actually completed -- never inside

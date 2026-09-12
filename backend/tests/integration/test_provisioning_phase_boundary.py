@@ -23,6 +23,7 @@ from decimal import Decimal
 from typing import Any
 from unittest import mock
 
+import httpx
 import pytest
 from sqlalchemy import func, select
 from sqlalchemy.engine import Engine
@@ -62,8 +63,14 @@ from backend.app.models import (
     Subscription,
 )
 from backend.app.models.subscription import SubscriptionStatus
+from backend.app.providers.accounting.marzban import MarzbanAccountingProvider
 from backend.app.providers.accounting.mock import MockAccountingProvider
-from backend.app.providers.base import AccountUserDTO, DesiredRoutingState
+from backend.app.providers.base import (
+    AccountingCreateEffect,
+    AccountingCreateUserError,
+    AccountUserDTO,
+    DesiredRoutingState,
+)
 from backend.app.providers.captcha.noop import NoopCaptchaProvider
 from backend.app.providers.egress.mock import MockEgressProvider
 from backend.app.providers.email.noop import NoopEmailProvider
@@ -1689,5 +1696,524 @@ def test_production_username_mismatch_fails_closed_before_apply_gateway(
         assert job is not None
         assert job.status is JobStatus.FAILED
 
+    with Session(engine) as db, gateway_route_binding_write(db, timeout_seconds=5):
+        pass
+
+
+# ---------------------------------------------------------------------------
+# ADR-018 (independent review of TASK-T16 Phase 2B7, PR #64 Major 1):
+# CREATE_ACCOUNTING_USER compensation ownership. These four tests drive the
+# *real* MarzbanAccountingProvider (httpx.MockTransport, no real network)
+# through the full production call path (confirm_payment_and_provision ->
+# provision_prepare -> _SqlAlchemyProvisionRuns/_OrderProvisioningState
+# against real MySQL) -- not a hand-rolled fake -- so a regression in the
+# real Marzban-adapter-to-domain wiring fails these tests too.
+# ---------------------------------------------------------------------------
+
+_MARZBAN_BASE_URL = "https://marzban.internal.invalid"
+_MARZBAN_INBOUNDS_JSON = '{"vless": ["VLESS TCP REALITY"]}'
+
+
+def _marzban_provider(handler: Any) -> MarzbanAccountingProvider:
+    return MarzbanAccountingProvider(
+        base_url=_MARZBAN_BASE_URL,
+        admin_username="admin",
+        admin_password="s3cret-admin-password",
+        default_protocol="vless",
+        default_inbounds_json=_MARZBAN_INBOUNDS_JSON,
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+
+def test_production_409_create_conflict_never_disables_an_unrelated_user(
+    engine: Engine,
+) -> None:
+    """ADR-018 scenario A: a 409 (exact-source proven pre-commit
+    rejection) must never trigger disable_user() -- request.username may
+    be a pre-existing, unrelated Marzban account. Must roll back phase-A
+    DB state, mark the run FAILED, never reach APPLY_GATEWAY, acquire
+    zero named locks, and leave zero GatewayRouteBinding rows."""
+    with Session(engine) as seed_db:
+        order, subscription, endpoint = _seed(seed_db, suffix="ADR018A")
+        seed_db.commit()
+        order_id = order.id
+        subscription_id = subscription.id
+        endpoint_id = endpoint.id
+        customer_id = subscription.customer_id
+
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/api/admin/token":
+            return httpx.Response(200, json={"access_token": "tok-1", "token_type": "bearer"})
+        return httpx.Response(409, json={"detail": "User already exists"})
+
+    accounting = _marzban_provider(handler)
+    with Session(engine) as db:
+        state = _OrderProvisioningState(db, order_id)
+        order_state = _SqlAlchemyOrderState(db)
+        runs = _SqlAlchemyProvisionRuns(db)
+        try:
+            with pytest.raises(AccountingCreateUserError):
+                confirm_payment_and_provision(
+                    _command(order_id),
+                    _request(order_id, customer_id, username="adr018a-user"),
+                    object(),
+                    state,
+                    runs,
+                    order_state,
+                    "receipt-adr018a",
+                    providers=_registry(accounting=accounting),
+                )
+        finally:
+            runs.close()
+            accounting.close()
+
+    # No PUT (disable) and no DELETE were ever issued for this username.
+    assert all(r.method != "DELETE" for r in requests)
+    assert all(
+        not (r.method == "PUT" and r.url.path == "/api/user/adr018a-user") for r in requests
+    )
+
+    with Session(engine) as verify_db:
+        rolled_back_endpoint = verify_db.get(EgressEndpoint, endpoint_id)
+        assert rolled_back_endpoint is not None
+        assert rolled_back_endpoint.current_count == 0
+
+        gateway_binding_count = verify_db.scalar(
+            select(func.count())
+            .select_from(GatewayRouteBinding)
+            .where(GatewayRouteBinding.subscription_id == subscription_id)
+        )
+        assert gateway_binding_count == 0
+
+        persisted_subscription = verify_db.get(Subscription, subscription_id)
+        assert persisted_subscription is not None
+        assert persisted_subscription.status is SubscriptionStatus.PROVISION_FAILED
+
+        job = verify_db.scalar(select(Job).where(Job.dedupe_key == f"provision:{order_id}"))
+        assert job is not None
+        assert job.status is JobStatus.FAILED
+
+    # Named lock was never acquired -- a fresh acquisition succeeds immediately.
+    with Session(engine) as db, gateway_route_binding_write(db, timeout_seconds=5):
+        pass
+
+
+def test_production_422_validation_rejection_never_disables_or_pends_manual(
+    engine: Engine,
+) -> None:
+    """ADR-018 round 4: a 422 (FastAPI's own request-validation response
+    for add_user()'s plain Pydantic-model `new_user: UserCreate` body
+    parameter -- raised before the route function body, and therefore
+    before crud.create_user()'s db.commit(), ever runs) is exact-source
+    proven NO_SIDE_EFFECT, exactly like 400/409. Must never be
+    (mis)classified AMBIGUOUS -- which would wrongly route a definite
+    pre-commit rejection into PENDING_MANUAL and keep phase-A's DB
+    progress instead of rolling it back. Must roll back phase-A DB state,
+    mark the run FAILED, never reach APPLY_GATEWAY, acquire zero named
+    locks, and leave zero GatewayRouteBinding rows."""
+    with Session(engine) as seed_db:
+        order, subscription, endpoint = _seed(seed_db, suffix="ADR018F")
+        seed_db.commit()
+        order_id = order.id
+        subscription_id = subscription.id
+        endpoint_id = endpoint.id
+        customer_id = subscription.customer_id
+
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/api/admin/token":
+            return httpx.Response(200, json={"access_token": "tok-1", "token_type": "bearer"})
+        return httpx.Response(
+            422, json={"detail": [{"loc": ["body", "username"], "msg": "field required"}]}
+        )
+
+    accounting = _marzban_provider(handler)
+    with Session(engine) as db:
+        state = _OrderProvisioningState(db, order_id)
+        order_state = _SqlAlchemyOrderState(db)
+        runs = _SqlAlchemyProvisionRuns(db)
+        try:
+            with pytest.raises(AccountingCreateUserError) as excinfo:
+                confirm_payment_and_provision(
+                    _command(order_id),
+                    _request(order_id, customer_id, username="adr018f-user"),
+                    object(),
+                    state,
+                    runs,
+                    order_state,
+                    "receipt-adr018f",
+                    providers=_registry(accounting=accounting),
+                )
+        finally:
+            runs.close()
+            accounting.close()
+
+    assert excinfo.value.effect is AccountingCreateEffect.NO_SIDE_EFFECT
+
+    post_attempts = [r for r in requests if r.method == "POST" and r.url.path == "/api/user"]
+    assert len(post_attempts) == 1
+    assert all(r.method != "PUT" for r in requests)
+    assert all(r.method != "DELETE" for r in requests)
+    assert all(r.method != "GET" for r in requests)
+
+    with Session(engine) as verify_db:
+        rolled_back_endpoint = verify_db.get(EgressEndpoint, endpoint_id)
+        assert rolled_back_endpoint is not None
+        assert rolled_back_endpoint.current_count == 0
+
+        gateway_binding_count = verify_db.scalar(
+            select(func.count())
+            .select_from(GatewayRouteBinding)
+            .where(GatewayRouteBinding.subscription_id == subscription_id)
+        )
+        assert gateway_binding_count == 0
+
+        persisted_subscription = verify_db.get(Subscription, subscription_id)
+        assert persisted_subscription is not None
+        assert persisted_subscription.status is SubscriptionStatus.PROVISION_FAILED
+
+        job = verify_db.scalar(select(Job).where(Job.dedupe_key == f"provision:{order_id}"))
+        assert job is not None
+        assert job.status is JobStatus.FAILED
+
+    # Named lock was never acquired -- a fresh acquisition succeeds immediately.
+    with Session(engine) as db, gateway_route_binding_write(db, timeout_seconds=5):
+        pass
+
+
+def test_production_ambiguous_transport_failure_requires_manual_review(
+    engine: Engine,
+) -> None:
+    """ADR-018 scenario B: a transport failure after the create POST was
+    dispatched must never be blindly retried or blindly compensated --
+    the request may or may not have created a real Marzban user. Must
+    reach PENDING_MANUAL (never a plain FAILED, never a plain success),
+    never touch the named lock, and leave zero GatewayRouteBinding rows."""
+    with Session(engine) as seed_db:
+        order, subscription, endpoint = _seed(seed_db, suffix="ADR018B")
+        seed_db.commit()
+        order_id = order.id
+        subscription_id = subscription.id
+        customer_id = subscription.customer_id
+
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/api/admin/token":
+            return httpx.Response(200, json={"access_token": "tok-1", "token_type": "bearer"})
+        raise httpx.ConnectTimeout("simulated ambiguous transport failure", request=request)
+
+    accounting = _marzban_provider(handler)
+    with Session(engine) as db:
+        state = _OrderProvisioningState(db, order_id)
+        order_state = _SqlAlchemyOrderState(db)
+        runs = _SqlAlchemyProvisionRuns(db)
+        try:
+            outcome = confirm_payment_and_provision(
+                _command(order_id),
+                _request(order_id, customer_id, username="adr018b-user"),
+                object(),
+                state,
+                runs,
+                order_state,
+                "receipt-adr018b",
+                providers=_registry(accounting=accounting),
+            )
+        finally:
+            runs.close()
+            accounting.close()
+
+    assert outcome is not None
+    assert outcome.status is ProvisionStatus.PENDING_MANUAL
+    assert outcome.pending_manual_error is not None
+    assert "ambiguous" in outcome.pending_manual_error
+
+    post_attempts = [r for r in requests if r.method == "POST" and r.url.path == "/api/user"]
+    assert len(post_attempts) == 1
+    assert all(r.method != "PUT" for r in requests)
+    assert all(r.method != "DELETE" for r in requests)
+
+    with Session(engine) as verify_db:
+        gateway_binding_count = verify_db.scalar(
+            select(func.count())
+            .select_from(GatewayRouteBinding)
+            .where(GatewayRouteBinding.subscription_id == subscription_id)
+        )
+        assert gateway_binding_count == 0
+
+        job = verify_db.scalar(select(Job).where(Job.dedupe_key == f"provision:{order_id}"))
+        assert job is not None
+        assert job.status is JobStatus.PENDING
+
+        # ADR-018 Major 2 (round 2): the business-facing reason must
+        # correctly describe an ambiguous accounting create -- never the
+        # CREATE_TENANT-era hardcoded "external tenant creation" message,
+        # which would misdirect manual review to the wrong subsystem.
+        persisted_subscription = verify_db.get(Subscription, subscription_id)
+        assert persisted_subscription is not None
+        assert persisted_subscription.provision_error is not None
+        assert "external tenant creation" not in persisted_subscription.provision_error
+        assert "accounting" in persisted_subscription.provision_error
+        assert "ambiguous" in persisted_subscription.provision_error
+
+    with Session(engine) as db, gateway_route_binding_write(db, timeout_seconds=5):
+        pass
+
+
+def test_production_created_user_with_malformed_response_is_disabled_and_failed(
+    engine: Engine,
+) -> None:
+    """ADR-018 scenario C: HTTP 200 proves a user was created; a
+    postcondition failure (missing routing_principal) in that same
+    response is CREATED -- must attempt exactly one disable PUT (never
+    DELETE), and once that disable succeeds, roll back and reach FAILED,
+    never APPLY_GATEWAY."""
+    with Session(engine) as seed_db:
+        order, subscription, endpoint = _seed(seed_db, suffix="ADR018C")
+        seed_db.commit()
+        order_id = order.id
+        subscription_id = subscription.id
+        endpoint_id = endpoint.id
+        customer_id = subscription.customer_id
+
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/api/admin/token":
+            return httpx.Response(200, json={"access_token": "tok-1", "token_type": "bearer"})
+        if request.method == "POST" and request.url.path == "/api/user":
+            return httpx.Response(
+                200,
+                json={
+                    "username": "adr018c-user",
+                    "status": "active",
+                    "data_limit": 0,
+                    "expire": 0,
+                    # routing_principal deliberately omitted.
+                },
+            )
+        if request.method == "PUT":
+            return httpx.Response(200, json={"status": "disabled"})
+        raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
+
+    accounting = _marzban_provider(handler)
+    with Session(engine) as db:
+        state = _OrderProvisioningState(db, order_id)
+        order_state = _SqlAlchemyOrderState(db)
+        runs = _SqlAlchemyProvisionRuns(db)
+        try:
+            with pytest.raises(AccountingCreateUserError, match="routing_principal"):
+                confirm_payment_and_provision(
+                    _command(order_id),
+                    _request(order_id, customer_id, username="adr018c-user"),
+                    object(),
+                    state,
+                    runs,
+                    order_state,
+                    "receipt-adr018c",
+                    providers=_registry(accounting=accounting),
+                )
+        finally:
+            runs.close()
+            accounting.close()
+
+    disable_puts = [
+        r for r in requests if r.method == "PUT" and r.url.path == "/api/user/adr018c-user"
+    ]
+    assert len(disable_puts) == 1
+    assert all(r.method != "DELETE" for r in requests)
+
+    with Session(engine) as verify_db:
+        rolled_back_endpoint = verify_db.get(EgressEndpoint, endpoint_id)
+        assert rolled_back_endpoint is not None
+        assert rolled_back_endpoint.current_count == 0
+
+        gateway_binding_count = verify_db.scalar(
+            select(func.count())
+            .select_from(GatewayRouteBinding)
+            .where(GatewayRouteBinding.subscription_id == subscription_id)
+        )
+        assert gateway_binding_count == 0
+
+        job = verify_db.scalar(select(Job).where(Job.dedupe_key == f"provision:{order_id}"))
+        assert job is not None
+        assert job.status is JobStatus.FAILED
+
+    with Session(engine) as db, gateway_route_binding_write(db, timeout_seconds=5):
+        pass
+
+
+def test_production_created_user_disable_failure_requires_manual_review(
+    engine: Engine,
+) -> None:
+    """ADR-018 scenario D: HTTP 200 proves a user was created; the
+    postcondition then fails, and disabling that definitely-owned user
+    also fails. This must never be reported as a plain, fully-compensated
+    FAILED (the external account may still be enabled) and must never
+    continue into APPLY_GATEWAY -- it must reach PENDING_MANUAL."""
+    with Session(engine) as seed_db:
+        order, subscription, endpoint = _seed(seed_db, suffix="ADR018D")
+        seed_db.commit()
+        order_id = order.id
+        subscription_id = subscription.id
+        customer_id = subscription.customer_id
+
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/api/admin/token":
+            return httpx.Response(200, json={"access_token": "tok-1", "token_type": "bearer"})
+        if request.method == "POST" and request.url.path == "/api/user":
+            return httpx.Response(
+                200,
+                json={
+                    "username": "adr018d-user",
+                    "status": "active",
+                    "data_limit": 0,
+                    "expire": 0,
+                    # routing_principal deliberately omitted.
+                },
+            )
+        if request.method == "PUT":
+            return httpx.Response(500, text="internal error")
+        raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
+
+    accounting = _marzban_provider(handler)
+    with Session(engine) as db:
+        state = _OrderProvisioningState(db, order_id)
+        order_state = _SqlAlchemyOrderState(db)
+        runs = _SqlAlchemyProvisionRuns(db)
+        try:
+            outcome = confirm_payment_and_provision(
+                _command(order_id),
+                _request(order_id, customer_id, username="adr018d-user"),
+                object(),
+                state,
+                runs,
+                order_state,
+                "receipt-adr018d",
+                providers=_registry(accounting=accounting),
+            )
+        finally:
+            runs.close()
+            accounting.close()
+
+    assert outcome is not None
+    assert outcome.status is ProvisionStatus.PENDING_MANUAL
+    assert outcome.pending_manual_error is not None
+    assert "disabling" in outcome.pending_manual_error
+
+    disable_attempts = [
+        r for r in requests if r.method == "PUT" and r.url.path == "/api/user/adr018d-user"
+    ]
+    assert len(disable_attempts) == 1
+
+    with Session(engine) as verify_db:
+        gateway_binding_count = verify_db.scalar(
+            select(func.count())
+            .select_from(GatewayRouteBinding)
+            .where(GatewayRouteBinding.subscription_id == subscription_id)
+        )
+        assert gateway_binding_count == 0
+
+        job = verify_db.scalar(select(Job).where(Job.dedupe_key == f"provision:{order_id}"))
+        assert job is not None
+        assert job.status is JobStatus.PENDING
+
+        # ADR-018 Major 2 (round 2): the business-facing reason must
+        # correctly describe a failed compensation (disable) attempt --
+        # never the CREATE_TENANT-era hardcoded "external tenant
+        # creation" message, and never a raw provider exception message.
+        persisted_subscription = verify_db.get(Subscription, subscription_id)
+        assert persisted_subscription is not None
+        assert persisted_subscription.provision_error is not None
+        assert "external tenant creation" not in persisted_subscription.provision_error
+        assert "compensation" in persisted_subscription.provision_error
+
+    with Session(engine) as db, gateway_route_binding_write(db, timeout_seconds=5):
+        pass
+
+
+def test_production_pre_epoch_expire_never_dispatches_or_disables(engine: Engine) -> None:
+    """ADR-018 round 2 (Major 1): a pre-dispatch request-construction
+    failure (a timezone-aware expire_at whose epoch is <= 0) happens
+    entirely inside create_user() before any HTTP request is ever sent --
+    it must classify NO_SIDE_EFFECT and never disable request.username.
+    The handler asserts on any request at all to prove zero dispatch."""
+    with Session(engine) as seed_db:
+        order, subscription, endpoint = _seed(seed_db, suffix="ADR018E")
+        seed_db.commit()
+        order_id = order.id
+        subscription_id = subscription.id
+        endpoint_id = endpoint.id
+        customer_id = subscription.customer_id
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(
+            f"unexpected request: {request.method} {request.url.path} -- "
+            "a pre-dispatch validation failure must never reach the network"
+        )
+
+    accounting = _marzban_provider(handler)
+    pre_epoch_request = ProvisionRequest(
+        order_id=str(order_id),
+        customer_id=str(customer_id),
+        username="adr018e-user",
+        quota_gb=Decimal("10"),
+        thread_limit=10,
+        expire_at=datetime(1969, 1, 1, tzinfo=UTC),
+        subscription_domain="subs.example.invalid",
+    )
+    with Session(engine) as db:
+        state = _OrderProvisioningState(db, order_id)
+        order_state = _SqlAlchemyOrderState(db)
+        runs = _SqlAlchemyProvisionRuns(db)
+        try:
+            with pytest.raises(AccountingCreateUserError) as excinfo:
+                confirm_payment_and_provision(
+                    _command(order_id),
+                    pre_epoch_request,
+                    object(),
+                    state,
+                    runs,
+                    order_state,
+                    "receipt-adr018e",
+                    providers=_registry(accounting=accounting),
+                )
+        finally:
+            runs.close()
+            accounting.close()
+
+    assert excinfo.value.effect is AccountingCreateEffect.NO_SIDE_EFFECT
+
+    with Session(engine) as verify_db:
+        rolled_back_endpoint = verify_db.get(EgressEndpoint, endpoint_id)
+        assert rolled_back_endpoint is not None
+        assert rolled_back_endpoint.current_count == 0
+
+        gateway_binding_count = verify_db.scalar(
+            select(func.count())
+            .select_from(GatewayRouteBinding)
+            .where(GatewayRouteBinding.subscription_id == subscription_id)
+        )
+        assert gateway_binding_count == 0
+
+        persisted_subscription = verify_db.get(Subscription, subscription_id)
+        assert persisted_subscription is not None
+        assert persisted_subscription.status is SubscriptionStatus.PROVISION_FAILED
+
+        job = verify_db.scalar(select(Job).where(Job.dedupe_key == f"provision:{order_id}"))
+        assert job is not None
+        assert job.status is JobStatus.FAILED
+
+    # Named lock was never acquired -- a fresh acquisition succeeds immediately.
     with Session(engine) as db, gateway_route_binding_write(db, timeout_seconds=5):
         pass
