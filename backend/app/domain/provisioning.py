@@ -95,6 +95,36 @@ class ExternalTenantCreationError(RuntimeError):
 
 
 class ProvisionRunStore(Protocol):
+    """Persist saga progress and terminal status.
+
+    Ownership contract (ADR-017, run-persistence-ordering revision) --
+    every implementation (production: ``_SqlAlchemyProvisionRuns``; tests:
+    ``_Runs``/``FakeRuns``) must uphold this, since ``ProvisioningService``
+    relies on it to keep external-side-effect compensation and run
+    bookkeeping from interfering with each other:
+
+    - :meth:`start` creates the run's identity. Called before any external
+      side effect; a failure here is safe to propagate (nothing to
+      compensate yet).
+    - :meth:`record_step`, :meth:`record_external_id`, and
+      :meth:`mark_notification_failed` are **best-effort progress
+      bookkeeping only** -- non-terminal, informational. Implementations
+      must never let a failure here propagate to the caller: an
+      already-completed external side effect (a created accounting user,
+      an applied gateway change) must never go uncompensated just because
+      writing a progress marker about it failed. A caller that needs to
+      run compensation logic after one of these calls must be able to
+      assume it always returns normally.
+    - :meth:`mark_status` sets the run's *terminal* status (``FAILED`` /
+      ``SUCCEEDED`` / ``PENDING_MANUAL``) and is allowed to raise on
+      failure -- callers are responsible for sequencing this call so it
+      never runs ahead of the real terminal business state it is
+      reporting on: ``FAILED`` only after the caller's own
+      ``state.rollback_database()`` for that failure has completed;
+      ``SUCCEEDED`` only after the caller's own business-data commit has
+      completed (see :meth:`ProvisioningService.mark_apply_gateway_succeeded`).
+    """
+
     def start(self, request: ProvisionRequest) -> str: ...
 
     def record_step(self, run_id: str, step: ProvisionStep, status: str) -> None: ...
@@ -174,12 +204,17 @@ class ProvisioningService:
         non-locking test double). Production's paid-purchase path
         (``services.confirm_payment_and_provision``) calls the two phases
         separately so it can acquire the named lock only around the
-        second one -- see ADR-017.
+        second one -- see ADR-017. This composition has no separate
+        business-data commit step of its own (unlike the paid-purchase
+        path's ``activate_paid_purchase``), so :meth:`mark_apply_gateway_succeeded`
+        is called immediately once ``provision_apply_gateway`` returns.
         """
         prepared = self.provision_prepare(request)
         if isinstance(prepared, ProvisionOutcome):
             return prepared
-        return self.provision_apply_gateway(prepared, request)
+        outcome = self.provision_apply_gateway(prepared, request)
+        self.mark_apply_gateway_succeeded(outcome.run_id)
+        return outcome
 
     def provision_prepare(
         self, request: ProvisionRequest
@@ -202,6 +237,14 @@ class ProvisioningService:
         except CapacityExceededError as exc:
             self.state.reject_capacity(request.order_id, str(exc))
             self._alert("CAPACITY_EXCEEDED", {"run_id": run_id, "order_id": request.order_id})
+            # Nothing has been flushed yet at this step, but rolling back
+            # unconditionally before _failed() -- rather than only where a
+            # mutation is known to exist -- keeps every failure branch in
+            # this method following one uniform rule (see ADR-017's
+            # run-persistence-ordering revision): the run's FAILED status
+            # is never persisted ahead of the business rollback for the
+            # same failure.
+            self.state.rollback_database()
             self._failed(run_id, ProvisionStep.CAPACITY, exc)
             raise
         self._success(run_id, ProvisionStep.CAPACITY)
@@ -210,6 +253,7 @@ class ProvisioningService:
         try:
             endpoint = self.state.allocate_endpoint(request.customer_id)
         except Exception as exc:
+            self.state.rollback_database()
             self._failed(run_id, ProvisionStep.ALLOCATE_ENDPOINT, exc)
             raise
         self._success(run_id, ProvisionStep.ALLOCATE_ENDPOINT)
@@ -251,6 +295,9 @@ class ProvisioningService:
             self.forwarder.apply(self.forwarder.render(desired_forwarder))
         except Exception as exc:
             self.forwarder.apply(self.forwarder.render(previous_forwarder))
+            # STORE_CREDENTIALS already flushed this run's credential/
+            # binding mutation -- roll it back before recording FAILED.
+            self.state.rollback_database()
             self._failed(run_id, ProvisionStep.APPLY_FORWARDER, exc)
             raise
         self._success(run_id, ProvisionStep.APPLY_FORWARDER)
@@ -262,6 +309,7 @@ class ProvisioningService:
             )
         except Exception as exc:
             self.accounting.disable_user(request.username)
+            self.state.rollback_database()
             self._failed(run_id, ProvisionStep.CREATE_ACCOUNTING_USER, exc)
             raise
         self._success(run_id, ProvisionStep.CREATE_ACCOUNTING_USER)
@@ -295,6 +343,12 @@ class ProvisioningService:
         except Exception as exc:
             self.accounting.disable_user(request.username)
             self._alert("GATEWAY_APPLY_FAILED", {"run_id": run_id, "user": request.username})
+            # desired_routing_state() flushed (but never committed) a
+            # GatewayRouteBinding mutation -- roll it back here, before
+            # recording FAILED, rather than relying on the caller's own
+            # rollback (still required, as a harmless no-op safety net,
+            # while this call is holding the named lock -- see ADR-017).
+            self.state.rollback_database()
             self._failed(run_id, ProvisionStep.APPLY_GATEWAY, exc)
             raise
         self._success(run_id, ProvisionStep.APPLY_GATEWAY)
@@ -305,6 +359,10 @@ class ProvisioningService:
             self.state.store_subscription_token(request.customer_id, raw_token)
             subscription_url = _subscription_url(request.subscription_domain, raw_token)
         except Exception as exc:
+            # Rolls back the same flushed-but-uncommitted GatewayRouteBinding
+            # mutation as the APPLY_GATEWAY branch above -- this step runs
+            # after APPLY_GATEWAY succeeded, so it is still pending.
+            self.state.rollback_database()
             self._failed(run_id, ProvisionStep.ISSUE_SUBSCRIPTION, exc)
             raise
         self._success(run_id, ProvisionStep.ISSUE_SUBSCRIPTION)
@@ -320,8 +378,52 @@ class ProvisioningService:
         except Exception as exc:
             self.runs.mark_notification_failed(run_id, str(exc))
         self._success(run_id, ProvisionStep.NOTIFY)
-        self.runs.mark_status(run_id, ProvisionStatus.SUCCEEDED)
+        # Terminal SUCCEEDED is deliberately *not* persisted here: at this
+        # point the caller's own business-data commit (activate_paid_purchase,
+        # for the paid-purchase saga) has not run yet. Persisting SUCCEEDED
+        # now would let the Job's terminal status race ahead of the real
+        # business outcome (ADR-017 run-persistence-ordering revision,
+        # Major 2 Case A) -- if that commit then failed, the Job would be
+        # durably SUCCEEDED while the order/subscription end up
+        # PROVISION_FAILED. Callers must call
+        # mark_apply_gateway_succeeded() themselves, only after their own
+        # business commit has completed.
         return ProvisionOutcome(run_id, ProvisionStatus.SUCCEEDED, subscription_url)
+
+    def mark_run_failed(self, run_id: str, error: Exception) -> None:
+        """Persist the run's terminal FAILED status for a failure that
+        happened entirely outside this service's own step handlers -- e.g.
+        the caller's own business-data commit failing *after*
+        :meth:`provision_apply_gateway` already returned successfully
+        (ADR-017 run-persistence-ordering revision, Major 2 test 2: a
+        commit failure at that point must never leave the run durably
+        SUCCEEDED). Callers must call this only after their own
+        ``state.rollback_database()`` (or equivalent, e.g. the rollback a
+        failed ``order_state.transaction()`` already performs internally)
+        for the failure has completed -- the same ordering contract as
+        every other FAILED write in this class. Unlike
+        :meth:`mark_apply_gateway_succeeded`, this is allowed to raise:
+        see ``ProvisionRunStore``'s own contract for why FAILED remains a
+        fully-raising write.
+        """
+        self.runs.mark_status(run_id, ProvisionStatus.FAILED, str(error))
+
+    def mark_apply_gateway_succeeded(self, run_id: str) -> None:
+        """Persist the run's terminal SUCCEEDED status.
+
+        Callers **must** call this only after their own business-data
+        commit for this run has already completed (ADR-017
+        run-persistence-ordering revision) -- never before, and never
+        speculatively. Best-effort: by the time a caller reaches this
+        point, the business transaction it is reporting on has already
+        durably committed, so a failure persisting this audit status must
+        not be allowed to surface as a reported failure for an outcome
+        that already succeeded for real.
+        """
+        try:
+            self.runs.mark_status(run_id, ProvisionStatus.SUCCEEDED)
+        except Exception:
+            return
 
     def fail_apply_gateway_lock_acquisition(
         self, checkpoint: ProvisioningCheckpoint, request: ProvisionRequest, error: Exception

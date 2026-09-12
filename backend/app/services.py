@@ -177,6 +177,14 @@ def confirm_payment_and_provision(
 
             with order_state.transaction():
                 activate_paid_purchase(command, order_state)
+            # ADR-017 run-persistence-ordering revision: the run's terminal
+            # SUCCEEDED status is only ever recorded here, after
+            # activate_paid_purchase()'s own commit above has actually
+            # completed -- never inside provision_apply_gateway() itself.
+            # mark_apply_gateway_succeeded() is best-effort (never raises),
+            # so a Job-write hiccup at this point cannot turn this
+            # already-committed business success into a reported failure.
+            provisioning.mark_apply_gateway_succeeded(prepared.run_id)
     except GatewayRouteBindingLockError as lock_exc:
         # ADR-017: GET_LOCK() itself failed (now including any acquisition-
         # stage DBAPI/SQLAlchemy exception, normalized into this same type
@@ -200,8 +208,24 @@ def confirm_payment_and_provision(
             fail_paid_purchase(command, type(lock_exc).__name__, order_state)
         raise
     except Exception as exc:
+        # Reached either after provision_apply_gateway()'s own exception
+        # handler already rolled back and marked the run FAILED (its
+        # `except Exception: state.rollback_database(); raise` just
+        # above), or after activate_paid_purchase()'s own commit failed
+        # inside `with order_state.transaction():` -- whose except clause
+        # already rolled back `state`'s pending mutations (state and
+        # order_state share one `db: Session`) before re-raising. Either
+        # way, rollback has already completed by the time we're here, so
+        # marking the run FAILED now is always ordered correctly. For the
+        # first case this is a harmless repeat of what provision_apply_
+        # gateway() already recorded; for the second, it is the only place
+        # that ever does -- without it, a commit failure at that exact
+        # point would leave the run stuck at RUNNING forever rather than
+        # FAILED, though it could never end up falsely SUCCEEDED (ADR-017
+        # run-persistence-ordering revision, Major 2 test 2).
         with order_state.transaction():
             fail_paid_purchase(command, type(exc).__name__, order_state)
+        provisioning.mark_run_failed(prepared.run_id, exc)
         raise
     return outcome
 

@@ -779,3 +779,355 @@ def test_production_run_store_marks_failed_independently_of_phase_a_rollback(
 
     with Session(engine) as db, gateway_route_binding_write(db, timeout_seconds=5):
         pass
+
+
+# ---------------------------------------------------------------------------
+# Major 2 regression (Work review round 3): run-persistence-ordering
+# revision. Production-backed: never the in-memory _Runs fake.
+# ---------------------------------------------------------------------------
+
+
+def test_production_activate_commit_failure_never_leaves_job_falsely_succeeded(
+    engine: Engine,
+) -> None:
+    """Major 2 Case A / review round 3 test 2, production-backed: force
+    activate_paid_purchase()'s own business commit to fail *after*
+    provision_apply_gateway() already returned successfully (gateway
+    applied, subscription token issued, NOTIFY sent). The forbidden
+    outcome is Job=SUCCEEDED while the subscription ends up in a failed
+    state -- mark_apply_gateway_succeeded() must never be reached when
+    the commit it depends on never completed, and services.py's outer
+    failure handler must durably mark the run FAILED instead (never leave
+    it stuck at RUNNING), using the real `_SqlAlchemyProvisionRuns` +
+    `_OrderProvisioningState`/`_SqlAlchemyOrderState` sharing one real
+    MySQL Session, exactly as production wires them."""
+    with Session(engine) as seed_db:
+        order, subscription, endpoint = _seed(seed_db, suffix="ACTIVATEFAIL")
+        seed_db.commit()
+        order_id = order.id
+        subscription_id = subscription.id
+        endpoint_id = endpoint.id
+        customer_id = subscription.customer_id
+
+    accounting = MockAccountingProvider()
+    with Session(engine) as db:
+        state = _OrderProvisioningState(db, order_id)
+        order_state = _SqlAlchemyOrderState(db)
+        runs = _SqlAlchemyProvisionRuns(db)
+
+        real_commit = db.commit
+        calls = {"n": 0}
+
+        def flaky_commit() -> None:
+            calls["n"] += 1
+            # Commit #1 is record_payment()+prepare_purchase()'s; commit #2
+            # is activate_paid_purchase()'s own -- the one this test
+            # targets. Every other commit (including fail_paid_purchase()'s,
+            # in the outer handler this failure triggers) must go through.
+            if calls["n"] == 2:
+                raise RuntimeError("simulated activation commit failure")
+            real_commit()
+
+        db.commit = flaky_commit  # type: ignore[method-assign]
+
+        try:
+            with pytest.raises(RuntimeError, match="simulated activation commit failure"):
+                confirm_payment_and_provision(
+                    _command(order_id),
+                    _request(order_id, customer_id, username="activate-fail"),
+                    object(),
+                    state,
+                    runs,
+                    order_state,
+                    "receipt-activate-fail",
+                    providers=_registry(accounting=accounting),
+                )
+        finally:
+            db.commit = real_commit  # type: ignore[method-assign]
+            runs.close()
+
+    with Session(engine) as verify_db:
+        job = verify_db.scalar(select(Job).where(Job.dedupe_key == f"provision:{order_id}"))
+        assert job is not None
+        # The forbidden combination this test guards against is
+        # Job=SUCCEEDED at the same time as a failed subscription -- the
+        # fix (services.py's outer except now calls
+        # provisioning.mark_run_failed()) makes this a durable FAILED
+        # rather than merely "not SUCCEEDED" (e.g. stuck at RUNNING).
+        assert job.status is JobStatus.FAILED
+
+        persisted_subscription = verify_db.get(Subscription, subscription_id)
+        assert persisted_subscription is not None
+        assert persisted_subscription.status is SubscriptionStatus.PROVISION_FAILED
+        assert not (
+            job.status is JobStatus.SUCCEEDED
+            and persisted_subscription.status is SubscriptionStatus.PROVISION_FAILED
+        )
+
+        rolled_back_endpoint = verify_db.get(EgressEndpoint, endpoint_id)
+        assert rolled_back_endpoint is not None
+        assert rolled_back_endpoint.current_count == 0
+
+        gateway_binding_count = verify_db.scalar(
+            select(func.count())
+            .select_from(GatewayRouteBinding)
+            .where(GatewayRouteBinding.subscription_id == subscription_id)
+        )
+        assert gateway_binding_count == 0
+
+    with Session(engine) as db, gateway_route_binding_write(db, timeout_seconds=5):
+        pass
+
+
+def test_production_accounting_progress_write_failure_never_leaves_user_wrongly_enabled_or_disabled(
+    engine: Engine,
+) -> None:
+    """Major 2 Case B / review round 3 test 3, production-backed: after
+    accounting.create_user() succeeds, force the very next progress-write
+    commit (CREATE_ACCOUNTING_USER's own `_success()` -> record_step() ->
+    this run-store's dedicated commit) to fail. Before the fix, this
+    exception would propagate out of provision_prepare() *after*
+    CREATE_ACCOUNTING_USER's own except block (the one that calls
+    accounting.disable_user()) had already exited normally -- leaving a
+    created-and-enabled accounting user with no compensation, while the
+    order/subscription still end up marked failed. After the fix,
+    record_step() swallows this failure internally (ProvisionRunStore's
+    best-effort progress-bookkeeping contract) and the saga simply
+    continues -- proving no "failed order + enabled accounting user"
+    inconsistency is introduced by a mere audit-write hiccup."""
+    with Session(engine) as seed_db:
+        order, subscription, endpoint = _seed(seed_db, suffix="ACCTPROGRESS")
+        seed_db.commit()
+        order_id = order.id
+        subscription_id = subscription.id
+        customer_id = subscription.customer_id
+
+    armed = {"value": False}
+
+    class ArmingAccounting(MockAccountingProvider):
+        def create_user(self, username: str, quota_bytes: int, expire_at: Any) -> None:
+            super().create_user(username, quota_bytes, expire_at)
+            armed["value"] = True
+
+    accounting = ArmingAccounting()
+    with Session(engine) as db:
+        state = _OrderProvisioningState(db, order_id)
+        order_state = _SqlAlchemyOrderState(db)
+        runs = _SqlAlchemyProvisionRuns(db)
+
+        real_runs_commit = runs.db.commit
+
+        def flaky_runs_commit() -> None:
+            if armed["value"]:
+                armed["value"] = False
+                raise RuntimeError("simulated progress-persistence failure")
+            real_runs_commit()
+
+        runs.db.commit = flaky_runs_commit  # type: ignore[method-assign]
+
+        try:
+            outcome = confirm_payment_and_provision(
+                _command(order_id),
+                _request(order_id, customer_id, username="acct-progress"),
+                object(),
+                state,
+                runs,
+                order_state,
+                "receipt-acct-progress",
+                providers=_registry(accounting=accounting),
+            )
+        finally:
+            runs.close()
+
+    # The progress-write hiccup must not have derailed anything: the saga
+    # completes successfully, and the accounting user this test armed on
+    # is never wrongly disabled (create_user() genuinely succeeded).
+    assert outcome is not None
+    assert outcome.status is ProvisionStatus.SUCCEEDED
+    assert accounting.disabled_users == set()
+
+    with Session(engine) as verify_db:
+        persisted_order = verify_db.get(Order, order_id)
+        assert persisted_order is not None
+        assert persisted_order.status is OrderStatus.ACTIVATED
+
+        persisted_subscription = verify_db.get(Subscription, subscription_id)
+        assert persisted_subscription is not None
+        assert persisted_subscription.status is SubscriptionStatus.ACTIVE
+
+        job = verify_db.scalar(select(Job).where(Job.dedupe_key == f"provision:{order_id}"))
+        assert job is not None
+        assert job.status is JobStatus.SUCCEEDED
+
+    with Session(engine) as db, gateway_route_binding_write(db, timeout_seconds=5):
+        pass
+
+
+def test_production_gateway_progress_write_failure_never_bypasses_business_compensation(
+    engine: Engine,
+) -> None:
+    """Major 2 Case B (gateway variant) / review round 3 test 4,
+    production-backed: after gateway.apply() succeeds, force the very
+    next progress-write commit (APPLY_GATEWAY's own `_success()` ->
+    record_step()) to fail. Before the fix this exception would propagate
+    out of provision_apply_gateway() *after* its own APPLY_GATEWAY except
+    block had already exited normally -- skipping straight past
+    activate_paid_purchase() and mark_apply_gateway_succeeded() without
+    ever running the accounting-disable/rollback compensation that
+    handler is meant to guarantee for any other post-apply failure. After
+    the fix, this progress-write failure is swallowed internally and the
+    saga proceeds to its real, correct outcome: gateway state committed,
+    business transaction semantics untouched by the run-store's own
+    transaction design."""
+    with Session(engine) as seed_db:
+        order, subscription, endpoint = _seed(seed_db, suffix="GWPROGRESS")
+        seed_db.commit()
+        order_id = order.id
+        subscription_id = subscription.id
+        customer_id = subscription.customer_id
+
+    armed = {"value": False}
+
+    class ArmingGateway(MockGatewayProvider):
+        def apply(self, candidate):  # type: ignore[no-untyped-def]
+            result = super().apply(candidate)
+            armed["value"] = True
+            return result
+
+    accounting = MockAccountingProvider()
+    with Session(engine) as db:
+        state = _OrderProvisioningState(db, order_id)
+        order_state = _SqlAlchemyOrderState(db)
+        runs = _SqlAlchemyProvisionRuns(db)
+
+        real_runs_commit = runs.db.commit
+
+        def flaky_runs_commit() -> None:
+            if armed["value"]:
+                armed["value"] = False
+                raise RuntimeError("simulated progress-persistence failure")
+            real_runs_commit()
+
+        runs.db.commit = flaky_runs_commit  # type: ignore[method-assign]
+
+        try:
+            outcome = confirm_payment_and_provision(
+                _command(order_id),
+                _request(order_id, customer_id, username="gw-progress"),
+                object(),
+                state,
+                runs,
+                order_state,
+                "receipt-gw-progress",
+                providers=_registry(gateway=ArmingGateway(), accounting=accounting),
+            )
+        finally:
+            runs.close()
+
+    assert outcome is not None
+    assert outcome.status is ProvisionStatus.SUCCEEDED
+    assert accounting.disabled_users == set()
+
+    with Session(engine) as verify_db:
+        persisted_order = verify_db.get(Order, order_id)
+        assert persisted_order is not None
+        assert persisted_order.status is OrderStatus.ACTIVATED
+
+        persisted_subscription = verify_db.get(Subscription, subscription_id)
+        assert persisted_subscription is not None
+        assert persisted_subscription.status is SubscriptionStatus.ACTIVE
+
+        binding = verify_db.scalar(
+            select(GatewayRouteBinding).where(
+                GatewayRouteBinding.subscription_id == subscription_id
+            )
+        )
+        assert binding is not None
+        assert binding.enabled is True
+
+        job = verify_db.scalar(select(Job).where(Job.dedupe_key == f"provision:{order_id}"))
+        assert job is not None
+        assert job.status is JobStatus.SUCCEEDED
+
+    with Session(engine) as db, gateway_route_binding_write(db, timeout_seconds=5):
+        pass
+
+
+def test_production_run_store_marks_succeeded_only_after_business_commit(
+    engine: Engine,
+) -> None:
+    """Major 2 Case A / review round 3 test 5, production-backed: the
+    Job's terminal SUCCEEDED status must never be observable before
+    activate_paid_purchase()'s own business commit has completed. Paused
+    inside gateway.apply() (after its real effect, well before
+    activate_paid_purchase()'s eventual commit), an independent session
+    must see the Job still short of SUCCEEDED; only once the whole call
+    returns does it become SUCCEEDED. Real `_SqlAlchemyProvisionRuns` +
+    `_OrderProvisioningState`/`_SqlAlchemyOrderState`, never the in-memory
+    _Runs fake."""
+    with Session(engine) as seed_db:
+        order, subscription, endpoint = _seed(seed_db, suffix="SUCCEEDORDER")
+        seed_db.commit()
+        order_id = order.id
+        subscription_id = subscription.id
+        customer_id = subscription.customer_id
+
+    checkpoint = threading.Event()
+    proceed = threading.Event()
+    observed: dict[str, object] = {}
+
+    class PausingGateway(MockGatewayProvider):
+        def apply(self, candidate):  # type: ignore[no-untyped-def]
+            result = super().apply(candidate)
+            checkpoint.set()
+            assert proceed.wait(timeout=10), "test harness never signalled proceed"
+            return result
+
+    def observe() -> None:
+        checkpoint.wait(timeout=5)
+        with Session(engine) as verify_db:
+            job = verify_db.scalar(select(Job).where(Job.dedupe_key == f"provision:{order_id}"))
+            observed["status_before_commit"] = job.status if job else None
+        proceed.set()
+
+    observer_thread = threading.Thread(target=observe)
+    observer_thread.start()
+
+    with Session(engine) as db:
+        state = _OrderProvisioningState(db, order_id)
+        order_state = _SqlAlchemyOrderState(db)
+        runs = _SqlAlchemyProvisionRuns(db)
+        try:
+            outcome = confirm_payment_and_provision(
+                _command(order_id),
+                _request(order_id, customer_id, username="succeed-order"),
+                object(),
+                state,
+                runs,
+                order_state,
+                "receipt-succeed-order",
+                providers=_registry(gateway=PausingGateway()),
+            )
+        finally:
+            runs.close()
+    observer_thread.join(timeout=15)
+
+    assert outcome is not None
+    assert outcome.status is ProvisionStatus.SUCCEEDED
+    assert observed["status_before_commit"] is not JobStatus.SUCCEEDED
+
+    with Session(engine) as verify_db:
+        job = verify_db.scalar(select(Job).where(Job.dedupe_key == f"provision:{order_id}"))
+        assert job is not None
+        assert job.status is JobStatus.SUCCEEDED
+
+        persisted_order = verify_db.get(Order, order_id)
+        assert persisted_order is not None
+        assert persisted_order.status is OrderStatus.ACTIVATED
+
+        persisted_subscription = verify_db.get(Subscription, subscription_id)
+        assert persisted_subscription is not None
+        assert persisted_subscription.status is SubscriptionStatus.ACTIVE
+
+    with Session(engine) as db, gateway_route_binding_write(db, timeout_seconds=5):
+        pass

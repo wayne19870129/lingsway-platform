@@ -165,40 +165,98 @@ def gateway_route_binding_write(
     :class:`GatewayRouteBindingLockError` *before* the caller's body ever
     runs: no ``GatewayRouteBinding`` row is touched when the lock cannot be
     acquired. So does *any other* failure encountered while acquiring the
-    lock -- opening the dedicated connection, deriving the lock name, or
-    the ``GET_LOCK()`` call itself raising a DBAPI/SQLAlchemy exception
-    (a dropped connection, a pool exhaustion error, etc.) is normalized
-    into :class:`GatewayRouteBindingLockError` (with the original
-    exception chained via ``from``), never left to propagate as some
-    other exception type. Callers that only catch
+    lock -- resolving ``session``'s engine, opening the dedicated
+    connection, deriving the lock name, or the ``GET_LOCK()`` call itself
+    raising a DBAPI/SQLAlchemy exception (a dropped connection, a pool
+    exhaustion error, etc.) is normalized into
+    :class:`GatewayRouteBindingLockError`, with the original exception
+    chained via ``from`` (never interpolated into the public message
+    itself, which stays a stable, non-sensitive description -- the chained
+    cause is where a caller that needs the DBAPI detail, e.g. for logging,
+    finds it). Callers that only catch
     :class:`GatewayRouteBindingLockError` to run their fail-closed
     compensation must see it for every acquisition-stage failure, not
     only the two "expected" ``GET_LOCK()`` return values -- ADR-017's
     lock-acquisition-failure compensation
     (``services.confirm_payment_and_provision``) depends on this.
+
+    If the ``GET_LOCK()`` call itself raises (as opposed to returning ``0``
+    or ``NULL``), whether the server actually granted the lock before the
+    failure happened in transit (a dropped connection, a truncated
+    response) cannot be determined from here. Since MySQL named locks are
+    connection-scoped and are not released by an ordinary
+    commit/rollback -- only by an explicit ``RELEASE_LOCK()`` or by the
+    holding connection itself terminating -- simply closing this
+    connection and returning it to the pool in that ambiguous case could
+    leave a live connection in the pool that the server still considers
+    the lock's holder, silently blocking every future acquisition attempt.
+    This function invalidates the connection instead in exactly that one
+    case (a generic exception from the ``GET_LOCK()`` call), which
+    discards the underlying physical connection rather than pooling it;
+    the two known, unambiguous outcomes -- ``GET_LOCK()`` returning ``0``
+    or ``NULL``, and any failure before ``GET_LOCK()`` is ever called --
+    do not invalidate, since the server has confirmed (or was never asked)
+    that no lock was granted to this connection.
+
     Failures *releasing* the lock (inside :func:`_release_lock`) are
     deliberately **not** normalized this way: a release failure is not an
     acquisition failure, and re-labeling it as one would misrepresent
     what actually happened to callers deciding how to react.
     """
-    bind = session.get_bind()
-    engine = bind.engine if isinstance(bind, Connection) else bind
     try:
-        lock_connection = engine.connect().execution_options(isolation_level="AUTOCOMMIT")
+        bind = session.get_bind()
+        engine = bind.engine if isinstance(bind, Connection) else bind
     except Exception as exc:
         raise GatewayRouteBindingLockError(
-            f"failed to open the dedicated gateway route binding lock connection: {exc}"
+            "failed to resolve the gateway route binding lock's database engine"
         ) from exc
+
+    try:
+        raw_connection = engine.connect()
+    except Exception as exc:
+        raise GatewayRouteBindingLockError(
+            "failed to open the dedicated gateway route binding lock connection"
+        ) from exc
+    try:
+        lock_connection = raw_connection.execution_options(isolation_level="AUTOCOMMIT")
+    except Exception as exc:
+        # No lock was ever attempted on this connection -- it is safe to
+        # return to the pool via a plain close, no invalidation needed.
+        raw_connection.close()
+        raise GatewayRouteBindingLockError(
+            "failed to configure the dedicated gateway route binding lock connection"
+        ) from exc
+
     try:
         try:
             name = gateway_route_binding_lock_name(lock_connection)
-            _get_lock(lock_connection, name, timeout_seconds)
         except GatewayRouteBindingLockError:
             raise
         except Exception as exc:
             raise GatewayRouteBindingLockError(
-                f"failed to acquire the gateway route binding lock: {exc}"
+                "failed to derive the gateway route binding lock name"
             ) from exc
+
+        try:
+            _get_lock(lock_connection, name, timeout_seconds)
+        except GatewayRouteBindingLockError:
+            # GET_LOCK() returned 0 (timeout) or NULL (error): the server
+            # confirmed no lock was granted to us. This connection's lock
+            # state is known and clean -- no need to invalidate it.
+            raise
+        except Exception as exc:
+            # The GET_LOCK() call itself raised. See this function's
+            # docstring: the server may have already granted the lock
+            # before the failure happened in transit, so this connection's
+            # lock state is unknown -- invalidate it rather than let a
+            # connection that might still be the lock's actual holder on
+            # the server go back into the pool as if nothing happened.
+            lock_connection.invalidate()
+            raise GatewayRouteBindingLockError(
+                "failed to acquire the gateway route binding lock "
+                "(connection state could not be confirmed)"
+            ) from exc
+
         previously_held = session.info.get(SESSION_INFO_LOCK_HELD_KEY, False)
         session.info[SESSION_INFO_LOCK_HELD_KEY] = True
         try:
