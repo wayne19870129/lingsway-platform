@@ -1781,3 +1781,71 @@ adapter、DTO/编排改动、独立的 reconciliation 工具/作业、
   更正 round 1 文本里"22 条"的笔误（Minor 1）。
 
   **仍未完成**：与 round 1 完全一致，未扩大 scope。
+
+- **Phase 2B8 round 3（本轮，ChatGPT 对 PR #65 exact head
+  `7cfda7c6725bd4467245b61dcb997d836087edf9` 的独立复审，1 个
+  Major，0 个 Minor）**：
+
+  **Major 1（`SubscriptionTransportProvider.close()` 在 owned
+  client 关闭失败时会在重试时被误报为成功）**：独立验证后确认
+  **VALID**——round 1 引入的实现在尝试真正关闭 client **之前**就把
+  `self._closed` 设成 `True`：
+
+  ```python
+  def close(self) -> None:
+      if self._closed:
+          return
+      self._closed = True
+      if self._owns_client:
+          self._client.close()
+  ```
+
+  如果 `self._client.close()` 本次抛异常（例如网络层临时错误），
+  `_closed` 已经变成 `True`；`ProviderRegistry.close()`（round 2
+  已修复为逐个 provider 独立 `try/except`、支持重试）下一次重试
+  调这个 provider 的 `close()` 时，会因为 `if self._closed: return`
+  立即返回、不再尝试真正关闭底层 client，把一次仍然失败的关闭
+  静默报告成"成功"——这正是 round 2 刚刚在 `ProviderRegistry` 层面
+  修复的同一类"跳过即视为成功"问题，只是这次出现在 provider 自己
+  身上。复查 `MarzbanAccountingProvider.close()`（同样是
+  `_owns_client` 模式的先例）确认它完全没有 `_closed` 标志——
+  `def close(self) -> None: if self._owns_client: self._client.close()`
+  ——因此不存在同类假成功路径，按审查意见"除非能复现同类假成功
+  路径，否则不要改动它"的要求，未做任何修改。
+
+  修复：删除 `SubscriptionTransportProvider` 的 `_closed` 字段与
+  `if self._closed: return` / `self._closed = True` 两行判断，改成
+  与 `MarzbanAccountingProvider.close()` 完全一致的模式——幂等性
+  完全依赖 `httpx.Client.close()` 自身"可安全重复调用"的契约（已经
+  关闭的 client 上再调用是无操作；上次调用失败过的 client 上再调用
+  会真正重试关闭，而不是静默判定为已关闭）。
+
+  **测试**：`backend/tests/unit/test_transport_provider.py` 新增
+  2 条：
+  - `test_close_retries_correctly_when_the_owned_client_close_call_fails`：
+    只针对 provider 自身，把 owned client 的 `close` 换成一个"第一次
+    抛异常、第二次真正关闭"的替身，断言第一次 `adapter.close()`
+    抛出异常且 client 未真正关闭，第二次 `adapter.close()` 真正重试
+    并成功关闭——证明 provider 自己不带假成功标志位。
+  - `test_registry_close_surfaces_transport_close_failure_and_retries_it_only`：
+    在 `ProviderRegistry` 级别复现审查意见要求的完整场景——把这个
+    provider 放进 `egress` 槽位、另一个 `_ClosableProvider` 放进
+    `transport` 槽位（在遍历顺序里排在它之后），断言：(1) 第一次
+    `registry.close()` 通过 `ExceptionGroup` 暴露失败；(2) 排在它
+    之后的 provider 仍然被正常关闭；(3) 第二次 `registry.close()`
+    只重试这一个失败过的 provider，真正让底层 client 关闭成功，且
+    另一个 provider 没有被重复关闭。
+
+  **验证**：`ruff check backend/` 全过；
+  `mypy backend/app backend/tests`（strict，使用项目 `/tmp/venv312`
+  虚拟环境，已确认包含 fastapi/pytest/sqlalchemy 等依赖）无问题；
+  `pytest backend/tests/unit backend/tests/guards -q` → **222 通过**
+  （220 + 本轮新增 2 条，0 回归）；`pytest backend/tests/integration -q`
+  （`TEST_DATABASE_URL=mysql+pymysql://lingsway:lingsway@127.0.0.1/lingsway_test`，
+  本地 MariaDB 10.11）→ 50 通过、1 个与本次改动无关的既有环境限制
+  失败（`test_mysql_84_database_is_reachable`：本地沙箱只有 MariaDB
+  10.11，不是 MySQL 8.4，此断言**本地未验证**，最终以 GitHub CI 的
+  真实 MySQL 8.4 backend job 为准）。Phase 2B8 累计新增测试：
+  18（round 1）+ 3（round 2）+ 2（round 3）= **23 条**。
+
+  **仍未完成**：与 round 1/round 2 完全一致，未扩大 scope。

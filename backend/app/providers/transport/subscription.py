@@ -175,14 +175,22 @@ class SubscriptionTransportProvider:
         self._enabled = True
         self._endpoints: list[TransportEndpointDTO] = []
         self._capacity: TransportCapacityDTO | None = None
-        self._closed = False
 
     def close(self) -> None:
-        """Idempotent: closes the self-created client at most once, and
-        never closes a client this provider did not create."""
-        if self._closed:
-            return
-        self._closed = True
+        """Closes the self-created client, never a client this provider
+        did not create.
+
+        Deliberately has no self-tracked "already closed" flag
+        (independent review, PR #65 round 3): a flag set *before* the
+        close attempt would let a failed ``self._client.close()`` be
+        reported as success on a later retry -- the flag alone can't
+        distinguish "already closed successfully" from "already tried
+        and failed". Idempotency instead comes entirely from
+        ``httpx.Client.close()``'s own contract, which is always safe to
+        call again -- on an already-closed client it is a no-op, and on
+        a client whose close previously raised, calling it again
+        actually retries the close rather than silently no-opping.
+        """
         if self._owns_client:
             self._client.close()
 

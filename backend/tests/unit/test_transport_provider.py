@@ -1,9 +1,12 @@
 import base64
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import httpx
 import pytest
 
+from backend.app.core.config import Settings
+from backend.app.providers.registry import ProviderRegistry, build_registry
 from backend.app.providers.transport.subscription import (
     SubscriptionTransportProvider,
     parse_subscription,
@@ -155,3 +158,95 @@ def test_close_is_idempotent_and_safe_to_call_multiple_times() -> None:
     adapter.close()
 
     assert adapter._client.is_closed is True  # noqa: SLF001
+
+
+@dataclass(slots=True)
+class _ClosableProvider:
+    """Minimal stand-in for another owned provider, used only to prove it
+    is still closed even when a sibling provider's close() fails."""
+
+    close_calls: list[None] = field(default_factory=list)
+
+    def close(self) -> None:
+        self.close_calls.append(None)
+
+
+def test_close_retries_correctly_when_the_owned_client_close_call_fails() -> None:
+    """Independent review (PR #65, round 3): a self-tracked ``_closed``
+    flag set *before* attempting ``self._client.close()`` would let a
+    failed close be reported as a false success on a later retry. Drives
+    the provider's own owned client through a failing close followed by a
+    successful retry, proving the provider itself carries no such flag --
+    it relies entirely on ``httpx.Client.close()``'s own safe-to-retry
+    contract."""
+    adapter = SubscriptionTransportProvider("PROVIDER_A", "https://provider.invalid/private")
+    real_client = adapter._client  # noqa: SLF001
+    calls: list[None] = []
+    original_close = real_client.close
+
+    def flaky_close() -> None:
+        calls.append(None)
+        if len(calls) == 1:
+            raise RuntimeError("simulated transient close failure")
+        original_close()
+
+    real_client.close = flaky_close  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="simulated transient close failure"):
+        adapter.close()
+    assert len(calls) == 1
+    assert real_client.is_closed is False  # the failed attempt never actually closed it
+
+    adapter.close()  # retry: must actually retry the close, never silently no-op
+
+    assert len(calls) == 2
+    assert real_client.is_closed is True
+
+
+def test_registry_close_surfaces_transport_close_failure_and_retries_it_only() -> None:
+    """Reproduces the exact scenario from independent review (PR #65,
+    round 3) at the ProviderRegistry level: a SubscriptionTransportProvider
+    whose owned client's close() fails once must (1) surface that failure
+    via ProviderRegistry.close()'s ExceptionGroup, (2) not prevent other
+    owned providers from being closed in the same sweep, and (3) actually
+    retry -- never silently mark itself successfully closed -- on the next
+    registry.close() call."""
+    adapter = SubscriptionTransportProvider("PROVIDER_A", "https://provider.invalid/private")
+    real_client = adapter._client  # noqa: SLF001
+    calls: list[None] = []
+    original_close = real_client.close
+
+    def flaky_close() -> None:
+        calls.append(None)
+        if len(calls) == 1:
+            raise RuntimeError("simulated transient close failure")
+        original_close()
+
+    real_client.close = flaky_close  # type: ignore[method-assign]
+
+    other = _ClosableProvider()
+    defaults = build_registry(Settings())
+    registry = ProviderRegistry(
+        egress=adapter,  # type: ignore[arg-type]
+        accounting=defaults.accounting,
+        gateway=defaults.gateway,
+        forwarder=defaults.forwarder,
+        payment=defaults.payment,
+        notify=defaults.notify,
+        email=defaults.email,
+        captcha=defaults.captcha,
+        storage=defaults.storage,
+        transport=other,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(ExceptionGroup):
+        registry.close()
+    assert len(calls) == 1
+    assert real_client.is_closed is False
+    assert len(other.close_calls) == 1  # closed despite the earlier failure elsewhere
+
+    registry.close()  # retry: only the transport provider needed a second attempt
+
+    assert len(calls) == 2
+    assert real_client.is_closed is True
+    assert len(other.close_calls) == 1  # never re-closed
