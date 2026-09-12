@@ -1357,3 +1357,82 @@ adapter、DTO/编排改动、独立的 reconciliation 工具/作业、
   `registry.py` 未改动（`ACCOUNTING_PROVIDER=marzban` 仍不可选）、无
   patched Marzban 镜像构建/部署、无真实 staging 凭据/真实网络调用、无
   409 reconciliation（ADR-018 明确保留为未来独立决策）、无生产部署。
+
+- **Phase 2B7 round 3（本轮，ADR-018 第二次修订——ChatGPT 对 PR #64
+  exact head `ee1525cd62e2ec355ce3be6ec85016adb17f0b8b` 的第二次独立
+  复审，再发现两个 Major）**：
+
+  **Major 1（pre-dispatch create validation failure 仍会 blind-disable）**：
+  round 2 只处理了 `_call()` 返回之后的失败分类（认证失败/transport
+  失败/状态码），漏掉了请求体构造阶段本身：`create_user()` 调用
+  `_map_expire_to_marzban(expire_at)` 发生在 `self._call("POST",
+  "/api/user", ...)` 之前，如果它因为 naive datetime 或 pre-epoch
+  tz-aware datetime 抛出 `MarzbanContractError`，这个异常会原样逃逸，
+  落入 `ProvisioningService` "未分类异常 → 视同 CREATED → 尝试
+  disable" 的向后兼容默认分支——对一个从未尝试创建（POST 根本没发出）
+  的 username 执行 `disable_user()`，与 ADR-018 的核心目的直接矛盾。
+  修复：`create_user()` 把 `_map_expire_to_marzban()` 的调用包进自己的
+  `try/except MarzbanContractError`，统一
+  `raise AccountingCreateUserError(effect=NO_SIDE_EFFECT) from exc`——
+  在请求体构造（因此也在任何网络调用）之前完成分类；这条规则对
+  `create_user()` 内任何未来的 dispatch-前校验失败都成立。
+
+  **Major 2（accounting PENDING_MANUAL 的业务 reason 仍被写成
+  egress tenant）**：`services.confirm_payment_and_provision()` 对
+  **任何**phase-A `PENDING_MANUAL` 都无条件把 `CREATE_TENANT` 时代的
+  硬编码字符串 `"external tenant creation requires review"` 写入
+  `Subscription.provision_error`——ADR-018 round 2 新增的两类
+  `PENDING_MANUAL`（accounting `AMBIGUOUS`、`CREATED` 但 disable 补偿
+  本身失败）复用这条硬编码后，会给人工处置人员指向错误的 subsystem；
+  同时补偿失败的 diagnostic 消息完全丢弃了 disable 自身失败的异常。
+  修复：新增 `PendingManualReason`（`EXTERNAL_TENANT_CREATION`/
+  `ACCOUNTING_CREATE_AMBIGUOUS`/`ACCOUNTING_COMPENSATION_FAILED`，
+  `StrEnum`）+ `PENDING_MANUAL_BUSINESS_MESSAGES`（固定、安全、
+  closed-set 的消息映射，从不嵌入 provider 异常文本）；`ProvisionOutcome`
+  新增 `reason` 字段，三个 phase-A `PENDING_MANUAL` 来源各自标注正确
+  reason；`services.py` 改为按 `reason` 查表得到业务消息，不再硬编码、
+  不解析 `pending_manual_error` 自由文本；`_compensate_created_accounting_user()`
+  的 run-level diagnostic 改为携带原始失败与 disable 失败两者的异常
+  **类型名**（不是完整消息），不再完全丢弃 disable 失败的上下文。
+  详见 `docs/80-decisions/ADR-018-accounting-create-user-failure-contract.md`
+  第二次修订。
+
+  **Minor**：`.env.example` 去除 legacy inventory 区块里与顶部
+  `MARZBAN_ADMIN_USERNAME`/`MARZBAN_ADMIN_PASSWORD` 重复的两行（未恢复
+  旧名字，也未新增 alias）。
+
+  **测试**：
+  - `backend/tests/unit/test_marzban_accounting_provider.py`：
+    naive-datetime、pre-epoch-datetime 两条测试改为断言
+    `AccountingCreateUserError`、`effect is NO_SIDE_EFFECT`、且零请求
+    被发出（而不是裸 `MarzbanContractError`）。
+  - `backend/tests/unit/test_domain.py` 新增 3 条快速 domain-level
+    回归（不需要真实 MySQL，直接验证 `ProvisioningService` 自身的
+    effect 分流逻辑）：`NO_SIDE_EFFECT` 从不 disable、`AMBIGUOUS` 从不
+    disable 且 `outcome.reason` 正确、`CREATED`+disable 失败时
+    `outcome.reason` 正确且 diagnostic 消息包含两个异常类型名。
+  - `backend/tests/integration/test_provisioning_phase_boundary.py`
+    新增 1 条 **production-backed** 回归
+    （`test_production_pre_epoch_expire_never_dispatches_or_disables`）：
+    handler 对任何请求都 `raise AssertionError`，证明零 HTTP 调用；
+    断言 `effect is NO_SIDE_EFFECT`、DB rollback、run FAILED、零
+    `GatewayRouteBinding`、named lock 从未获取。另外在已有的
+    ambiguous-transport（scenario B）与 disable-failure（scenario D）
+    两条测试里新增对 `Subscription.provision_error` 的断言：必须不含
+    `"external tenant creation"`，必须分别包含 `"accounting"`+
+    `"ambiguous"` / `"compensation"`。
+
+  **验证**：`ruff check backend/` 全过；
+  `mypy backend/app backend/tests`（strict）无问题；
+  `pytest backend/tests/unit backend/tests/guards -q` → 198 通过
+  （0 回归，此前 round 2 的全部测试保持绿色）；
+  `pytest backend/tests/integration -q` → 49 通过、1 个与本次改动
+  无关的既有环境限制失败（同上，MariaDB 10.11 沙箱版本字符串检查）；
+  ADR-017 既有的 transaction-ordering/run-persistence 相关测试全部
+  保持绿色，未受本轮改动影响。
+
+  **仍未完成**（与 round 1/round 2 完全一致，未扩大 scope）：
+  `registry.py` 未改动、无 patched Marzban 镜像构建/部署、无真实
+  staging 凭据/真实网络调用、无 409 reconciliation、无 Alembic/schema
+  变更、无 Webshare/Xray 相关改动、无 provider lifecycle 重新设计
+  （`httpx.Client` 生命周期继续作为下一阶段 blocker）、无生产部署。

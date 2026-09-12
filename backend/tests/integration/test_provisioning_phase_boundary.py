@@ -66,6 +66,7 @@ from backend.app.models.subscription import SubscriptionStatus
 from backend.app.providers.accounting.marzban import MarzbanAccountingProvider
 from backend.app.providers.accounting.mock import MockAccountingProvider
 from backend.app.providers.base import (
+    AccountingCreateEffect,
     AccountingCreateUserError,
     AccountUserDTO,
     DesiredRoutingState,
@@ -1865,6 +1866,17 @@ def test_production_ambiguous_transport_failure_requires_manual_review(
         assert job is not None
         assert job.status is JobStatus.PENDING
 
+        # ADR-018 Major 2 (round 2): the business-facing reason must
+        # correctly describe an ambiguous accounting create -- never the
+        # CREATE_TENANT-era hardcoded "external tenant creation" message,
+        # which would misdirect manual review to the wrong subsystem.
+        persisted_subscription = verify_db.get(Subscription, subscription_id)
+        assert persisted_subscription is not None
+        assert persisted_subscription.provision_error is not None
+        assert "external tenant creation" not in persisted_subscription.provision_error
+        assert "accounting" in persisted_subscription.provision_error
+        assert "ambiguous" in persisted_subscription.provision_error
+
     with Session(engine) as db, gateway_route_binding_write(db, timeout_seconds=5):
         pass
 
@@ -2031,5 +2043,92 @@ def test_production_created_user_disable_failure_requires_manual_review(
         assert job is not None
         assert job.status is JobStatus.PENDING
 
+        # ADR-018 Major 2 (round 2): the business-facing reason must
+        # correctly describe a failed compensation (disable) attempt --
+        # never the CREATE_TENANT-era hardcoded "external tenant
+        # creation" message, and never a raw provider exception message.
+        persisted_subscription = verify_db.get(Subscription, subscription_id)
+        assert persisted_subscription is not None
+        assert persisted_subscription.provision_error is not None
+        assert "external tenant creation" not in persisted_subscription.provision_error
+        assert "compensation" in persisted_subscription.provision_error
+
+    with Session(engine) as db, gateway_route_binding_write(db, timeout_seconds=5):
+        pass
+
+
+def test_production_pre_epoch_expire_never_dispatches_or_disables(engine: Engine) -> None:
+    """ADR-018 round 2 (Major 1): a pre-dispatch request-construction
+    failure (a timezone-aware expire_at whose epoch is <= 0) happens
+    entirely inside create_user() before any HTTP request is ever sent --
+    it must classify NO_SIDE_EFFECT and never disable request.username.
+    The handler asserts on any request at all to prove zero dispatch."""
+    with Session(engine) as seed_db:
+        order, subscription, endpoint = _seed(seed_db, suffix="ADR018E")
+        seed_db.commit()
+        order_id = order.id
+        subscription_id = subscription.id
+        endpoint_id = endpoint.id
+        customer_id = subscription.customer_id
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(
+            f"unexpected request: {request.method} {request.url.path} -- "
+            "a pre-dispatch validation failure must never reach the network"
+        )
+
+    accounting = _marzban_provider(handler)
+    pre_epoch_request = ProvisionRequest(
+        order_id=str(order_id),
+        customer_id=str(customer_id),
+        username="adr018e-user",
+        quota_gb=Decimal("10"),
+        thread_limit=10,
+        expire_at=datetime(1969, 1, 1, tzinfo=UTC),
+        subscription_domain="subs.example.invalid",
+    )
+    with Session(engine) as db:
+        state = _OrderProvisioningState(db, order_id)
+        order_state = _SqlAlchemyOrderState(db)
+        runs = _SqlAlchemyProvisionRuns(db)
+        try:
+            with pytest.raises(AccountingCreateUserError) as excinfo:
+                confirm_payment_and_provision(
+                    _command(order_id),
+                    pre_epoch_request,
+                    object(),
+                    state,
+                    runs,
+                    order_state,
+                    "receipt-adr018e",
+                    providers=_registry(accounting=accounting),
+                )
+        finally:
+            runs.close()
+            accounting.close()
+
+    assert excinfo.value.effect is AccountingCreateEffect.NO_SIDE_EFFECT
+
+    with Session(engine) as verify_db:
+        rolled_back_endpoint = verify_db.get(EgressEndpoint, endpoint_id)
+        assert rolled_back_endpoint is not None
+        assert rolled_back_endpoint.current_count == 0
+
+        gateway_binding_count = verify_db.scalar(
+            select(func.count())
+            .select_from(GatewayRouteBinding)
+            .where(GatewayRouteBinding.subscription_id == subscription_id)
+        )
+        assert gateway_binding_count == 0
+
+        persisted_subscription = verify_db.get(Subscription, subscription_id)
+        assert persisted_subscription is not None
+        assert persisted_subscription.status is SubscriptionStatus.PROVISION_FAILED
+
+        job = verify_db.scalar(select(Job).where(Job.dedupe_key == f"provision:{order_id}"))
+        assert job is not None
+        assert job.status is JobStatus.FAILED
+
+    # Named lock was never acquired -- a fresh acquisition succeeds immediately.
     with Session(engine) as db, gateway_route_binding_write(db, timeout_seconds=5):
         pass

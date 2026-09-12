@@ -1,7 +1,39 @@
 # ADR-018: `AccountingProvider.create_user()` failure ownership contract
 
 - 状态: 已接受
-- 日期: 2026-09-12
+- 日期: 2026-09-12（同日第二次修订：独立审查对本 ADR 首版实现的第二轮
+  复审再次发现两处 Major——(1) `MarzbanAccountingProvider.create_user()`
+  内、发生在 `POST /api/user` **dispatch 之前**的请求构造/校验失败
+  （naive datetime、pre-epoch tz-aware datetime、未来任何 preflight
+  validation）此前仍然只抛出裸 `MarzbanContractError`，未被规范化成
+  `AccountingCreateUserError(effect=NO_SIDE_EFFECT)`——这类失败发生时
+  POST 根本没有发出，却会落入 `ProvisioningService` 的
+  "未分类异常 → 视同 CREATED → 尝试 disable" 默认分支，对一个从未尝试
+  创建的 username 执行 `disable_user()`，与本 ADR 的核心目的直接矛盾。
+  (2) 新增的两类 phase-A `PENDING_MANUAL`（accounting `AMBIGUOUS`、
+  `CREATED` 但 disable 补偿本身失败）复用了
+  `services.confirm_payment_and_provision()` 里 `CREATE_TENANT` 时代
+  遗留的硬编码业务消息 `"external tenant creation requires review"`，
+  导致 `Subscription.provision_error` 在这两种新场景下描述错误的
+  subsystem，误导人工处置；同时补偿失败分支把原始 provider 异常文本
+  直接拼进 diagnostic 消息，完全丢弃了 disable 本身失败的异常信息。
+  本轮修复：(1) `create_user()` 把请求体构造阶段（当前只有
+  `_map_expire_to_marzban()`）包在自己的 `try/except
+  MarzbanContractError`，统一 `raise
+  AccountingCreateUserError(effect=NO_SIDE_EFFECT) from exc`——见下方
+  "Pre-dispatch request-construction failures" 一节。(2) 新增
+  `PendingManualReason`（typed、closed-set 的业务分类）+
+  `PENDING_MANUAL_BUSINESS_MESSAGES`（固定、安全、可持久化的消息映射），
+  `ProvisionOutcome` 新增 `reason` 字段，三个 phase-A `PENDING_MANUAL`
+  来源（`CREATE_TENANT`、accounting `AMBIGUOUS`、accounting 补偿失败）
+  各自标注正确的 `reason`；`services.py` 改为按 `reason` 查表得到
+  `Subscription.provision_error` 的消息，不再硬编码、也不解析
+  `pending_manual_error` 的自由文本；`_compensate_created_accounting_user()`
+  的 diagnostic 消息改为只携带异常*类型名*（原始 create 失败类型 +
+  disable 失败类型），不再把 disable 异常整体丢弃，也不把任意 provider
+  文本当业务数据持久化。详见下方 "Pre-dispatch request-construction
+  failures" 与 "Business-facing pending reason vs. run-level diagnostic"
+  两节。）
 - 决策范围: TASK-T16 Phase 2B7 独立复审（ChatGPT，针对 PR #64 exact head
   `d03e519199699310f659bd643c5d9addbf2ee77e` 的 Major 1）明确授权的、
   仅限于 `AccountingProvider.create_user()` 失败时 external-side-effect
@@ -174,6 +206,90 @@ mutation——这些代表已经真实发生的外部/业务进度。本 ADR 决
 无法从状态码本身证明提交发生在此之前，因此一律 `AMBIGUOUS`，不得默认为
 `NO_SIDE_EFFECT`），把这一切映射到 `AccountingCreateEffect`。不引入任何
 新的通用 retry/backoff/idempotency-key 机制。
+
+## Pre-dispatch request-construction failures（第二次修订新增）
+
+`create_user()` 在构造请求体时会调用 `_map_expire_to_marzban(expire_at)`，
+这一步可能因为 naive datetime、或换算后 epoch `<= 0` 的 tz-aware
+datetime而失败——这两种失败**都发生在任何网络请求被发出之前**，与
+`400`/`409`/认证失败一样，是"绝对确定没有 side effect"的一类失败，
+理应与它们分类为同一个 `NO_SIDE_EFFECT`。第二次修订前的实现遗漏了这一
+点：`_map_expire_to_marzban()` 抛出的 `MarzbanContractError` 没有在
+`create_user()` 内被捕获、规范化成
+`AccountingCreateUserError(effect=NO_SIDE_EFFECT)`，而是原样向上传播，
+落入 `ProvisioningService` "未分类异常 -> 视同 CREATED -> 尝试 disable"
+的向后兼容默认分支——对一个从未尝试创建的 username 执行了
+`disable_user()`，恰恰是本 ADR 存在的理由。
+
+修复：`create_user()` 现在把 `_map_expire_to_marzban(expire_at)` 的调用
+包在自己的 `try/except MarzbanContractError`，统一转换为
+`raise AccountingCreateUserError(str(exc), effect=NO_SIDE_EFFECT) from exc`，
+在构造请求体（因此也在任何 HTTP 调用）之前完成分类。这条规则对
+`create_user()` 内**任何**未来的、发生在 dispatch 之前的本地/preflight
+校验失败都成立，不只是 `expire_at` 一项——凡是在
+`self._call("POST", "/api/user", ...)` 被调用之前抛出的异常，都必须先
+规范化为 `NO_SIDE_EFFECT`，不得让它以裸 provider 异常类型逃逸。这不
+改变 `set_expire()`/`set_quota()`/`disable_user()` 等其它方法的异常
+contract——它们不产生 `AccountingCreateUserError`，本次修订只收紧了
+`create_user()` 自己的 classification boundary。
+
+## Business-facing pending reason vs. run-level diagnostic（第二次修订新增）
+
+`ProvisionOutcome.pending_manual_error`（自由文本，run-level 诊断，写入
+`Job`/run 审计记录）与 `Subscription.provision_error`（业务字段，人工
+处置时实际看到的消息）此前被 `services.confirm_payment_and_provision()`
+混为一谈：只要 `provision_prepare()` 返回任何 phase-A
+`ProvisionOutcome(PENDING_MANUAL)`，该函数就无条件把 CREATE_TENANT 时代
+的硬编码字符串 `"external tenant creation requires review"` 写入
+`Subscription.provision_error`。ADR-018 首版新增了两类新的 phase-A
+`PENDING_MANUAL` 来源（accounting `AMBIGUOUS`、`CREATED` 但 disable
+补偿本身失败）之后，这个硬编码就变成了错误信息——人工处置人员会被
+引导去检查一个完全无关的 subsystem（egress tenant creation）。
+
+修复：新增 `PendingManualReason`（`backend/app/domain/provisioning.py`，
+`StrEnum`，closed set）：
+
+```python
+class PendingManualReason(StrEnum):
+    EXTERNAL_TENANT_CREATION = "EXTERNAL_TENANT_CREATION"
+    ACCOUNTING_CREATE_AMBIGUOUS = "ACCOUNTING_CREATE_AMBIGUOUS"
+    ACCOUNTING_COMPENSATION_FAILED = "ACCOUNTING_COMPENSATION_FAILED"
+```
+
+与一个固定、安全、可直接持久化的消息映射
+`PENDING_MANUAL_BUSINESS_MESSAGES: Mapping[PendingManualReason, str]`——
+每条消息都是本仓库自己写的静态字符串，从不嵌入任何 provider 异常的
+`str()`、`repr()`、状态码、或原始 HTTP body。`ProvisionOutcome` 新增
+`reason: PendingManualReason | None` 字段；`provision_prepare()` 的三个
+phase-A `PENDING_MANUAL` 构造点（`CREATE_TENANT` 的两个异常分支、
+accounting `AMBIGUOUS` 分支、`_compensate_created_accounting_user()`
+的 disable-失败分支）各自标注正确的 `reason`。
+`services.confirm_payment_and_provision()` 改为：
+
+```python
+business_message = (
+    PENDING_MANUAL_BUSINESS_MESSAGES[prepared.reason]
+    if prepared.reason is not None
+    else "provisioning requires manual review"
+)
+order_state.mark_provision_pending(command, business_message)
+```
+
+不再硬编码、也不解析 `pending_manual_error` 的自由文本来猜测 reason
+（该字段的内容和格式从未被当作可靠的 parse 目标）。`pending_manual_error`
+继续作为 run-level 诊断保留（写入 `Job`/run 记录，供排查用），但不再是
+`Subscription.provision_error` 的数据来源。
+
+同时修正 `_compensate_created_accounting_user()`：此前 disable 本身失败
+时，diagnostic 消息完全丢弃了 disable 失败的异常，只保留原始
+create/postcondition 失败的文本。现在改为只携带两者的异常**类型名**
+（`type(exc).__name__`/`type(disable_exc).__name__`），既保留了两次
+失败的安全上下文，又不把任何 provider 异常的完整消息（可能在未来某个
+provider 实现中意外携带更敏感的内容，即使当前 Marzban 适配器已验证过
+不会）当作既成事实持久化——"安全失败上下文用类型/稳定代码，而不是原始
+异常文本"这条原则，同时适用于 run-level 诊断字段和业务字段，只是业务
+字段（`Subscription.provision_error`）额外要求完全静态、与 `reason`
+一一对应，不包含任何动态内容。
 
 ## 不做的事（显式拒绝）
 

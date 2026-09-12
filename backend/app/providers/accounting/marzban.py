@@ -497,12 +497,31 @@ class MarzbanAccountingProvider:
     def create_user(
         self, username: str, quota_bytes: int, expire_at: datetime | None
     ) -> AccountUserDTO:
+        # ADR-018: classify create_user()'s failure modes by
+        # exact-source-proven side-effect certainty instead of a single
+        # blanket exception, so ProvisioningService can compensate
+        # safely (never blind-disabling a username this call did not
+        # actually create). This includes failures that happen while
+        # still *constructing* the request -- a naive/pre-epoch
+        # expire_at, or any other future local/preflight validation --
+        # which by definition happen before anything is ever dispatched
+        # to the network, and are therefore always NO_SIDE_EFFECT, never
+        # left as an unclassified MarzbanContractError that would fall
+        # through to ProvisioningService's conservative "may have been
+        # created" default.
+        try:
+            mapped_expire = _map_expire_to_marzban(expire_at)
+        except MarzbanContractError as exc:
+            raise AccountingCreateUserError(
+                str(exc), effect=AccountingCreateEffect.NO_SIDE_EFFECT
+            ) from exc
+
         body = {
             "username": username,
             "status": "active",
             "data_limit": quota_bytes,
             "data_limit_reset_strategy": "no_reset",
-            "expire": _map_expire_to_marzban(expire_at),
+            "expire": mapped_expire,
             # Pinned VLESSSettings/VMessSettings/TrojanSettings/
             # ShadowsocksSettings (app/models/proxy.py, exact source
             # verified) all default every field via `default_factory`, so
@@ -513,11 +532,6 @@ class MarzbanAccountingProvider:
             "proxies": {self._protocol: {}},
             "inbounds": {self._protocol: list(self._inbound_tags)},
         }
-        # ADR-018: classify create_user()'s failure modes by
-        # exact-source-proven side-effect certainty instead of a single
-        # blanket exception, so ProvisioningService can compensate
-        # safely (never blind-disabling a username this call did not
-        # actually create).
         try:
             response = self._call("POST", "/api/user", operation="create_user", json_body=body)
         except MarzbanAuthenticationError as exc:

@@ -57,19 +57,69 @@ class ProvisionRequest:
     subscription_domain: str
 
 
+class PendingManualReason(StrEnum):
+    """ADR-018 (Major 2, second independent-review round): the
+    business-facing *category* of a phase-A ``PENDING_MANUAL`` outcome --
+    kept entirely separate from ``ProvisionOutcome.pending_manual_error``
+    (a free-text, run-level diagnostic). ``services.
+    confirm_payment_and_provision()`` maps this enum to a fixed, safe,
+    persistable message for ``Subscription.provision_error`` via
+    :data:`PENDING_MANUAL_BUSINESS_MESSAGES` -- it never persists
+    provider exception text (which could, for a future provider, embed
+    more than this repository has audited) as business data, and it
+    never hardcodes every ``PENDING_MANUAL`` as "external tenant
+    creation" the way it did before this enum existed.
+    """
+
+    EXTERNAL_TENANT_CREATION = "EXTERNAL_TENANT_CREATION"
+    ACCOUNTING_CREATE_AMBIGUOUS = "ACCOUNTING_CREATE_AMBIGUOUS"
+    ACCOUNTING_COMPENSATION_FAILED = "ACCOUNTING_COMPENSATION_FAILED"
+
+
+#: Fixed, safe, business-facing messages for each :class:`PendingManualReason`
+#: -- never a provider exception's own text, never dynamic, never
+#: containing a password/token/link/full HTTP body. This is what
+#: ``services.confirm_payment_and_provision()`` persists into
+#: ``Subscription.provision_error``; ``ProvisionOutcome.pending_manual_error``
+#: (free text, run-level diagnostic only) is never used for this purpose.
+PENDING_MANUAL_BUSINESS_MESSAGES: Mapping[PendingManualReason, str] = {
+    PendingManualReason.EXTERNAL_TENANT_CREATION: (
+        "external tenant creation requires review"
+    ),
+    PendingManualReason.ACCOUNTING_CREATE_AMBIGUOUS: (
+        "accounting user creation result is ambiguous and requires review"
+    ),
+    PendingManualReason.ACCOUNTING_COMPENSATION_FAILED: (
+        "accounting user creation failed and automatic compensation "
+        "(disable) also failed; requires manual review"
+    ),
+}
+
+
 @dataclass(frozen=True, slots=True)
 class ProvisionOutcome:
     run_id: str
     status: ProvisionStatus
     subscription_url: str | None = None
-    #: Set only when ``status`` is ``PENDING_MANUAL`` -- the original
-    #: external-tenant-creation error text (``ExternalTenantCreationError``
-    #: or any other exception ``CREATE_TENANT`` caught), preserved here so
-    #: the caller can persist it on the run's terminal status *after* its
-    #: own business-data commit completes, without provision_prepare()
-    #: having to durably write it first (ADR-017 run-persistence-ordering
+    #: Set only when ``status`` is ``PENDING_MANUAL`` -- a free-text,
+    #: run-level diagnostic (the original error text from
+    #: ``ExternalTenantCreationError``, an ambiguous accounting-create
+    #: failure, or a failed compensation attempt), preserved here so the
+    #: caller can persist it on the run's terminal status *after* its own
+    #: business-data commit completes, without provision_prepare() having
+    #: to durably write it first (ADR-017 run-persistence-ordering
     #: revision -- see ``ProvisioningService.mark_run_pending_manual``).
+    #: This is a diagnostic aid only -- never the source of the
+    #: business-facing ``Subscription.provision_error`` message (see
+    #: ``reason``/``PENDING_MANUAL_BUSINESS_MESSAGES``, ADR-018 Major 2).
     pending_manual_error: str | None = None
+    #: Set only when ``status`` is ``PENDING_MANUAL`` -- the typed,
+    #: closed-set business category (ADR-018 Major 2). ``services.
+    #: confirm_payment_and_provision()`` looks this up in
+    #: ``PENDING_MANUAL_BUSINESS_MESSAGES`` for the fixed, safe message it
+    #: persists to ``Subscription.provision_error`` -- it never parses or
+    #: otherwise relies on ``pending_manual_error``'s free text for that.
+    reason: PendingManualReason | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -320,12 +370,18 @@ class ProvisioningService:
                 self.runs.record_external_id(run_id, "egress_tenant", exc.external_id)
             self.runs.record_step(run_id, ProvisionStep.CREATE_TENANT, "PENDING_MANUAL")
             return ProvisionOutcome(
-                run_id, ProvisionStatus.PENDING_MANUAL, pending_manual_error=str(exc)
+                run_id,
+                ProvisionStatus.PENDING_MANUAL,
+                pending_manual_error=str(exc),
+                reason=PendingManualReason.EXTERNAL_TENANT_CREATION,
             )
         except Exception as exc:
             self.runs.record_step(run_id, ProvisionStep.CREATE_TENANT, "PENDING_MANUAL")
             return ProvisionOutcome(
-                run_id, ProvisionStatus.PENDING_MANUAL, pending_manual_error=str(exc)
+                run_id,
+                ProvisionStatus.PENDING_MANUAL,
+                pending_manual_error=str(exc),
+                reason=PendingManualReason.EXTERNAL_TENANT_CREATION,
             )
         self.runs.record_external_id(run_id, "egress_tenant", tenant.tenant_id)
         self._success(run_id, ProvisionStep.CREATE_TENANT)
@@ -414,6 +470,7 @@ class ProvisioningService:
                     pending_manual_error=(
                         f"accounting user creation result is ambiguous: {exc}"
                     ),
+                    reason=PendingManualReason.ACCOUNTING_CREATE_AMBIGUOUS,
                 )
             # CREATED: ownership is established -- compensate.
             return self._compensate_created_accounting_user(run_id, request, exc)
@@ -617,17 +674,26 @@ class ProvisioningService:
         """
         try:
             self.accounting.disable_user(request.username)
-        except Exception:
+        except Exception as disable_exc:
             self.runs.record_step(
                 run_id, ProvisionStep.CREATE_ACCOUNTING_USER, "PENDING_MANUAL"
             )
+            # Safe failure context only: the exception *type* of both the
+            # original failure and the disable failure, never a raw
+            # provider exception message re-embedded here -- this is a
+            # run-level diagnostic (ProvisionOutcome.pending_manual_error),
+            # not the business-facing Subscription.provision_error message
+            # (that comes from `reason` + PENDING_MANUAL_BUSINESS_MESSAGES
+            # below, never from this free-text field).
             return ProvisionOutcome(
                 run_id,
                 ProvisionStatus.PENDING_MANUAL,
                 pending_manual_error=(
-                    "accounting user creation failed, and disabling the "
-                    f"created user also failed: {exc}"
+                    f"accounting user creation failed ({type(exc).__name__}), "
+                    "and disabling the created user also failed "
+                    f"({type(disable_exc).__name__})"
                 ),
+                reason=PendingManualReason.ACCOUNTING_COMPENSATION_FAILED,
             )
         self.state.rollback_database()
         self._failed(run_id, ProvisionStep.CREATE_ACCOUNTING_USER, exc)

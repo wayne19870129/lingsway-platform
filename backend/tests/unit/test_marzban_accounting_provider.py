@@ -221,17 +221,31 @@ def test_create_user_none_expire_maps_to_zero() -> None:
 
 
 def test_create_user_naive_datetime_fails_closed() -> None:
-    provider = _provider(_recording_handler([]))
-    with pytest.raises(MarzbanContractError, match="timezone-aware"):
+    """ADR-018 round 2 (Major 1): a pre-dispatch request-construction
+    failure (never reaching the network) must classify as
+    AccountingCreateUserError(effect=NO_SIDE_EFFECT), not a bare
+    MarzbanContractError -- otherwise ProvisioningService's generic
+    exception branch would treat it as CREATED and blind-disable a
+    username this call never even attempted to create."""
+    requests: list[httpx.Request] = []
+    provider = _provider(_recording_handler(requests))
+    with pytest.raises(AccountingCreateUserError, match="timezone-aware") as excinfo:
         provider.create_user("alice", 1000, datetime(2027, 1, 1))  # noqa: DTZ001
+    assert excinfo.value.effect is AccountingCreateEffect.NO_SIDE_EFFECT
+    assert requests == []
 
 
 def test_create_user_pre_epoch_datetime_fails_closed() -> None:
-    """Major 2: a timezone-aware datetime whose epoch maps to <= 0 must
-    never be silently sent as Marzban's "0 = unlimited" sentinel."""
-    provider = _provider(_recording_handler([]))
-    with pytest.raises(MarzbanContractError, match="non-positive"):
+    """Major 2 (round 1) + Major 1 (round 2): a timezone-aware datetime
+    whose epoch maps to <= 0 must never be silently sent as Marzban's
+    "0 = unlimited" sentinel, and -- since this failure happens before
+    any request is dispatched -- must classify as NO_SIDE_EFFECT."""
+    requests: list[httpx.Request] = []
+    provider = _provider(_recording_handler(requests))
+    with pytest.raises(AccountingCreateUserError, match="non-positive") as excinfo:
         provider.create_user("alice", 1000, datetime(1969, 1, 1, tzinfo=UTC))
+    assert excinfo.value.effect is AccountingCreateEffect.NO_SIDE_EFFECT
+    assert requests == []
 
 
 def test_create_response_maps_to_account_user_dto_with_routing_principal() -> None:
