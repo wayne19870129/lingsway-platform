@@ -1,7 +1,10 @@
 # Project Continuity / Handoff
 
 **Last reconciled with main:** `94258d4da6ef0477104df0671202e6501f2b9b94`
-(2026-09-12), during Issue #74.
+(2026-09-12), during Issue #74; corrected 2026-09-13 on this same PR
+(#75) after independent review found the Marzban provider baseline,
+the "Open" task list, an in-flight automation failure, and a role-
+wording contradiction all needed fixing — see sections 3, 5, 6, and 7.
 
 This document is maintained by whichever agent last touched a section
 below; if it looks stale, the next agent should refresh the relevant
@@ -51,9 +54,16 @@ from anything a prior conversation "remembers."
   and any production/go-live decision. No automation replaces these
   three things.
 - **Claude Code**: the sole implementation executor. Edits code, runs
-  tests/lint/build, creates branches, commits, pushes, creates/updates
-  PRs, reads and judges review feedback, pushes fixes. Never merges,
-  never deploys, never closes another party's PR/Issue.
+  tests/lint/build, creates branches, commits, and pushes; reads and
+  judges review feedback and pushes fixes. Never merges, never deploys,
+  never closes another party's PR/Issue. On the Issue-first background
+  path (section 5), Claude itself does not call `gh`/create the PR —
+  mechanical PR creation and CI/Security/Risk dispatch are the
+  repository's own deterministic workflow step's responsibility, run
+  after the Claude Code Action step completes (see section 5's
+  `claude-ensure-pr-and-dispatch.sh` description, including its current
+  known failure mode). When triggered directly on an already-open PR,
+  Claude pushes new commits to that same PR's branch itself.
 - **ChatGPT / ChatGPT Work**: requirements/acceptance-criteria
   orchestration and independent review of a PR at an exact commit SHA.
   Work is an **event-triggered reviewer**, not a continuous background
@@ -167,6 +177,24 @@ Actions summary shows a different actual model/effort than configured,
 that is a live finding worth its own Issue, not something to silently
 patch here.
 
+**Live finding from this same Issue #74 run — unresolved, recovery
+path not yet exercised successfully:** Actions run `34730093694` shows
+the `claude` job's Claude Code Action step completing successfully and
+pushing branch `claude/issue-74-20260913-0116` at commit
+`34555478466f66ac67aaa6c878238f7ba5ed10e4`, but the following
+deterministic `scripts/claude-ensure-pr-and-dispatch.sh` step then
+failed (exit code 1) with `pull request create failed: GraphQL: GitHub
+Actions is not permitted to create or approve pull requests
+(createPullRequest)`. No PR existed until a human/manual recovery
+created PR #75 from that branch; the `claude-recovery` job in that same
+run was skipped, not exercised. **Do not assume the ensure-PR step of
+this automation is a closed, healthy loop** — this is the first
+production evidence that it can fail on a GitHub Actions permission
+restriction, and that failure mode has not yet been fixed or verified
+recoverable via `claude-recovery`. Fixing this is a workflow-code change
+and is explicitly out of scope for this docs-only PR; it should be
+tracked as its own follow-up Issue/TASK.
+
 ## 6. Durable technical baseline
 
 High-level stack: Python/FastAPI backend (`backend/app/`), Next.js
@@ -191,11 +219,20 @@ here.
   (`backend/app/providers/egress/webshare.py`,
   `backend/app/providers/gateway/xray_file.py`,
   `backend/app/providers/forwarder/mihomo.py`,
-  `backend/app/providers/transport/subscription.py`) but are exercised
-  only by their own unit/guard tests, never by `registry.py` or any
-  request path. There is **no Marzban accounting-provider implementation
-  file at all** — only `Settings` fields (`marzban_*`) that assume one
-  will exist.
+  `backend/app/providers/transport/subscription.py`,
+  `backend/app/providers/accounting/marzban.py`) but are exercised only
+  by their own unit/guard tests, never by `registry.py` or any request
+  path. **Correction (verified directly against current `main`):**
+  `backend/app/providers/accounting/marzban.py` (`MarzbanAccountingProvider`,
+  TASK-T16 Phase 2B7) does exist and implements a production-capable
+  HTTP adapter against the pinned Marzban v0.8.4 admin API, with its own
+  offline HTTP contract tests. Its own module docstring is explicit that
+  *implemented* and *wired/selectable* are different facts: nothing in
+  this repository wires it into `registry.py` or selects it via
+  `ACCOUNTING_PROVIDER=marzban` yet — that is deliberately a separate,
+  later, explicit opt-in task (Phase 2C), so no real Marzban instance is
+  contacted by any code path in this repository today. Do not conflate
+  "adapter implemented" with "provider live/selectable."
 - Full investigation trail (inventory → DB-sufficiency analysis → Marzban
   ownership/route-identity decisions → in-flight `close()`/registry-leak
   bugfix review) is in
@@ -243,21 +280,38 @@ decays quickly.
   workflow baseline), Issue #67 / TASK-T19 (concurrency self-cancellation
   fix), Issue #71 / TASK-T20 (tool-permission mismatch fix), Issue #68 /
   TASK-T21 (rolling `sonnet` + `medium` effort).
-- **Open** (per `docs/82-tasks/`, not yet confirmed complete against
-  `backend/**`):
-  - `TASK-T5G-scheduler-jobs.md` — migrating scheduler periodic jobs
-    (accounting/transport/usage sync, egress drift detection); the task
-    file itself states these jobs are not yet migrated.
-  - `TASK-T13-split-routing.md` — client split-routing rules for
-    subscriptions.
-  - `TASK-T14-ci-audit-retry.md` — retry logic for `npm audit` in
-    `security.yml`.
-  - `TASK-T15-ip-availability-precheck.md` — IP-availability precheck at
-    order creation time.
-- **Planned / unverified-live**: TASK-T16 Phase 2C (real provider
-  registry wiring) — explicitly deferred pending Phase 2B completion; do
-  not assume any real provider is live-selectable regardless of
-  environment variables (see section 6).
+- **Correction (reconciled against current `main` and each TASK file's
+  own "现状复核/完成情况" section, not left as historical prose):**
+  `TASK-T5G-scheduler-jobs.md`, `TASK-T14-ci-audit-retry.md`, and
+  `TASK-T15-ip-availability-precheck.md` are already implemented on
+  `main` — they are **not** open candidates:
+  - `TASK-T5G-scheduler-jobs.md` — `backend/app/workers/drift_check.py`
+    and the accounting/transport-sync failure→`DEGRADED` handling are
+    landed and covered by `backend/tests/unit/test_drift_check.py` and
+    `backend/tests/unit/test_scheduler_transport_failure.py`.
+  - `TASK-T14-ci-audit-retry.md` — `.github/workflows/security.yml`'s
+    `npm-audit` job already retries only on transient 5xx/network errors
+    (bounded attempts, no `continue-on-error`), verified directly in the
+    workflow file.
+  - `TASK-T15-ip-availability-precheck.md` — the read-only IP-availability
+    precheck is implemented in `backend/app/api/public.py` (order
+    creation), with the confirm-payment-time re-check still in place.
+- **Genuinely still open**: `TASK-T13-split-routing.md` — the code
+  change is intentionally *not* started. `CORE_RULES` exist in
+  `backend/app/domain/subscription_render.py` but are deliberately not
+  wired into rendering (ADR-012); the task's own "现状复核" splits it
+  into a Phase 0 (manual, real-client evidence collection — GEOSITE/GEOIP
+  capability, single-subscription gray rollout data) that must land in
+  `docs/70-external-facts.md` before any Phase 1 code change, per the
+  task's own constraints. This is blocked on real-world evidence, not
+  forgotten.
+- **Actual next technical frontier**: TASK-T16 Phase 2C (real provider
+  registry wiring/opt-in selection) — `build_registry()` is still
+  mock/noop-only (verified directly against `registry.py`, section 6)
+  while the Marzban accounting adapter and `ProviderRegistry`
+  lifecycle/close() foundations already exist. Do not assume any real
+  provider is live-selectable regardless of environment variables (see
+  section 6).
 - **This Issue (#74)**: adds this continuity document and the
   `CLAUDE.md` startup-reading-order/maintenance-rule update described
   below; also serves as the first live validation of the TASK-T21
