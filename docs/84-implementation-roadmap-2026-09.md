@@ -33,14 +33,14 @@ changes, they are listed as recommended follow-up Issues/TASKs in section
 | API entry points (`api/public.py`, `admin.py`, `subscription.py`, `health.py`) | **Complete** | All spec-listed customer/admin/health flows present: register/login/logout/change-password, plans, orders + payment-notice, admin order-confirm/customers/egress/capacity/metrics/accounting-health/sync-usage, `/health` + `/health/egress` |
 | Domain layer (`domain/*`) | **Complete, functional** | `provisioning.py` (725 lines) implements the full 9-step saga with real compensation logic (`_compensate_created_accounting_user`, DB rollback, `PendingManualReason`), not a stub. `ordering.py`, `subscription_render.py` substantial; `capacity.py`/`quota.py` thin by design (simple calculations) |
 | Provider registry (`providers/registry.py`) | **Stub-only wiring, real adapters unwired** | `build_registry()` raises `ProviderConfigurationError` for any non-mock/noop provider setting — confirmed directly in code, matching `docs/83-project-continuity.md` section 6. This is the single largest gap between "looks done" and "is live" in the repo |
-| Real provider adapters (webshare, xray_file, mihomo, marzban, transport/subscription) | **Partial, adapter-complete but registry-unreachable** | `webshare.py` (344 lines), `xray_file.py` (418), `mihomo.py` (155), `marzban.py` (734, largest adapter), `transport/subscription.py` (257) all exist with their own unit/guard tests, but none is selectable through `build_registry()` under any env var combination |
+| Real provider adapters (webshare, xray_file, mihomo, marzban, transport/subscription) | **Partial, per-provider completeness varies, and none is registry-reachable** | `webshare.py` (344 lines), `xray_file.py` (418), `mihomo.py` (155), `marzban.py` (734, largest adapter), `transport/subscription.py` (257) all exist with their own unit/guard tests, but none is selectable through `build_registry()` under any env var combination. Completeness is uneven, not uniform: `webshare.py` specifically still has real gaps beyond registry wiring — `list_endpoints()` discards the API response and returns `[]`, `capacity()` returns an all-zero `CapacityDTO`, and `get_tenant_usage()`/`get_credentials()` raise `NotImplementedError("response mapping arrives with T5 migration")`. Do not read "adapter exists" as "adapter is functionally complete" for Webshare; the other adapters were not individually re-audited for the same gap pattern in this pass |
 | Database models & migrations | **Complete, actively evolving** | All spec model modules present (`identity`, `billing`, `subscription`, `egress`, `gateway`, `ops`); 22 Alembic migrations (`0001`–`0022`) covering core → accounting sync → transport → routing/egress → subscription engine → billing → ops → capacity → dynamic traffic policy → dual route versions → payment → security baseline → fixed-cycle billing → dedicated egress → transport placeholders → gateway route bindings → webshare binding credentials → egress metadata |
 | Workers/background jobs | **Complete, functional (renamed from spec)** | `scheduler.py`, `drift_check.py`, `accounting_sync.py`, `transport_sync.py` — spec's `usage_sync.py`/`baseline.py` naming has diverged but equivalent coverage exists (see 2.7); tested in `test_scheduler.py`, `test_scheduler_transport_failure.py`, `test_drift_check.py` |
 | Guard tests (`tests/guards/*`) | **Complete, exceeds spec** | All 5 spec-required guard tests present (`test_webshare_guard.py`, `test_safe_reload.py`, `test_capacity_guard.py`, `test_routing_invariants.py`, `test_secret_leak.py`) plus an extra `test_webshare_procurement.py` |
 | Frontend pages | **Partial** | All customer/admin route scaffolding exists (`(customer)/{login,register,portal,plans,orders,subscriptions}`, `(admin)/admin/{orders,customers,egress,capacity}`). `(docs)/guides/{windows,macos,ios,android}` directories exist but contain **only `.gitkeep`** — no actual client setup guide content, despite subscription generation being a core product feature these guides are meant to explain to end users |
 | Frontend API client (`frontend/lib/api.ts`) | **Stub-only** | 1 line — a bare `NEXT_PUBLIC_API_BASE_URL` constant, not a typed client. Pages call `fetch()` ad hoc per-file (`login/page.tsx`, `register/page.tsx`, `admin/components.tsx`) rather than through a shared typed layer. Functionally connected to the real backend, but thinner than "API integration" implies and harder to keep in sync with backend contract changes |
 | Deployment scripts (`deploy/bootstrap.sh`, `deploy/lib/00–80`) | **Complete, verified fail-closed** | Full 00-preflight through 80-schedule sequence present, plus `rollback.sh` and `inventory.example.yml`. `.github/workflows/deploy-*.yml` defaults `DRY_RUN=true` with an explicit assertion gating any real action; every step in dry-run mode only echoes intended actions |
-| `ops/` tooling | **Partial** | `ops/gateway/{render_xray_routes.py,safe_reload.py}`, `ops/forwarder/{render_mihomo_config.py,collect_mihomo_usage.py}`, `ops/probe/egress_chain_probe.py`, `ops/procurement/{cli.py,config/procurement.yaml}` all present and real. `ops/backup/` is **empty except `.gitkeep`** — no actual backup/restore script despite `docs/30-backup-restore.md` documenting the intended procedure and `AGENTS.md`'s iron rules assuming backups exist as a precondition for several allowed-without-approval actions. `ops/status.py` (spec'd operational overview + `OVER_PROXY_LIMIT` alert) is **absent entirely** |
+| `ops/` tooling | **Partial** | `ops/gateway/{render_xray_routes.py,safe_reload.py}`, `ops/forwarder/{render_mihomo_config.py,collect_mihomo_usage.py}`, `ops/probe/egress_chain_probe.py`, `ops/procurement/{cli.py,config/procurement.yaml}` all present and real. `ops/backup/` is **empty except `.gitkeep`** — no actual backup/restore script exists yet. `docs/30-backup-restore.md` currently only states "Backup, restore, and PowerShell GPG instructions are delivered in T6/T7" — it does **not** itself document a procedure, contrary to this document's earlier wording. `AGENTS.md`'s "允许自主执行" (allowed-without-approval) list does condition running `alembic upgrade` on "先成功跑一次加密备份" (a successful encrypted backup having run first) — that specific precondition is real and currently unsatisfiable since the backup script doesn't exist. `ops/status.py` (spec'd operational overview + `OVER_PROXY_LIMIT` alert) is **absent entirely** |
 | Tests overall | **Complete breadth** | 17 unit test files, 4 integration test files, 6 guard test files (27 total). No `xfail`/`skip` markers found anywhere under `backend/tests/`. Integration tests **fail-closed rather than skip** without `TEST_DATABASE_URL` (`test_db_adapters.py`: `pytest.fail("TEST_DATABASE_URL is required; DB adapter tests are never skipped")`) — stronger guarantee than a soft skip |
 | `docs/70-external-facts.md` | **Sparse, confirms TASK-T13 is correctly blocked** | Only ~1 recorded "已实测" (tested) fact. Consistent with TASK-T13 (split-routing) being deliberately gated on real-world evidence per ADR-012, not neglected |
 
@@ -50,13 +50,16 @@ These are observations from this audit that are **not** already tracked by
 an open Issue or TASK file as of this document's writing (verify against
 current GitHub state before filing — see section 5):
 
-1. **`ops/backup/` is an empty stub**, while `docs/30-backup-restore.md`
-   documents a backup/restore procedure as already existing, and
-   `AGENTS.md`'s "允许自主执行" list conditions `alembic upgrade` on "先
-   成功跑一次加密备份" (a successful encrypted backup having run first).
-   If the backup script itself doesn't exist yet, that precondition can
-   never be satisfied in practice — this is a production-readiness
-   blocker, not a documentation nit.
+1. **`ops/backup/` is an empty stub.** `docs/30-backup-restore.md` does
+   not itself document a backup/restore procedure yet — it only states
+   that one is "delivered in T6/T7" — so this is a genuinely missing
+   capability, not a doc/code mismatch. Separately, `AGENTS.md`'s "允许
+   自主执行" list conditions running `alembic upgrade` on "先成功跑一次
+   加密备份" (a successful encrypted backup having run first); with no
+   backup script, that specific precondition can never be satisfied in
+   practice. Note this is a confirmed gap in the backup tooling itself,
+   not a proven blocker on TASK-T16 Phase 2C specifically — see section 4
+   for that distinction.
 2. **`ops/status.py` (operational overview + capacity/quota alerting)
    does not exist**, despite being spec'd and despite `admin/capacity`
    and `admin/metrics` API endpoints already existing to surface similar
@@ -119,34 +122,50 @@ direct code inspection confirms it still holds.
   write-capable ones (`create_tenant`, `replace_endpoint`) gated behind
   guard-test-equivalent coverage. Any follow-up Issue for Phase 2C should
   preserve that ordering rather than wiring all providers at once.
-- **Backup tooling (gap 2.1) is a dependency for T16 Phase 2C**, not just
-  an independent gap: T16's own constraint #2 requires integration tests
-  against real credentials, and `AGENTS.md`'s alembic-upgrade precondition
-  assumes backups work — starting real-provider wiring before backup/
-  restore tooling exists increases blast radius of any Phase 2C mistake
-  with no verified recovery path.
+- **Backup tooling (gap 2.1) is a recommended risk-sequencing choice
+  ahead of T16 Phase 2C, not a proven hard dependency.** TASK-T16 Phase
+  2C's own file does not name an Alembic migration/recovery step as part
+  of its scope, and `AGENTS.md`'s alembic-upgrade-requires-backup
+  precondition is specifically about running `alembic upgrade`, which is
+  not itself part of Phase 2C's stated work. The recommendation to land
+  backup/restore tooling first is a risk-control judgment call — Phase
+  2C introduces real external-system side effects with no verified
+  recovery path if something goes wrong — not an assertion that Phase 2C
+  is technically blocked from starting without it. Treat section 5's
+  ordering as recommended sequencing, and revisit it if a concrete Phase
+  2C path is later found to require an Alembic upgrade or a recovery
+  operation.
 - **TASK-T13 (split-routing) remains correctly blocked** on
   `docs/70-external-facts.md` evidence per ADR-012's own phasing; nothing
   in this audit changes that — it should stay blocked, not be
   reprioritized upward just because other work is ready to start.
-- **Issue #76 (failure class B) and Issue #79/TASK-T22 (App-token
-  identity) are still open automation-reliability items**, per
-  `docs/83-project-continuity.md` sections 5 and 7. They don't block
-  product work directly (PRs still get created and merged manually today,
-  just with a manual-approval step) but should be resolved before scaling
-  up the volume of Issue-driven product work, since each still-open
-  automation gap adds manual friction per PR.
+- **Issue #76 is completed/closed; Issue #79 (TASK-T22, App-token
+  identity) is the remaining open automation-reliability item.** As of
+  this document's original writing, `docs/83-project-continuity.md`
+  still described #76 as open pending failure-class-B, with #79 tracked
+  as a separate, later finding — that continuity-doc text has not been
+  re-verified against live GitHub state as part of this audit fix and
+  may itself be stale; #79's own continuity-doc text already describes
+  it as "superseding Issue #76's remaining failure-class-B scope." #79
+  doesn't block product work directly (PRs still get created and merged
+  manually today, just with a manual-approval step) but should be
+  resolved before scaling up the volume of Issue-driven product work,
+  since it adds manual friction per PR. A fresh session should confirm
+  #76/#79's live GitHub state directly before relying on either this
+  document or the continuity document for that specific fact.
 
 ## 5. Recommended next TASK/Issue sequence
 
 In priority order, as separate follow-up Issues per this audit Issue's own
 constraint (implementation changes go into new Issues, not this PR):
 
-1. **Backup/restore tooling (`ops/backup/`)** — currently an empty stub
-   despite being a stated precondition for alembic upgrades and a
-   documented procedure in `docs/30-backup-restore.md`. Recommend this
-   lands *before* TASK-T16 Phase 2C, since Phase 2C's own risk profile
-   assumes recoverability.
+1. **Backup/restore tooling (`ops/backup/`)** — currently an empty stub;
+   `docs/30-backup-restore.md` does not yet document the procedure, and
+   `AGENTS.md`'s `alembic upgrade` precondition can't be satisfied without
+   it. Recommend this lands *before* TASK-T16 Phase 2C as a risk-control
+   sequencing choice (Phase 2C introduces unrecoverable-if-wrong external
+   side effects) — not because Phase 2C is proven to technically require
+   it; see section 4.
 2. **TASK-T16 Phase 2C (real provider registry wiring)** — the actual
    next product frontier per `docs/83-project-continuity.md` and this
    audit's independent confirmation. Follow the TASK file's own
@@ -164,13 +183,29 @@ constraint (implementation changes go into new Issues, not this PR):
 5. **`frontend/lib/api.ts` typed client** — quality-of-life, not
    blocking; reduces risk of future API-contract drift going unnoticed
    on the frontend side.
-6. **Issue #76 (failure class B) and Issue #79/TASK-T22** — continue per
-   their existing sequencing in `docs/83-project-continuity.md`; not
-   re-litigated here since they're already tracked and open.
+6. **Issue #79/TASK-T22** — the remaining open automation-reliability
+   item (Issue #76 is completed/closed); continue per its existing
+   sequencing in `docs/83-project-continuity.md`. Not re-litigated here
+   since it's already tracked.
 
 TASK-T13 (split-routing) is deliberately **not** in this sequence — it
 stays blocked on external evidence collection per its own file, and
 nothing in this audit changes that.
+
+**On filing these as Issues:** Issue #81 asks that, where this audit
+implies implementation changes, those changes go into new follow-up
+Issues rather than expanding this docs-only PR's scope — it does not ask
+for the audit to stop at a recommendation and leave it unfiled. Items
+1–3 above are validated findings with clear, independently-checked
+evidence (empty `ops/backup/`, empty guide route stubs, confirmed
+one-line `api.ts`) and are ready to be filed as Issues once a session
+with Issue-creation access does so; this PR itself does not create them
+because doing so is outside this docs-only change's own diff surface,
+not because filing them isn't warranted. Item 4 (`ops/status.py`) should
+be validated first — specifically, whether the existing `admin/capacity`
+/`admin/metrics` endpoints already cover its intended purpose — before
+filing, since filing it as-is risks duplicating already-shipped
+capability.
 
 ## 6. Maintenance note
 
