@@ -238,19 +238,31 @@ maintainer approval required:
 - Security run `34736481706` — `workflow_dispatch` — `success`
 - Risk classification run `34736482463` — `workflow_dispatch` — `success`
 
-**Durable review rule:** for owner-triggered, trusted Claude/Actions
-branches created or updated through this workflow, the deterministic
-same-head-SHA `workflow_dispatch` CI/Security/Risk trio is the
-authoritative set of required checks. Duplicate approval-gated
-`pull_request` runs for that same SHA do not block PASS/merge readiness
-when the dispatch trio exists and is green — do not wait on or manually
-approve those duplicate runs as a precondition for merge. Ordinary/
-external PRs that are not on this trusted automation path are
-unaffected: they remain subject to their normal PR-triggered checks and
-all existing external-contributor approval protections, which were not
-weakened by this resolution. No PAT, custom GitHub App token, or
-relaxation of the external-contributor approval policy was needed to
-close Issue #76.
+**Correction (2026-09-13, live evidence from PR #78 on this same
+automation path): the "durable review rule" above was wrong about
+merge readiness.** PR #78 head
+`cf688fd5b304f2a62eb9f958fd49cd640aa88191` reproduced the same pattern —
+the deterministic `workflow_dispatch` CI (`34736481046`-style),
+Security, and Risk runs all completed `success` on that SHA — but
+GitHub still reported the PR as `mergeable=true` /
+`mergeable_state=blocked`, because the active `Protect main` ruleset
+requires the `pull_request`-triggered status checks specifically, and
+those three duplicate runs remained `action_required` (approval-gated,
+since the PR was created/updated through `GITHUB_TOKEN`). Same-SHA
+`workflow_dispatch` success is real evidence that the code and checks
+themselves execute correctly, but it does **not** remove GitHub's
+approval-required gate on the `pull_request`-triggered runs, and it does
+**not** unblock the protected-branch merge state on its own. Do not
+report a PR as merge-ready on dispatch-trio success alone; the
+`pull_request` runs on that same SHA still need to be approved (or the
+ruleset/token path changed) before `mergeable_state` clears. Ordinary/
+external PRs were never affected either way: they remain subject to
+their normal PR-triggered checks and all existing external-contributor
+approval protections. The durable fix for zero-manual-approval —
+issuing the PR-creating/updating call from a GitHub App installation
+token or a PAT instead of `GITHUB_TOKEN`, so GitHub does not classify
+the resulting `pull_request` runs as needing approval — has **not**
+been implemented; Issue #76 remains open on that basis.
 
 **Process lesson from PR #77 (Issue #76 reopened once because of this):**
 GitHub parses a leading closing-keyword form (`Closes #N`, `Fixes #N`,
@@ -346,9 +358,14 @@ decays quickly.
 - **Merged / resolved** as of the SHA above: Issue #66 (background Claude
   workflow baseline), Issue #67 / TASK-T19 (concurrency self-cancellation
   fix), Issue #71 / TASK-T20 (tool-permission mismatch fix), Issue #68 /
-  TASK-T21 (rolling `sonnet` + `medium` effort), Issue #76 (ensure-PR
-  `createPullRequest` failure and `action_required` dispatch-trio
-  reconciliation — see section 5).
+  TASK-T21 (rolling `sonnet` + `medium` effort). **Issue #76 is only
+  partially resolved** — failure class A (`createPullRequest` denial) is
+  fixed and validated, but failure class B is not: live evidence from
+  PR #78 shows same-SHA `workflow_dispatch` success does not clear the
+  `action_required` `pull_request` runs or the protected-branch
+  `mergeable_state=blocked` state (see section 5's correction above).
+  Issue #76 stays open until a PR created/updated through this
+  automation no longer needs per-SHA maintainer approval to merge.
 - **Correction (reconciled against current `main` and each TASK file's
   own "现状复核/完成情况" section, not left as historical prose):**
   `TASK-T5G-scheduler-jobs.md`, `TASK-T14-ci-audit-retry.md`, and
@@ -374,9 +391,13 @@ decays quickly.
   `docs/70-external-facts.md` before any Phase 1 code change, per the
   task's own constraints. This is blocked on real-world evidence, not
   forgotten.
-- **Issue #76 is resolved** (workflow-reliability fix for the ensure-PR
-  failure and the `action_required` dispatch-trio reconciliation
-  recorded in section 5).
+- **Issue #76 remains open.** Failure class A (ensure-PR
+  `createPullRequest` denial) is fixed and validated. Failure class B is
+  **not** resolved: `action_required` `pull_request` runs and the
+  protected-branch merge block persist for PRs created/updated through
+  `GITHUB_TOKEN`, even when the same-SHA `workflow_dispatch` CI/Security/
+  Risk trio is green — see section 5's correction. The zero-manual-
+  approval acceptance criterion is not yet satisfied.
 - **Actual next technical frontier**: TASK-T16 Phase 2C (real provider registry wiring/opt-in selection) —
   `build_registry()` is still mock/noop-only (verified directly against
   `registry.py`, section 6) while the Marzban accounting adapter and
