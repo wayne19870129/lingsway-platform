@@ -139,20 +139,10 @@ direct code inspection confirms it still holds.
   `docs/70-external-facts.md` evidence per ADR-012's own phasing; nothing
   in this audit changes that — it should stay blocked, not be
   reprioritized upward just because other work is ready to start.
-- **Issue #76 is completed/closed; Issue #79 (TASK-T22, App-token
-  identity) is the remaining open automation-reliability item.** As of
-  this document's original writing, `docs/83-project-continuity.md`
-  still described #76 as open pending failure-class-B, with #79 tracked
-  as a separate, later finding — that continuity-doc text has not been
-  re-verified against live GitHub state as part of this audit fix and
-  may itself be stale; #79's own continuity-doc text already describes
-  it as "superseding Issue #76's remaining failure-class-B scope." #79
-  doesn't block product work directly (PRs still get created and merged
-  manually today, just with a manual-approval step) but should be
-  resolved before scaling up the volume of Issue-driven product work,
-  since it adds manual friction per PR. A fresh session should confirm
-  #76/#79's live GitHub state directly before relying on either this
-  document or the continuity document for that specific fact.
+- **Issue #87 / TASK-T23 supersedes the custom App-token plan in
+  TASK-T22.** PR #88 restores the minimal standard Claude Code Action
+  path. After merge, validate it with a new owner-authored `@claude`
+  Issue comment before scaling Issue-driven product work.
 
 ## 5. Recommended next TASK/Issue sequence
 
@@ -183,10 +173,9 @@ constraint (implementation changes go into new Issues, not this PR):
 5. **`frontend/lib/api.ts` typed client** — quality-of-life, not
    blocking; reduces risk of future API-contract drift going unnoticed
    on the frontend side.
-6. **Issue #79/TASK-T22** — the remaining open automation-reliability
-   item (Issue #76 is completed/closed); continue per its existing
-   sequencing in `docs/83-project-continuity.md`. Not re-litigated here
-   since it's already tracked.
+6. **Issue #87/TASK-T23 post-merge validation** — run the real
+   owner-authored `@claude` Issue-comment test and confirm the resulting
+   PR checks start without manual workflow approval.
 
 TASK-T13 (split-routing) is deliberately **not** in this sequence — it
 stays blocked on external evidence collection per its own file, and
