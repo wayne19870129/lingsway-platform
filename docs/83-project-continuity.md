@@ -176,24 +176,36 @@ duplicated here.
 **Pending, owner-actionable simplification (Issue #87 / TASK-T23,
 not yet applied):** the owner asked to simplify this workflow back to a
 bare `@claude` → PR → CI → human-merge loop, removing the `dedup` job
-(instruction-hash marker, GraphQL open-PR preflight, redirect comment)
-and the actor-scoped `concurrency:` block described above. Like
-TASK-T22, this requires editing `.github/workflows/claude.yml` itself,
-which an `issue_comment`-triggered Claude session cannot do (no
-`workflows: write`) — the exact new file content and the tradeoffs of
-removing each piece (mainly: losing the pre-Claude-turn "Issue already
-has an open PR" refusal, so that case is now caught only after a full
-Claude turn loop runs, via `ensure-pr`'s own `ISSUE_NUMBER` guard) are
-recorded in `docs/82-tasks/TASK-T23-simplify-claude-workflow.md` for the
-owner to apply manually. **Do not treat the bullets above (actor-scoped
-concurrency, exact-instruction dedup, GraphQL open-PR preflight) as
-still-desired-state once that diff is applied** — re-read TASK-T23 and
-correct this section at that time rather than assuming this list stays
-accurate. GitHub App dependency and automatic PR approval, the other two
-things Issue #87 asked to remove, were confirmed **not present** in the
-current file (TASK-T22's App-token diff was never applied; the
-auto-merge workflow was already deleted per TASK-T18) — no action
-needed for those two.
+(instruction-hash marker, GraphQL open-PR preflight, redirect comment).
+**The actor-scoped `concurrency:` block described above is kept, not
+removed.** An earlier draft of TASK-T23 proposed removing it too, on the
+theory that `ensure-pr`'s idempotency alone was sufficient; independent
+review (PR #88, round 1) found that theory wrong for Issue-first
+triggers specifically — each Issue-first run creates a new timestamped
+branch, so `ensure-pr`'s cross-branch `ISSUE_NUMBER` duplicate-PR guard
+is a non-atomic check-then-act (`gh pr list` then, later, `gh pr
+create`) with no lock between them, and two concurrent owner-triggered
+runs on the same Issue can both pass the check before either creates a
+PR. The actor-scoped `concurrency:` block is what prevents that race
+today (it serializes runs sharing the same Issue/PR + actor group), so
+TASK-T23 was revised to keep it. Like TASK-T22, applying this diff
+requires editing `.github/workflows/claude.yml` itself, which an
+`issue_comment`-triggered Claude session cannot do (no `workflows:
+write`) — the exact new file content and the tradeoffs of removing the
+`dedup` job (mainly: losing the pre-Claude-turn "Issue already has an
+open PR" refusal, so that case is now caught only after a full Claude
+turn loop runs, via `ensure-pr`'s own `ISSUE_NUMBER` guard) are recorded
+in `docs/82-tasks/TASK-T23-simplify-claude-workflow.md` for the owner to
+apply manually. **Do not treat the exact-instruction dedup / GraphQL
+open-PR preflight bullets above as still-desired-state once that diff is
+applied** — the actor-scoped concurrency bullet, unlike those two,
+remains accurate after the diff — re-read TASK-T23 and correct this
+section at that time rather than assuming this list stays accurate.
+GitHub App dependency and automatic PR approval, the other two things
+Issue #87 asked to remove, were confirmed **not present** in the current
+file (TASK-T22's App-token diff was never applied; the auto-merge
+workflow was already deleted per TASK-T18) — no action needed for those
+two.
 
 **This Issue (#74) is itself the first real post-merge live validation of
 the TASK-T21 configuration** (rolling `sonnet` + `medium` effort). Do not

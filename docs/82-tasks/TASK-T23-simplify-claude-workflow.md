@@ -42,46 +42,63 @@ and the trigger constraints (issue_comment kept, owner-only, requires
 
 | Issue #87 ask | Current state in `claude.yml` | Action |
 |---|---|---|
-| Keep `issue_comment` trigger | Present (`on.issue_comment.types: [created]`), plus `pull_request_review_comment` for PR-rework and `workflow_dispatch` for manual recovery | Keep all three — `pull_request_review_comment` is how a follow-up `@claude` on an *existing* PR reaches this workflow at all; removing it would silently break the "human reviews, then asks for a fix" half of the loop the Issue itself describes. `workflow_dispatch` is the recovery path from TASK-T20 (retry the deterministic PR/dispatch step without re-running Claude); keeping it costs nothing and is owner-gated the same way. |
+| Keep `issue_comment` trigger | Present (`on.issue_comment.types: [created]`), plus `pull_request_review_comment` for inline PR review comments and `workflow_dispatch` for manual recovery | Keep all three, but correcting the rationale for `pull_request_review_comment`: a top-level PR "Conversation" comment is, in the GitHub API, an Issue comment on the PR's own Issue object, so `issue_comment` alone already covers the ordinary "human reviews, then asks for a fix in a normal PR comment" follow-up loop the Issue describes. `pull_request_review_comment` fires only for **inline** comments left on a specific diff line as part of a review thread — a narrower, additional path, not the one this workflow relies on for the general follow-up case. It is kept because some follow-up instructions genuinely do arrive as inline review comments and dropping the event type would silently lose that path, not because it is required for follow-up comments in general. `workflow_dispatch` is the recovery path from TASK-T20 (retry the deterministic PR/dispatch step without re-running Claude); keeping it costs nothing and is owner-gated the same way. |
 | Only `wayne19870129` may trigger | Enforced in both the `dedup` and `claude` jobs' `if:` (`github.actor == 'wayne19870129'`) | Keep, collapsed into a single job's `if:` (see diff) |
 | Trigger only on `@claude` in the comment | Enforced today only inside the `dedup` job's `if:` (`contains(github.event.comment.body, '@claude')`); the `claude` job itself only checks `needs.dedup.outputs.proceed`, so the check is transitive through the job graph rather than direct | Move the check directly onto the `claude` job's own `if:` — same effect, one less job/output edge to read to see it holds |
 | Remove GitHub App dependency | **Not present.** `claude.yml` as it stands today uses `secrets.CLAUDE_CODE_OAUTH_TOKEN` for Claude itself and the plain job `GITHUB_TOKEN` (`${{ github.token }}`) for the deterministic `gh` calls — no `actions/create-github-app-token` step exists in this file. (TASK-T22 proposed adding one to fix an `action_required` CI-gating issue on Issue #79, but that diff was never applied — see that task's own "blocked in this session" note.) | Nothing to remove here; note it explicitly so this isn't re-litigated as if it were still pending |
 | Remove custom bot-loop handling | The `dedup` job's `if:` already includes `github.event.comment.user.type != 'Bot'` (added for Issue #67/#50) — the *primary* bot-loop guard is already this one native-field check, not the marker system | Keep the `user.type != 'Bot'` check (move it onto `claude`'s own `if:`); remove the completion-marker post/read pair described below, which is a second, redundant loop-prevention layer on top of it |
-| Remove unnecessary concurrency cancellation | `concurrency: { group: claude-<number>-<actor>, cancel-in-progress: true }` (TASK-T19, added after Issue #67 to stop a bot-authored comment from cancelling the real owner-triggered run) | **Remove the `concurrency:` block entirely.** See "Why removing concurrency is safe here" below — TASK-T19's fix (adding `github.actor` to the group key) was itself a patch for a problem that only existed *because* concurrency+cancellation was there in the first place; removing it outright is a simpler fix with no regression, given `ensure-pr`'s idempotency (see below). |
+| Remove unnecessary concurrency cancellation | `concurrency: { group: claude-<number>-<actor>, cancel-in-progress: true }` (TASK-T19, added after Issue #67 to stop a bot-authored comment from cancelling the real owner-triggered run) | **Revised after independent review (see below): keep the actor-scoped `concurrency:` block as-is.** An earlier version of this task proposed removing it entirely on the theory that `ensure-pr`'s idempotency alone was sufficient protection; that theory was checked against `scripts/claude-ensure-pr-and-dispatch.sh` and found incorrect for the Issue-first case (see "Why the actor-scoped concurrency block must be kept" below). What Issue #87 is actually reacting to — the pre-TASK-T19 bug where a bot's own status comment could cancel the real owner run — is already fixed by scoping the group key to `github.actor`; that fix is not "unnecessary concurrency cancellation," it is the mechanism keeping this workflow's one-task-one-PR guarantee correct. Nothing here is removed. |
 | Remove excessive deduplication logic | The `dedup` job: (a) a GraphQL preflight that refuses to start if the Issue already has an open linked PR, (b) an instruction-hash + posted-comment-marker system that skips a byte-identical repeat comment, (c) a redirect-comment step, (d) a completion-marker post step in the `claude` job | **Remove the entire `dedup` job**, the completion-marker post step, and the redirect-comment step. Keep only the minimal `TARGET_NUMBER` / `PRE_HEAD_SHA` / `ISSUE_NUMBER` resolution `dedup` used to compute (folded into a small step inside `claude` itself), because `scripts/claude-ensure-pr-and-dispatch.sh` genuinely needs those three values to stay idempotent and avoid a second PR for the same Issue — that part is the deterministic script's own duplicate-PR guard (already fires on every run regardless of the `dedup` job), not "excessive" dedup. See tradeoffs below for what this removal gives up. |
 | Remove automatic PR approval behavior | **Not present.** `claude-automerge.yml` was already deleted and the `AGENTS.md`/`CLAUDE.md` auto-merge exception already reverted, per `docs/82-tasks/TASK-T18-conditional-auto-merge.md`'s own "撤销记录" | Nothing to remove here either; note it explicitly for the same reason as the GitHub-App row above |
 | No self-merge / self-close / self-deploy; human final merge authority | Never granted anywhere in this file — `ensure-pr` only ever calls `gh pr create`/`gh workflow run`, never `gh pr merge`/`gh pr close`; no `deploy-*.yml` is invoked from here | Unaffected by this task; carries over unchanged |
 
-## Why removing `concurrency:` is safe here
+## Why the actor-scoped `concurrency:` block must be kept
 
-The vulnerability TASK-T19 fixed (Issue #67) was: a bot-authored status
-comment is itself a new `issue_comment` event, which starts a new
-workflow *run* before either job's `if:` gate is evaluated (workflow
-`concurrency:` is resolved at the trigger level, ahead of any job
-condition). With only the issue/PR number in the group key, that
-bot-run and the real owner-run shared a group, and
-`cancel-in-progress: true` killed whichever was older — sometimes the
-real one.
+An earlier draft of this task proposed removing the `concurrency:`
+block entirely, on the theory that `scripts/claude-ensure-pr-and-
+dispatch.sh`'s own idempotency was sufficient to prevent a duplicate PR
+even with fully concurrent owner-triggered runs, so the worst case was
+"two commits, no corrupted or duplicated PR." Independent review (PR
+#88, round 1) checked that theory directly against the script and found
+it wrong for the Issue-first trigger case, for a reason specific to how
+that script protects against duplicate PRs across *different* branches:
 
-Removing `concurrency:` entirely removes the cancellation mechanism
-that caused that failure mode, rather than re-scoping it. Without any
-`concurrency:` block:
+- Issue-first `@claude` triggers create a **new, uniquely timestamped
+  branch on every run** (`claude/issue-<N>-<timestamp>-...`) — there is
+  no shared branch for `ensure-pr`'s own-branch idempotency check
+  (`gh pr list --head "${BRANCH}"`) to find, because each concurrent run
+  has a *different* `BRANCH`.
+- The only thing standing between that and a duplicate PR for the same
+  Issue is the script's separate `ISSUE_NUMBER` guard: `gh pr list
+  --state open ... | jq 'select(headRefName startswith "claude/issue-
+  <N>-")'`, checked **before** `gh pr create` is called later in the
+  same script run.
+- That check-then-act sequence is **not atomic**. Two owner-triggered
+  runs racing on the same Issue can each reach the `gh pr list` read
+  before either has executed `gh pr create`, each observe "no PR open
+  yet for this Issue," and each proceed to create its own PR — a classic
+  TOCTOU race, not the "safe worst case" the earlier draft claimed.
 
-- A bot-authored comment's run still never does anything, because the
-  `claude` job's own `if:` (`github.actor == 'wayne19870129' &&
-  github.event.comment.user.type != 'Bot'`) still gates it out before
-  any step runs — concurrency was never what stopped the bot's run from
-  *acting*, only what could wrongly cancel someone else's run.
-- Two genuinely concurrent owner-triggered runs (e.g. two quick
-  follow-up comments) now both run to completion instead of racing to
-  cancel each other. This is safe specifically because
-  `scripts/claude-ensure-pr-and-dispatch.sh` is already idempotent: it
-  reuses an existing PR for the branch rather than duplicating it, and
-  refuses silently if the branch head is unchanged from before the run
-  started. Worst case with two truly simultaneous runs is two Claude
-  turns producing two commits on the same or sibling branches, both of
-  which land safely under normal PR review — not a corrupted or
-  duplicated PR.
+The actor-scoped `concurrency:` block (TASK-T19) is what actually
+prevents this race today, and removing it would reopen it: two owner
+`@claude` comments on the same Issue produce the *same* concurrency
+group (`claude-<number>-wayne19870129`), so `cancel-in-progress: true`
+guarantees only one of them is ever running `ensure-pr` at a time —
+there is never a genuinely concurrent second run to race against the
+first. This also preserves the property TASK-T19 explicitly designed
+for: a newer owner instruction on the same Issue/PR supersedes an
+older, still-running one, rather than both completing and potentially
+producing two PRs for one task.
+
+Keeping this block does not conflict with Issue #87's ask. The Issue's
+"remove unnecessary concurrency cancellation" is best read (and TASK-T19
+itself frames it this way) as reacting to the pre-T19 bug — a bot's own
+status comment cancelling the real owner run because the group key
+didn't include the actor — which is already fixed by the actor-scoped
+key, not by removing concurrency altogether. What this task actually
+simplifies is everything in the `dedup` job that is redundant with
+either this concurrency guarantee or `ensure-pr`'s own idempotency (see
+the row above and the "Remove excessive deduplication logic" row).
 
 ## Tradeoffs this simplification accepts (state honestly, do not hide)
 
@@ -151,13 +168,16 @@ instruction-hash marker system) rather than reverting this whole task.
 
 ## Exact new `.github/workflows/claude.yml` for manual application
 
-Replace the file's `on:`/`concurrency:`/`jobs:` sections with the
-following (the pinned `actions/checkout` and `claude-code-action` SHAs,
-the system prompt string, and the `claude-recovery` job are carried
-over unchanged from the current file — only the `dedup` job, the
-`concurrency:` block, and the completion-marker/redirect steps are
-removed, and `TARGET_NUMBER`/`PRE_HEAD_SHA`/`ISSUE_NUMBER` resolution
-moves into a small `context` step inside `claude`):
+Replace the file's `on:`/`jobs:` sections with the following (the
+pinned `actions/checkout` and `claude-code-action` SHAs, the system
+prompt string, and the `claude-recovery` job are carried over unchanged
+from the current file — the `dedup` job and the completion-marker/
+redirect steps are removed, `TARGET_NUMBER`/`PRE_HEAD_SHA`/
+`ISSUE_NUMBER` resolution moves into a small `context` step inside
+`claude`, and **the actor-scoped `concurrency:` block is kept
+unchanged from the current file** — see "Why the actor-scoped
+`concurrency:` block must be kept" above; it is not part of what this
+diff removes):
 
 ```yaml
 name: Claude Code
@@ -176,6 +196,21 @@ on:
           deterministic dispatch step failed after a previous run).
         required: true
         type: string
+
+# Issue #67 / TASK-T19: kept unchanged by this simplification. The group
+# key includes github.actor, not just the issue/PR number, so a bot's own
+# status comment (a new issue_comment event) can never share a group with
+# the real owner-triggered run and therefore can never cancel it -- while
+# a newer owner instruction on the same Issue/PR still supersedes an
+# older, still-running one. This also serializes concurrent owner-
+# triggered runs on the same Issue, which is what keeps
+# claude-ensure-pr-and-dispatch.sh's ISSUE_NUMBER guard (a non-atomic
+# check-then-act) race-free for Issue-first triggers -- removing this
+# block was considered and rejected after independent review found that
+# race (see above). Copy this block verbatim from the current file.
+concurrency:
+  group: claude-${{ github.event.issue.number || github.event.pull_request.number }}-${{ github.actor }}
+  cancel-in-progress: true
 
 jobs:
   claude:
@@ -313,11 +348,13 @@ Notes for whoever applies this diff:
   rationale) should be kept — they were not part of what Issue #87 asked
   to simplify and remain accurate; they're omitted above only to keep
   this diff block focused on the structural change.
-- Delete `docs/82-tasks/TASK-T19-claude-workflow-concurrency-actor-scoping.md`'s
-  fix from the file (the `concurrency:` block) but leave that TASK doc
-  itself in place as a historical record of why it was added and why it
-  was later removed (this document, TASK-T23, is that "later removed"
-  record — link the two).
+- **Do not delete** `docs/82-tasks/TASK-T19-claude-workflow-concurrency-actor-scoping.md`'s
+  fix (the `concurrency:` block) from the file — an earlier version of
+  this task proposed that and it was reverted after independent review
+  (PR #88, round 1) found it reopens a real TOCTOU race in
+  `scripts/claude-ensure-pr-and-dispatch.sh`'s Issue-first `ISSUE_NUMBER`
+  guard (see "Why the actor-scoped `concurrency:` block must be kept"
+  above). TASK-T19 remains fully in effect; this task does not touch it.
 
 ## Live validation plan (once the diff above is applied)
 
@@ -335,7 +372,13 @@ Notes for whoever applies this diff:
    starts.
 5. Confirm no duplicate PR and no duplicate CI dispatch occurs across
    steps 1–4.
-6. Update `docs/83-project-continuity.md` with the outcome once
+6. Post two `@claude` Issue-first comments on the same still-open Issue
+   in quick succession (as close to simultaneous as the UI allows);
+   confirm the actor-scoped `concurrency:` block cancels the older run
+   (visible in the Actions run list as `cancelled`) rather than both
+   runs completing — the concurrent-race scenario independent review
+   (PR #88, round 1) identified for `ensure-pr`'s `ISSUE_NUMBER` guard.
+7. Update `docs/83-project-continuity.md` with the outcome once
    confirmed.
 
 ## 验收标准
@@ -346,8 +389,10 @@ Notes for whoever applies this diff:
       session; documented as the blocker instead.**
 - [x] Per-requirement audit of Issue #87's asks against the current file
       completed (table above).
-- [x] Tradeoffs of removing the dedup/concurrency logic stated
-      explicitly, not silently dropped.
+- [x] Tradeoffs of removing the `dedup` job's logic stated explicitly,
+      not silently dropped; the actor-scoped `concurrency:` block is
+      kept (not removed) after independent review found removing it
+      reopens a TOCTOU race in `ensure-pr`'s `ISSUE_NUMBER` guard.
 - [x] `docs/83-project-continuity.md` updated to record this as a
       pending, owner-actionable change (same PR).
 - [ ] Live validation plan executed and recorded (blocked on the diff
