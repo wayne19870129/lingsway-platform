@@ -289,6 +289,33 @@ linkage must avoid every literal closing-keyword form entirely; use
 wording such as "Issue #76 remains open; no closing keyword is
 included."
 
+**Issue #79 (durable identity-tooling finding, 2026-09-13):** the
+GitHub App installation now backing this repository's Claude Code
+integration (secrets `CLAUDE_AUTOMATION_APP_ID` /
+`CLAUDE_AUTOMATION_APP_PRIVATE_KEY`, installed only on
+`wayne19870129/lingsway-platform`) does **not** grant its Claude Code
+sessions write access to `.github/workflows/**` — confirmed directly
+from that session's own stated capabilities ("Modify files in the
+.github/workflows directory (GitHub App permissions do not allow
+workflow modifications)" under "What You CANNOT Do"), not inferred.
+This means the fix designed for Issue #79 — minting a separate GitHub
+App installation token inside `claude.yml` and using it (instead of
+`GITHUB_TOKEN`) for `scripts/claude-ensure-pr-and-dispatch.sh`'s `gh pr
+create`/`gh workflow run` calls in both the `claude` job's `ensure-pr`
+step and the `claude-recovery` job — cannot be applied by an
+`issue_comment`-triggered Claude Code session itself; the exact diff is
+fully specified in `docs/82-tasks/TASK-T22-claude-automation-app-token-identity.md`
+for the repository owner (or a Claude session invoked through a path
+that does hold `.github/workflows` write scope, e.g. a local CLI run)
+to apply directly. **This is a standing constraint for every future
+Issue whose fix requires editing anything under `.github/workflows/**`
+— such tasks always terminate at "diff specified, not applied" from an
+Issue-triggered Claude Code session**, not specific to Issue #79's
+design. Issue #79 remains open: the App-token identity swap and its
+live validation (does the resulting `pull_request`-triggered
+CI/Security/Risk run actually skip `action_required`?) are both still
+outstanding pending that manual diff application.
+
 ## 6. Durable technical baseline
 
 High-level stack: Python/FastAPI backend (`backend/app/`), Next.js
@@ -419,6 +446,15 @@ decays quickly.
   `ProviderRegistry` lifecycle/close() foundations already exist. Do not
   assume any real provider is live-selectable regardless of environment
   variables (see section 6).
+- **Issue #79 (TASK-T22) remains open, superseding Issue #76's
+  remaining failure-class-B scope.** The App-token identity design and
+  minimum permission set are fully specified in
+  `docs/82-tasks/TASK-T22-claude-automation-app-token-identity.md`,
+  including the exact `.github/workflows/claude.yml` diff — but that
+  diff could not be applied by the Issue-triggered Claude Code session
+  itself (no `.github/workflows` write scope; see section 5's Issue #79
+  entry). Next step is the repository owner applying that diff manually,
+  then running the live validation plan in the same TASK file.
 - **This Issue (#74)**: adds this continuity document and the
   `CLAUDE.md` startup-reading-order/maintenance-rule update described
   below; also serves as the first live validation of the TASK-T21
