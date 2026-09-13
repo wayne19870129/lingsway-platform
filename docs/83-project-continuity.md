@@ -198,6 +198,16 @@ recoverable via `claude-recovery`. Fixing this is a workflow-code change
 and is explicitly out of scope for this docs-only PR; it should be
 tracked as its own follow-up Issue/TASK.
 
+**Follow-up already filed and sequenced: Issue #76.** The ensure-PR
+failure above is tracked as Issue #76, which repairs the Issue-first
+post-Claude PR/checks closed loop (including the manual Actions-approval
+friction observed on this same PR). Per that Issue's own sequencing:
+after this PR (#75) is independently accepted and manually merged,
+Issue #76 is the immediate next queued workflow-reliability task —
+**before** product work resumes at TASK-T16 Phase 2C (section 7). A
+fresh session should not skip #76 and start T16 directly, or it risks
+reproducing this same broken Issue→Claude→PR loop.
+
 ## 6. Durable technical baseline
 
 High-level stack: Python/FastAPI backend (`backend/app/`), Next.js
@@ -308,13 +318,17 @@ decays quickly.
   `docs/70-external-facts.md` before any Phase 1 code change, per the
   task's own constraints. This is blocked on real-world evidence, not
   forgotten.
-- **Actual next technical frontier**: TASK-T16 Phase 2C (real provider
-  registry wiring/opt-in selection) — `build_registry()` is still
-  mock/noop-only (verified directly against `registry.py`, section 6)
-  while the Marzban accounting adapter and `ProviderRegistry`
-  lifecycle/close() foundations already exist. Do not assume any real
-  provider is live-selectable regardless of environment variables (see
-  section 6).
+- **Immediate next queued task: Issue #76** (workflow-reliability fix
+  for the ensure-PR failure recorded in section 5) — sequenced to run
+  after PR #75 is accepted and merged, and **before** the technical
+  frontier below.
+- **Actual next technical frontier (after Issue #76 is resolved)**:
+  TASK-T16 Phase 2C (real provider registry wiring/opt-in selection) —
+  `build_registry()` is still mock/noop-only (verified directly against
+  `registry.py`, section 6) while the Marzban accounting adapter and
+  `ProviderRegistry` lifecycle/close() foundations already exist. Do not
+  assume any real provider is live-selectable regardless of environment
+  variables (see section 6).
 - **This Issue (#74)**: adds this continuity document and the
   `CLAUDE.md` startup-reading-order/maintenance-rule update described
   below; also serves as the first live validation of the TASK-T21
