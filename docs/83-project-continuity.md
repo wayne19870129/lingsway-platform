@@ -121,8 +121,17 @@ Issue #87 / TASK-T23 restores the minimal design:
 - Claude Code Action owns its normal branch and PR flow. CI, Security,
   and Risk classification respond to the resulting PR normally.
 - There is no custom App token, manual workflow dispatch, dedup job,
-  completion marker, cancellation group, recovery job, automatic
-  approval, automatic merge, automatic close, or deployment step.
+  completion marker, recovery job, automatic approval, automatic merge,
+  automatic close, or deployment step.
+- **Known regression, unresolved as of PR #88 round 2:** the
+  actor-scoped `concurrency:` block (`claude-<number>-<actor>`,
+  `cancel-in-progress: true`) is currently **missing** from the live
+  `.github/workflows/claude.yml`, verified directly against that file's
+  current content. Independent review already confirmed this reopens a
+  TOCTOU duplicate-PR race for two concurrent Issue-first owner triggers
+  (see `docs/82-tasks/TASK-T23-simplify-claude-workflow.md` "KNOWN
+  DRIFT"). This session cannot edit `.github/workflows/`, so
+  `wayne19870129` needs to add that block back manually.
 
 Historical TASK-T19/T20/T21 documents explain the superseded complex
 design. TASK-T23 is the current workflow definition and safety boundary.
