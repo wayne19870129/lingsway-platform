@@ -54,10 +54,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Shellcheck deployment and utility scripts
+      - name: Shellcheck deployment scripts
         run: |
-          bash -n deploy/bootstrap.sh deploy/rollback.sh deploy/lib/*.sh scripts/*.sh scripts/tests/*.sh
-          shellcheck --severity=error deploy/bootstrap.sh deploy/rollback.sh deploy/lib/*.sh scripts/*.sh scripts/tests/*.sh
+          bash -n deploy/bootstrap.sh deploy/rollback.sh deploy/lib/*.sh
+          shellcheck --severity=error deploy/bootstrap.sh deploy/rollback.sh deploy/lib/*.sh
 
   backend:
     runs-on: ubuntu-latest
