@@ -1,10 +1,13 @@
 # Project Continuity / Handoff
 
 **Last reconciled with main:** `94258d4da6ef0477104df0671202e6501f2b9b94`
-(2026-09-12), during Issue #74; corrected 2026-09-13 on this same PR
-(#75) after independent review found the Marzban provider baseline,
-the "Open" task list, an in-flight automation failure, and a role-
-wording contradiction all needed fixing — see sections 3, 5, 6, and 7.
+(committed 2026-09-13 01:11 UTC / 2026-09-12 18:11 -07:00 — dates in
+this document are UTC unless stated otherwise, so a local-time reading
+of a commit's own timestamp can legitimately differ by a day), during
+Issue #74; corrected 2026-09-13 on this same PR (#75) after independent
+review found the Marzban provider baseline, the "Open" task list, an
+in-flight automation failure, and a role-wording contradiction all
+needed fixing — see sections 3, 5, 6, and 7.
 
 This document is maintained by whichever agent last touched a section
 below; if it looks stale, the next agent should refresh the relevant
