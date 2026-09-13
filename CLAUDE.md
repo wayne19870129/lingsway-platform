@@ -23,10 +23,43 @@ first.
 1. This file.
 2. `AGENTS.md` (iron rules, module write-boundaries, credential-handling
    rules, the forbidden/allowed-without-approval lists).
-3. `docs/80-decisions/ADR-*.md` relevant to the area you're touching.
-4. `docs/82-tasks/TASK-*.md` relevant to the task, if one exists (format:
+3. `docs/83-project-continuity.md` — the living, account-independent
+   handoff/index document. A fresh Claude/ChatGPT account or session
+   (one with no memory of prior chats on this repo) must read this
+   before starting implementation: it summarizes the current
+   collaboration model, review/merge policy, background-automation
+   baseline, durable technical state, and open work, with pointers into
+   the ADRs/TASKs/PRs that are the actual authoritative sources. It is
+   an index, not a replacement for those sources — where it conflicts
+   with a more current or more authoritative one, the other source wins
+   and this document should be corrected.
+4. `docs/80-decisions/ADR-*.md` relevant to the area you're touching.
+5. `docs/82-tasks/TASK-*.md` relevant to the task, if one exists (format:
    目标 / 约束 / 允许修改的文件 / 验收标准 — see `TASK-TEMPLATE.md`).
-5. `README.md`'s "Explicitly out of scope" and risk-classification tables.
+6. `README.md`'s "Explicitly out of scope" and risk-classification tables.
+
+### Keeping the continuity document current
+
+If a PR materially changes any of the following, update
+`docs/83-project-continuity.md` in the **same PR** whenever the change
+would otherwise make it stale:
+
+- the collaboration/agent role split (User / ChatGPT Work / Claude Code /
+  GitHub Issue-PR roles);
+- merge/review/rework policy (round caps, review format, SHA scoping);
+- Claude Code model/effort/automation behavior
+  (`.github/workflows/claude.yml` and its helper scripts);
+- major architecture decisions or provider/runtime integration state
+  (a new accepted ADR, or a provider moving from mock to real);
+- project phase, current roadmap, or the next major task;
+- safety/credential/deployment boundaries;
+- the canonical operational workflow needed to resume work.
+
+Routine, low-level code changes (a bug fix, a test, a refactor that
+doesn't change any of the above) do not require touching the continuity
+document. When in doubt, check whether the fact being changed is one a
+brand-new session would need in order to avoid re-deriving or
+contradicting it — if not, leave the document alone.
 
 ## AI Pull Request Workflow
 
