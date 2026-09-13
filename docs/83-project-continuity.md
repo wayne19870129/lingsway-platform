@@ -208,28 +208,59 @@ Issue #76 is the immediate next queued workflow-reliability task —
 fresh session should not skip #76 and start T16 directly, or it risks
 reproducing this same broken Issue→Claude→PR loop.
 
-**Issue #76 update (2026-09-13): repository-level PR-creation toggle
-enabled, failure class B still unverified.** Diagnosis (Issue #76 run
-`34732975891`) confirmed the `createPullRequest` denial in run
-`34730093694` was caused by the repository setting **Settings → Actions
-→ General → Workflow permissions → "Allow GitHub Actions to create and
-approve pull requests"** being off — a repository-level policy GitHub
-enforces independently of the workflow's own `permissions:` block, not
-fixable by widening YAML permissions. The repository owner enabled that
-setting on 2026-09-13. The Issue #76 implementation run (this same
-change: `scripts/claude-ensure-pr-and-dispatch.sh` now surfaces the
-original `gh pr create` error text plus an actionable hint on non-zero
-exit, instead of only failing generically) is the **live validation**
-that the deterministic post-Claude step can now create a PR
-automatically end-to-end for an Issue-first trigger. **Do not assume
-this is fully closed yet:** the second live finding from this same
-Issue — same-repository Claude/Actions-authored PR pushes causing
-CI/Security/Risk runs to enter `action_required` and require manual
-"Approve and run" (failure class B) — is explicitly **unverified after
-the PR-creation setting change**. It has not been fixed in code (the
-external-contributor approval policy was deliberately left unchanged
-pending confirmation), and whether it still occurs must be observed on
-the PR this run produces before it can be called resolved.
+**Issue #76 resolution (2026-09-13): both failure classes closed out.**
+Diagnosis (Issue #76 run `34732975891`) confirmed the `createPullRequest`
+denial in run `34730093694` was caused by the repository setting
+**Settings → Actions → General → Workflow permissions → "Allow GitHub
+Actions to create and approve pull requests"** being off — a
+repository-level policy GitHub enforces independently of the workflow's
+own `permissions:` block, not fixable by widening YAML permissions. The
+repository owner enabled that setting on 2026-09-13. PR #77 (the Issue
+#76 implementation run, `scripts/claude-ensure-pr-and-dispatch.sh`
+surfacing the original `gh pr create` error text plus an actionable hint
+on non-zero exit) was created automatically end-to-end from an
+Issue-first trigger, confirming **failure class A is fixed and
+validated**.
+
+**Failure class B (`action_required` on same-repository Claude/Actions
+PR pushes) — resolved, not by code/policy change but by correcting what
+counts as the authoritative check.** Live evidence from PR #77 head
+`1df3441f92fc883fa358eb93c8659277126fbb84`: six workflow runs fired for
+that one SHA. The three `pull_request`-event runs entered
+`action_required` — expected GitHub behavior whenever a workflow using
+the repository `GITHUB_TOKEN` creates/updates a PR, not a defect and not
+evidence the deterministic checks failed. Separately, the deterministic
+post-Claude dispatch path launched exactly three `workflow_dispatch`
+runs on that same SHA, and all three completed successfully with no
+maintainer approval required:
+
+- CI run `34736481046` — `workflow_dispatch` — `success`
+- Security run `34736481706` — `workflow_dispatch` — `success`
+- Risk classification run `34736482463` — `workflow_dispatch` — `success`
+
+**Durable review rule:** for owner-triggered, trusted Claude/Actions
+branches created or updated through this workflow, the deterministic
+same-head-SHA `workflow_dispatch` CI/Security/Risk trio is the
+authoritative set of required checks. Duplicate approval-gated
+`pull_request` runs for that same SHA do not block PASS/merge readiness
+when the dispatch trio exists and is green — do not wait on or manually
+approve those duplicate runs as a precondition for merge. Ordinary/
+external PRs that are not on this trusted automation path are
+unaffected: they remain subject to their normal PR-triggered checks and
+all existing external-contributor approval protections, which were not
+weakened by this resolution. No PAT, custom GitHub App token, or
+relaxation of the external-contributor approval policy was needed to
+close Issue #76.
+
+**Process lesson from PR #77 (Issue #76 reopened once because of this):**
+GitHub parses a leading closing-keyword form (`Closes #N`, `Fixes #N`,
+`Resolves #N`) as a closing reference regardless of surrounding negating
+prose — a PR body containing the literal phrase "`Closes #76` is
+intentionally NOT included" still closed #76 on merge. When an Issue
+must stay open, PR bodies/commit messages/comments used for merge
+linkage must avoid every literal closing-keyword form entirely; use
+wording such as "Issue #76 remains open; no closing keyword is
+included."
 
 ## 6. Durable technical baseline
 
@@ -315,7 +346,9 @@ decays quickly.
 - **Merged / resolved** as of the SHA above: Issue #66 (background Claude
   workflow baseline), Issue #67 / TASK-T19 (concurrency self-cancellation
   fix), Issue #71 / TASK-T20 (tool-permission mismatch fix), Issue #68 /
-  TASK-T21 (rolling `sonnet` + `medium` effort).
+  TASK-T21 (rolling `sonnet` + `medium` effort), Issue #76 (ensure-PR
+  `createPullRequest` failure and `action_required` dispatch-trio
+  reconciliation — see section 5).
 - **Correction (reconciled against current `main` and each TASK file's
   own "现状复核/完成情况" section, not left as historical prose):**
   `TASK-T5G-scheduler-jobs.md`, `TASK-T14-ci-audit-retry.md`, and
@@ -341,12 +374,10 @@ decays quickly.
   `docs/70-external-facts.md` before any Phase 1 code change, per the
   task's own constraints. This is blocked on real-world evidence, not
   forgotten.
-- **Immediate next queued task: Issue #76** (workflow-reliability fix
-  for the ensure-PR failure recorded in section 5) — sequenced to run
-  after PR #75 is accepted and merged, and **before** the technical
-  frontier below.
-- **Actual next technical frontier (after Issue #76 is resolved)**:
-  TASK-T16 Phase 2C (real provider registry wiring/opt-in selection) —
+- **Issue #76 is resolved** (workflow-reliability fix for the ensure-PR
+  failure and the `action_required` dispatch-trio reconciliation
+  recorded in section 5).
+- **Actual next technical frontier**: TASK-T16 Phase 2C (real provider registry wiring/opt-in selection) —
   `build_registry()` is still mock/noop-only (verified directly against
   `registry.py`, section 6) while the Marzban accounting adapter and
   `ProviderRegistry` lifecycle/close() foundations already exist. Do not
