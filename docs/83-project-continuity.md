@@ -60,13 +60,9 @@ from anything a prior conversation "remembers."
   tests/lint/build, creates branches, commits, and pushes; reads and
   judges review feedback and pushes fixes. Never merges, never deploys,
   never closes another party's PR/Issue. On the Issue-first background
-  path (section 5), Claude itself does not call `gh`/create the PR —
-  mechanical PR creation and CI/Security/Risk dispatch are the
-  repository's own deterministic workflow step's responsibility, run
-  after the Claude Code Action step completes (see section 5's
-  `claude-ensure-pr-and-dispatch.sh` description, including its current
-  known failure mode). When triggered directly on an already-open PR,
-  Claude pushes new commits to that same PR's branch itself.
+  path (section 5), the standard Claude Code Action handles the branch
+  and PR workflow. Normal `pull_request` events then run CI; no custom
+  PR-creation or workflow-dispatch helper sits between Claude and CI.
 - **ChatGPT / ChatGPT Work**: requirements/acceptance-criteria
   orchestration and independent review of a PR at an exact commit SHA.
   Work is an **event-triggered reviewer**, not a continuous background
@@ -112,66 +108,33 @@ from anything a prior conversation "remembers."
 
 ## 5. Background Claude Code automation baseline
 
-Current design of `.github/workflows/claude.yml`, established across
-Issues #67, #71, #68 (TASK-T19, TASK-T20, TASK-T21 respectively — all
-merged into `main` as of the SHA above):
+Issue #87 / TASK-T23 restores the minimal design:
 
-- Owner-only `@claude` trigger (`github.actor == 'wayne19870129'`) with
-  explicit bot-comment exclusion, so a status comment from `claude[bot]`
-  cannot itself re-trigger a run.
-- Actor-scoped concurrency group (issue/PR number **+** actor), so a bot
-  status comment can never cancel the human-triggered run that produced
-  it (TASK-T19 / Issue #67 — previously bot comments could
-  self-cancel the real run via a too-broad concurrency group).
-- Exact-instruction dedup: a hash of the triggering instruction is used
-  to detect and skip duplicate delivery of the same event.
-- One Issue cannot spawn a second PR: a preflight check (GraphQL
-  `closedByPullRequestsReferences`) plus a branch-naming fallback check
-  stop a second `@claude` instruction on the same still-open Issue from
-  opening a second PR; follow-up work goes to the existing PR instead.
-- A trusted `snapshot-scripts` step copies the deterministic helper
-  scripts (`scripts/claude-ensure-pr-and-dispatch.sh`,
-  `scripts/claude-run-summary.sh`) to `$RUNNER_TEMP` from the trusted
-  default-branch checkout **before** Claude can switch the workspace to
-  a PR branch — closing a trust-boundary gap where an attacker-controlled
-  PR branch could otherwise get these scripts executed with the job's
-  write token (TASK-T20 / Issue #71, Round-1 review Critical finding).
-- PR creation and CI/Security/Risk workflow dispatch are done by a
-  deterministic `if: always()` shell step
-  (`scripts/claude-ensure-pr-and-dispatch.sh`) run **after** the Claude
-  Code Action step, not by Claude calling `gh` itself — Claude's
-  `--allowedTools` were never widened to include `gh`/generic shell.
-- `pre_head_sha` protection: the PR's head SHA is captured before Claude
-  runs; the ensure-pr step compares it against the post-run head so a
-  run that produced no new commit is never mistaken for "done" (false
-  completion marker, TASK-T20 Round-1 Major finding).
-- A `workflow_dispatch`-triggered `claude-recovery` job (owner-only) can
-  re-run the deterministic PR/dispatch logic without re-invoking the
-  model, giving a cost-free recovery path if only the deterministic step
-  failed.
-- No auto-merge, no auto-deploy, anywhere in this workflow.
-- Main session model selector: rolling alias `sonnet` (not a pinned
-  dated model ID); effort: `medium`; `--max-turns 30` — all set via
-  `claude_args` (`--model`/`--effort`/`--max-turns`), sourced from a
-  single job-level `env:` block (TASK-T21 / Issue #68) so the value isn't
-  duplicated and drift-prone across the run-summary step.
-- Auxiliary/background model usage (e.g. Haiku appearing in
-  `modelUsage` for subagent/internal calls) is expected and is **not** a
-  main-model switch — the run summary treats `init.model` as the sole
-  source of truth for "actual main model," and reports the full
-  `modelUsage` key list separately for visibility.
-- The run summary (`scripts/claude-run-summary.sh`) distinguishes
-  configured selector/effort from the actually-initialized main
-  model/effort and the full `modelUsage` list, alongside turns,
-  estimated cost, permission-denial count, and exit status — without
-  ever setting `display_report`/`show_full_output` or emitting raw
-  transcript/tool-output/secrets.
+- Only newly-created Issue comments are observed.
+- Only `wayne19870129` can start a run, and the comment must contain
+  `@claude`; this single job-level condition also excludes every bot and
+  external user without separate loop-prevention logic.
+- The workflow grants repository contents, pull requests, and issues
+  write access, plus the OIDC permission required by the standard Claude
+  Code GitHub App authentication path.
+- `CLAUDE_CODE_OAUTH_TOKEN` is the only repository secret used.
+- Claude Code Action owns its normal branch and PR flow. CI, Security,
+  and Risk classification respond to the resulting PR normally.
+- There is no custom App token, manual workflow dispatch, dedup job,
+  completion marker, recovery job, automatic approval, automatic merge,
+  automatic close, or deployment step.
+- **Known regression, unresolved as of PR #88 round 2:** the
+  actor-scoped `concurrency:` block (`claude-<number>-<actor>`,
+  `cancel-in-progress: true`) is currently **missing** from the live
+  `.github/workflows/claude.yml`, verified directly against that file's
+  current content. Independent review already confirmed this reopens a
+  TOCTOU duplicate-PR race for two concurrent Issue-first owner triggers
+  (see `docs/82-tasks/TASK-T23-simplify-claude-workflow.md` "KNOWN
+  DRIFT"). This session cannot edit `.github/workflows/`, so
+  `wayne19870129` needs to add that block back manually.
 
-See `docs/82-tasks/TASK-T19-claude-workflow-concurrency-actor-scoping.md`,
-`docs/82-tasks/TASK-T20-claude-workflow-tool-permission-mismatch.md`, and
-`docs/82-tasks/TASK-T21-claude-workflow-rolling-sonnet-medium-effort.md`
-for the full root-cause analysis and verification detail — not
-duplicated here.
+Historical TASK-T19/T20/T21 documents explain the superseded complex
+design. TASK-T23 is the current workflow definition and safety boundary.
 
 **This Issue (#74) is itself the first real post-merge live validation of
 the TASK-T21 configuration** (rolling `sonnet` + `medium` effort). Do not
@@ -288,53 +251,6 @@ must stay open, PR bodies/commit messages/comments used for merge
 linkage must avoid every literal closing-keyword form entirely; use
 wording such as "Issue #76 remains open; no closing keyword is
 included."
-
-**Issue #79 (durable identity-tooling finding, 2026-09-13):** two
-distinct identities/permission boundaries are in play here and must not
-be conflated:
-
-1. **The existing Claude Code integration/App** that runs this
-   repository's `@claude`-triggered sessions themselves (model turns,
-   file edits, `git push` of the branch). That session's own stated
-   capabilities confirm directly ("Modify files in the .github/workflows
-   directory (GitHub App permissions do not allow workflow
-   modifications)" under "What You CANNOT Do") that it does **not** hold
-   write access to `.github/workflows/**` — this is what blocked
-   applying TASK-T22's diff from within this Issue's own session.
-2. **A separate, newly-provisioned automation GitHub App**
-   (secrets `CLAUDE_AUTOMATION_APP_ID` / `CLAUDE_AUTOMATION_APP_PRIVATE_KEY`,
-   installed only on `wayne19870129/lingsway-platform`) that Issue #79's
-   human setup step created *for a different purpose*: to be the
-   token-minting identity that `claude.yml`'s deterministic `ensure-pr`/
-   `claude-recovery` steps would use *instead of* `GITHUB_TOKEN`, once
-   the diff below is applied. As of this document, that App is **not**
-   yet wired into `claude.yml` at all (confirmed: all `GH_TOKEN` lines
-   in `claude.yml` still read `${{ github.token }}`) — it does not
-   "back this repository's Claude Code integration" today; it is
-   provisioned-but-unused infrastructure for the future deterministic
-   ensure-pr/recovery token path.
-
-The fix designed for Issue #79 — minting a token from App #2 inside
-`claude.yml` and using it (instead of `GITHUB_TOKEN`) for
-`scripts/claude-ensure-pr-and-dispatch.sh`'s `gh pr create`/`gh workflow
-run` calls in both the `claude` job's `ensure-pr` step and the
-`claude-recovery` job — cannot be applied by an `issue_comment`-triggered
-Claude Code session itself, because that session runs under App #1's
-permission grant, not App #2's. The exact diff is fully specified in
-`docs/82-tasks/TASK-T22-claude-automation-app-token-identity.md` for the
-repository owner (or a Claude session invoked through a path that does
-hold `.github/workflows` write scope, e.g. a local CLI run) to apply
-directly. **Under the current issue-comment-triggered Claude Code
-integration/tooling boundary (App #1), any Issue whose fix requires
-editing anything under `.github/workflows/**` will hit this same
-"diff specified, not applied" stopping point** — this is a statement
-about the current integration's permission grant, not an immutable
-forever-rule; a future permission model or an explicitly assigned
-executor with workflow-write scope could change it. Issue #79 remains
-open: the App-token identity swap and its live validation (does the
-resulting `pull_request`-triggered CI/Security/Risk run actually skip
-`action_required`?) are both still outstanding pending that manual diff
-application.
 
 ## 6. Durable technical baseline
 
@@ -466,15 +382,10 @@ decays quickly.
   `ProviderRegistry` lifecycle/close() foundations already exist. Do not
   assume any real provider is live-selectable regardless of environment
   variables (see section 6).
-- **Issue #79 (TASK-T22) remains open, superseding Issue #76's
-  remaining failure-class-B scope.** The App-token identity design and
-  minimum permission set are fully specified in
-  `docs/82-tasks/TASK-T22-claude-automation-app-token-identity.md`,
-  including the exact `.github/workflows/claude.yml` diff — but that
-  diff could not be applied by the Issue-triggered Claude Code session
-  itself (no `.github/workflows` write scope; see section 5's Issue #79
-  entry). Next step is the repository owner applying that diff manually,
-  then running the live validation plan in the same TASK file.
+- **Issue #87 / TASK-T23 replaces the abandoned custom-App proposal.**
+  The minimal workflow is implemented in PR #88 and needs post-merge
+  live validation with a new Issue comment. TASK-T22 is retained only as
+  a short superseded-design marker so older review links remain valid.
 - **This Issue (#74)**: adds this continuity document and the
   `CLAUDE.md` startup-reading-order/maintenance-rule update described
   below; also serves as the first live validation of the TASK-T21

@@ -4,13 +4,6 @@ on:
   pull_request:
   push:
     branches: [main]
-  # GITHUB_TOKEN-authored pushes/PRs (e.g. from .github/workflows/claude.yml
-  # creating or updating a PR) do not trigger pull_request/push events by
-  # design (GitHub's anti-recursion rule), so claude.yml explicitly re-runs
-  # this workflow via `gh workflow run ci.yml --ref <branch>` after pushing.
-  # workflow_dispatch is exempt from that rule, and this job needs no PR
-  # payload, so it runs unchanged against whatever ref was dispatched.
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -61,49 +54,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Shellcheck deployment and workflow-helper scripts
-        # TASK-T20 (Issue #71, independent review round 1, Minor): also
-        # covers scripts/*.sh -- the claude.yml workflow-helper scripts
-        # (deterministic PR-creation/dispatch and run-summary, added by
-        # TASK-T20) and the concurrency-group validation script (TASK-T19)
-        # -- so a regression in any of them is caught automatically instead
-        # of relying only on the manual checks reported in each of those
-        # PRs.
+      - name: Shellcheck deployment scripts
         run: |
-          bash -n deploy/bootstrap.sh deploy/rollback.sh deploy/lib/*.sh scripts/*.sh scripts/tests/*.sh
-          shellcheck --severity=error deploy/bootstrap.sh deploy/rollback.sh deploy/lib/*.sh scripts/*.sh scripts/tests/*.sh
-
-  # TASK-T20 (Issue #71 review round 2): actually run the deterministic
-  # Claude-workflow helper scripts' regression tests in CI, rather than
-  # relying only on a PR description's report of a one-off local run.
-  # Covers: normal PR-creation/reuse/no-op behavior; the round-1 "Major 1"
-  # false-completion regression (an existing PR-rework branch already ahead
-  # of base before a failed run must not be reported as having produced new
-  # work); the round-1 "Major 2" regression (refusing a second PR for the
-  # same Issue); and the round-2 same-Issue GraphQL preflight filter. Does
-  # not (and, from inside CI, cannot) exercise real GitHub Actions
-  # branch-switching or GraphQL behavior -- see
-  # scripts/tests/test-claude-workflow-trust-boundary.sh and
-  # docs/82-tasks/TASK-T20-*.md for what remains unverified until a real
-  # post-merge run.
-  claude-workflow-scripts:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Validate claude.yml YAML syntax
-        run: python3 -c "import yaml; yaml.safe_load(open('.github/workflows/claude.yml'))"
-      - name: Trust-boundary static guard (Critical finding regression)
-        run: bash scripts/tests/test-claude-workflow-trust-boundary.sh
-      - name: PR-creation/reuse/no-op + false-completion-marker + duplicate-PR regression
-        run: bash scripts/tests/test-claude-ensure-pr-and-dispatch.sh
-      - name: Same-Issue duplicate-PR prevention preflight filter
-        run: bash scripts/tests/test-claude-issue-open-pr-filter.sh
-      # TASK-T21 (Issue #68): actually run the model/effort configuration
-      # regression tests in CI, not just report a one-off local run.
-      - name: Model/effort configuration static guard
-        run: bash scripts/tests/test-claude-workflow-model-config.sh
-      - name: Run-summary configured-vs-actual model/effort + modelUsage regression
-        run: bash scripts/tests/test-claude-run-summary.sh
+          bash -n deploy/bootstrap.sh deploy/rollback.sh deploy/lib/*.sh
+          shellcheck --severity=error deploy/bootstrap.sh deploy/rollback.sh deploy/lib/*.sh
 
   backend:
     runs-on: ubuntu-latest
