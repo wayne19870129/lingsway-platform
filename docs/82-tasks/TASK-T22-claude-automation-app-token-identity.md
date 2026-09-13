@@ -106,29 +106,34 @@ be redone once the diff is applied.
 `scripts/claude-ensure-pr-and-dispatch.sh`'s `gh pr create` / `gh
 workflow run` calls run with `GH_TOKEN: ${{ github.token }}` — the
 repository's own `GITHUB_TOKEN`, rendered as actor `github-actions[bot]`.
-GitHub always requires manual **Approve and run** for `pull_request`-
-triggered workflow runs on a PR whose most recent push was made through
-that same repository's `GITHUB_TOKEN`. The deterministic
-`workflow_dispatch` calls this script *also* makes (to `ci.yml`,
-`security.yml`, `risk-classify.yml`) are unaffected and always succeed —
-but the separate `pull_request`-triggered runs of those same three files
-on the same SHA are what the active `Protect main` ruleset's required
-check contexts (`lint`, `shellcheck`, `backend`, `backend-image`,
-`frontend`, `gitleaks`, `python-audit`, `npm-audit`, `marzban-contract`)
-actually wait on, so they stay `mergeable_state=blocked` until a human
-clicks Approve. Live evidence: PR #77 head `1df3441f92fc883fa358eb93c8659277126fbb84`,
-PR #78 head `cf688fd5b304f2a62eb9f958fd49cd640aa88191` (both recorded in
+**Observed fact, not yet a proven causal mechanism:** on PR #77 and PR
+#78, the PR was created/updated by this `GITHUB_TOKEN`-driven step, and
+the `pull_request`-triggered runs of `ci.yml`/`security.yml`/
+`risk-classify.yml` on those same SHAs went `action_required` while the
+same-SHA `workflow_dispatch` runs of those same three files succeeded
+without approval, leaving `mergeable_state=blocked` on the required
+named check contexts (`lint`, `shellcheck`, `backend`, `backend-image`,
+`frontend`, `gitleaks`, `python-audit`, `npm-audit`, `marzban-contract`).
+Live evidence: PR #77 head `1df3441f92fc883fa358eb93c8659277126fbb84`,
+PR #78 head `c7d325ae96c3fa57e5058d6a2d3d51d13e7bad43` (both recorded in
 `docs/83-project-continuity.md`).
 
-Minting the PR-create/dispatch token from a **GitHub App installation**
-instead makes the triggering actor the App's own bot identity, which is
-not subject to that same-repo-`GITHUB_TOKEN`-specific approval rule.
-This is the documented GitHub product behavior distinguishing
-"workflow run triggered by `GITHUB_TOKEN`" from "workflow run triggered
-by any other authenticated identity, including a GitHub App or a PAT" —
-this task does not change the *fork*-approval rule at all, which is a
-separate setting keyed on the PR author being an outside collaborator,
-untouched by this change either way.
+What has **not** been isolated from that evidence: whether the
+`action_required` gating is triggered by the PR-create/dispatch call's
+identity (`GITHUB_TOKEN` via this script), by the separate branch-push
+identity (`claude-code-action`'s own push wrapper, deliberately left
+unchanged by this task), or by both together — the two identities have
+never been varied independently in a live run. Minting the
+PR-create/dispatch token from a **GitHub App installation** instead,
+while leaving branch-push identity unchanged, is therefore this task's
+**phase-1 hypothesis to validate**, not a documented, already-confirmed
+GitHub product guarantee: if the App-token swap alone does not clear
+`action_required` on the `pull_request` runs, that is the signal
+(anticipated in the "Notes for whoever applies this diff" section below)
+that push identity is also part of the mechanism and phase 1's scope was
+too narrow. This task does not change the *fork*-approval rule at all,
+which is a separate setting keyed on the PR author being an outside
+collaborator, untouched by this change either way.
 
 ## Minimum GitHub App permissions
 
@@ -157,6 +162,35 @@ granting — this table states the maximum plausibly needed, not a
 confirmed floor; confirm against a live run per the validation plan
 below before locking in the App's permission set.
 
+**Known gap: the App installation actually completed for this Issue's
+human setup step is broader than this table.** As installed, it grants
+Actions: Read & write, Contents: Read & write, Issues: Read & write, and
+Pull requests: Read & write — wider than the phase-1 floor above
+(notably `Contents: write` and `Issues: write`, neither used by the two
+call sites this task touches). `actions/create-github-app-token` mints a
+token scoped to the *installation's* granted permissions by default; it
+does not narrow them on its own. Two ways to close this gap before live
+use, either is acceptable and both should be recorded once done:
+
+1. **Preferred:** have the repository owner reduce the App installation
+   itself (GitHub → Settings → Developer settings → GitHub Apps → this
+   App → Permissions) to exactly the four rows in the table above, then
+   re-approve the reduced permission set for this repository's
+   installation.
+2. **If the installation must stay broader for other reasons:** add an
+   explicit `permissions:` input to the `create-github-app-token` step
+   in the diff below (e.g. `permissions: "pull-requests:write,
+   actions:write, contents:read"`), which mints a token narrowed to
+   exactly those scopes regardless of what the installation itself
+   holds — `create-github-app-token` supports requesting a subset of the
+   installation's granted permissions this way.
+
+Until one of these is done and confirmed, do not describe this design as
+least-privilege in practice — the design's *intent* is least-privilege,
+but the currently-provisioned installation is not. The diff below
+includes the explicit `permissions:` input as the default so the token
+itself is narrow even before the installation-level tightening happens.
+
 ## Exact diff for manual application to `.github/workflows/claude.yml`
 
 Add a token-minting step immediately before `ensure-pr` in the `claude`
@@ -183,7 +217,15 @@ pinning convention for `actions/checkout` and
           private-key: ${{ secrets.CLAUDE_AUTOMATION_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
+          permissions: >-
+            {"pull_requests": "write", "actions": "write", "contents": "read"}
 ```
+
+The `permissions:` input above explicitly narrows the minted token to
+the phase-1 floor from the table, regardless of what the App
+installation itself currently grants (see "Known gap" note above) —
+include it even after the installation is tightened, as defense in
+depth.
 
 Then in the existing `ensure-pr` step, change only the `GH_TOKEN` line:
 
@@ -221,6 +263,8 @@ And in `claude-recovery`, add the same minting step before its existing
           private-key: ${{ secrets.CLAUDE_AUTOMATION_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
+          permissions: >-
+            {"pull_requests": "write", "actions": "write", "contents": "read"}
       - shell: bash
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}   # was: ${{ github.token }}

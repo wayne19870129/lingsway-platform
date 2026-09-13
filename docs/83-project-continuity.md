@@ -246,7 +246,7 @@ successfully with no maintainer approval required:
 At the time of that PR #77 evidence, this document mistakenly concluded
 that dispatch-trio success meant failure class B was "resolved." Live
 evidence from PR #78 on this same automation path disproved that: PR #78
-head `cf688fd5b304f2a62eb9f958fd49cd640aa88191` reproduced the same
+head `c7d325ae96c3fa57e5058d6a2d3d51d13e7bad43` reproduced the same
 dispatch-trio-success pattern, but GitHub still reported the PR as
 `mergeable=true` / `mergeable_state=blocked`, while the three duplicate
 `pull_request`-event runs on that same SHA remained `action_required`
@@ -289,32 +289,52 @@ linkage must avoid every literal closing-keyword form entirely; use
 wording such as "Issue #76 remains open; no closing keyword is
 included."
 
-**Issue #79 (durable identity-tooling finding, 2026-09-13):** the
-GitHub App installation now backing this repository's Claude Code
-integration (secrets `CLAUDE_AUTOMATION_APP_ID` /
-`CLAUDE_AUTOMATION_APP_PRIVATE_KEY`, installed only on
-`wayne19870129/lingsway-platform`) does **not** grant its Claude Code
-sessions write access to `.github/workflows/**` — confirmed directly
-from that session's own stated capabilities ("Modify files in the
-.github/workflows directory (GitHub App permissions do not allow
-workflow modifications)" under "What You CANNOT Do"), not inferred.
-This means the fix designed for Issue #79 — minting a separate GitHub
-App installation token inside `claude.yml` and using it (instead of
-`GITHUB_TOKEN`) for `scripts/claude-ensure-pr-and-dispatch.sh`'s `gh pr
-create`/`gh workflow run` calls in both the `claude` job's `ensure-pr`
-step and the `claude-recovery` job — cannot be applied by an
-`issue_comment`-triggered Claude Code session itself; the exact diff is
-fully specified in `docs/82-tasks/TASK-T22-claude-automation-app-token-identity.md`
-for the repository owner (or a Claude session invoked through a path
-that does hold `.github/workflows` write scope, e.g. a local CLI run)
-to apply directly. **This is a standing constraint for every future
-Issue whose fix requires editing anything under `.github/workflows/**`
-— such tasks always terminate at "diff specified, not applied" from an
-Issue-triggered Claude Code session**, not specific to Issue #79's
-design. Issue #79 remains open: the App-token identity swap and its
-live validation (does the resulting `pull_request`-triggered
-CI/Security/Risk run actually skip `action_required`?) are both still
-outstanding pending that manual diff application.
+**Issue #79 (durable identity-tooling finding, 2026-09-13):** two
+distinct identities/permission boundaries are in play here and must not
+be conflated:
+
+1. **The existing Claude Code integration/App** that runs this
+   repository's `@claude`-triggered sessions themselves (model turns,
+   file edits, `git push` of the branch). That session's own stated
+   capabilities confirm directly ("Modify files in the .github/workflows
+   directory (GitHub App permissions do not allow workflow
+   modifications)" under "What You CANNOT Do") that it does **not** hold
+   write access to `.github/workflows/**` — this is what blocked
+   applying TASK-T22's diff from within this Issue's own session.
+2. **A separate, newly-provisioned automation GitHub App**
+   (secrets `CLAUDE_AUTOMATION_APP_ID` / `CLAUDE_AUTOMATION_APP_PRIVATE_KEY`,
+   installed only on `wayne19870129/lingsway-platform`) that Issue #79's
+   human setup step created *for a different purpose*: to be the
+   token-minting identity that `claude.yml`'s deterministic `ensure-pr`/
+   `claude-recovery` steps would use *instead of* `GITHUB_TOKEN`, once
+   the diff below is applied. As of this document, that App is **not**
+   yet wired into `claude.yml` at all (confirmed: all `GH_TOKEN` lines
+   in `claude.yml` still read `${{ github.token }}`) — it does not
+   "back this repository's Claude Code integration" today; it is
+   provisioned-but-unused infrastructure for the future deterministic
+   ensure-pr/recovery token path.
+
+The fix designed for Issue #79 — minting a token from App #2 inside
+`claude.yml` and using it (instead of `GITHUB_TOKEN`) for
+`scripts/claude-ensure-pr-and-dispatch.sh`'s `gh pr create`/`gh workflow
+run` calls in both the `claude` job's `ensure-pr` step and the
+`claude-recovery` job — cannot be applied by an `issue_comment`-triggered
+Claude Code session itself, because that session runs under App #1's
+permission grant, not App #2's. The exact diff is fully specified in
+`docs/82-tasks/TASK-T22-claude-automation-app-token-identity.md` for the
+repository owner (or a Claude session invoked through a path that does
+hold `.github/workflows` write scope, e.g. a local CLI run) to apply
+directly. **Under the current issue-comment-triggered Claude Code
+integration/tooling boundary (App #1), any Issue whose fix requires
+editing anything under `.github/workflows/**` will hit this same
+"diff specified, not applied" stopping point** — this is a statement
+about the current integration's permission grant, not an immutable
+forever-rule; a future permission model or an explicitly assigned
+executor with workflow-write scope could change it. Issue #79 remains
+open: the App-token identity swap and its live validation (does the
+resulting `pull_request`-triggered CI/Security/Risk run actually skip
+`action_required`?) are both still outstanding pending that manual diff
+application.
 
 ## 6. Durable technical baseline
 
