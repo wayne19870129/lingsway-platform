@@ -174,22 +174,41 @@ use, either is acceptable and both should be recorded once done:
 
 1. **Preferred:** have the repository owner reduce the App installation
    itself (GitHub → Settings → Developer settings → GitHub Apps → this
-   App → Permissions) to exactly the four rows in the table above, then
-   re-approve the reduced permission set for this repository's
-   installation.
-2. **If the installation must stay broader for other reasons:** add an
-   explicit `permissions:` input to the `create-github-app-token` step
-   in the diff below (e.g. `permissions: "pull-requests:write,
-   actions:write, contents:read"`), which mints a token narrowed to
-   exactly those scopes regardless of what the installation itself
-   holds — `create-github-app-token` supports requesting a subset of the
-   installation's granted permissions this way.
+   App → Permissions) to exactly the three permissions listed in the
+   table above (Pull requests, Actions, Contents). Metadata: Read is a
+   mandatory/implicit permission every GitHub App installation carries
+   regardless of what is configured — it is not a row in the table and
+   not an additional grant the owner needs to add. Then re-approve the
+   reduced permission set for this repository's installation.
+2. **If the installation must stay broader for other reasons:** add
+   explicit per-permission inputs to the `create-github-app-token` step
+   in the diff below (`permission-pull-requests: write`,
+   `permission-actions: write`, `permission-contents: read`), which mint
+   a token narrowed to exactly those scopes regardless of what the
+   installation itself holds — `create-github-app-token` supports
+   requesting a subset of the installation's granted permissions this
+   way, one input per permission. (There is no generic aggregate
+   `permissions:` input on this action; see the correction below.)
 
 Until one of these is done and confirmed, do not describe this design as
 least-privilege in practice — the design's *intent* is least-privilege,
 but the currently-provisioned installation is not. The diff below
-includes the explicit `permissions:` input as the default so the token
+includes the explicit `permission-*` inputs as the default so the token
 itself is narrow even before the installation-level tightening happens.
+
+**Correction (rework round 2):** an earlier version of this document
+used a single aggregate `permissions:` input taking a JSON object (e.g.
+`permissions: {"pull_requests": "write", ...}`) on the
+`create-github-app-token` step. That input does not exist on the
+current released `actions/create-github-app-token` action — its
+`action.yml` exposes only per-permission inputs named `permission-<name>`
+(e.g. `permission-actions`, `permission-contents`,
+`permission-pull-requests`), each taking a single value like `read` or
+`write`. The YAML below has been corrected to use those per-permission
+inputs; do not reintroduce a generic `permissions:` input when applying
+this diff, since an unrecognized input would silently do nothing and
+the minted token would fall back to the installation's full (broader)
+grant.
 
 ## Exact diff for manual application to `.github/workflows/claude.yml`
 
@@ -217,14 +236,15 @@ pinning convention for `actions/checkout` and
           private-key: ${{ secrets.CLAUDE_AUTOMATION_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
-          permissions: >-
-            {"pull_requests": "write", "actions": "write", "contents": "read"}
+          permission-pull-requests: write
+          permission-actions: write
+          permission-contents: read
 ```
 
-The `permissions:` input above explicitly narrows the minted token to
+The `permission-*` inputs above explicitly narrow the minted token to
 the phase-1 floor from the table, regardless of what the App
 installation itself currently grants (see "Known gap" note above) —
-include it even after the installation is tightened, as defense in
+include them even after the installation is tightened, as defense in
 depth.
 
 Then in the existing `ensure-pr` step, change only the `GH_TOKEN` line:
@@ -263,8 +283,9 @@ And in `claude-recovery`, add the same minting step before its existing
           private-key: ${{ secrets.CLAUDE_AUTOMATION_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
-          permissions: >-
-            {"pull_requests": "write", "actions": "write", "contents": "read"}
+          permission-pull-requests: write
+          permission-actions: write
+          permission-contents: read
       - shell: bash
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}   # was: ${{ github.token }}
