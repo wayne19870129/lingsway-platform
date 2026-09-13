@@ -118,9 +118,16 @@ if [ -z "${pr_number}" ]; then
     body="(no commit body was provided; see the commit history on this branch for details)"
   fi
   pr_create_err_file="$(mktemp)"
-  if ! pr_url=$(gh pr create --repo "${REPO}" --base "${BASE_BRANCH}" --head "${BRANCH}" \
-    --title "${title}" --body "${body}" 2>"${pr_create_err_file}"); then
-    pr_create_status=$?
+  # Capture gh's real exit status with `set +e` around the call: inside an
+  # `if ! cmd; then ...` branch, `$?` reflects the negated `!` result (i.e.
+  # 0 on failure), not cmd's own status, so that pattern cannot be used to
+  # propagate the original non-zero exit code.
+  set +e
+  pr_url=$(gh pr create --repo "${REPO}" --base "${BASE_BRANCH}" --head "${BRANCH}" \
+    --title "${title}" --body "${body}" 2>"${pr_create_err_file}")
+  pr_create_status=$?
+  set -e
+  if [ "${pr_create_status}" -ne 0 ]; then
     cat "${pr_create_err_file}" >&2
     if grep -qF 'GitHub Actions is not permitted to create or approve pull requests' "${pr_create_err_file}"; then
       echo "HINT: this is the known GitHub repository-level restriction, not a script or token-scope bug. The repository owner must enable Settings -> Actions -> General -> Workflow permissions -> \"Allow GitHub Actions to create and approve pull requests\" before this deterministic step can create PRs. Widening this workflow's own 'permissions:' block does not fix it." >&2
