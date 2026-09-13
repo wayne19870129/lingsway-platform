@@ -28,6 +28,13 @@
 #      branch, but another branch already has an open PR whose name matches
 #      this Issue's branch-naming convention -> refuses (nonzero exit), no
 #      `gh pr create` call.
+#   6. REGRESSION (Issue #76 -- run `34730093694`, Issue #74 live run):
+#      `gh pr create` fails with GitHub's own fixed denial text for the
+#      "Allow GitHub Actions to create and approve pull requests" repository
+#      setting being off -> the script must exit non-zero, print the
+#      original GitHub error text (not swallow it), print an actionable hint
+#      pointing at the repository setting, report no `pr_number`, and must
+#      NOT dispatch ci.yml/security.yml/risk-classify.yml afterward.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -127,6 +134,10 @@ if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
 fi
 
 if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+  if [ -n "${GH_PR_CREATE_FAIL:-}" ]; then
+    echo "${GH_PR_CREATE_FAIL}" >&2
+    exit 1
+  fi
   echo "https://github.com/fakeowner/fakerepo/pull/999"
   exit 0
 fi
@@ -195,6 +206,25 @@ set -e
 assert "scenario 5: exits nonzero (refuses to create a second PR)" "$([ "${scenario5_exit}" -ne 0 ] && echo true || echo false)"
 assert "scenario 5: gh pr create was NOT called" "$(grep -q 'gh pr create' "${GH_LOG}" && echo false || echo true)"
 assert "scenario 5: no CI/Security/Risk dispatch" "$(grep -q 'gh workflow run' "${GH_LOG}" && echo false || echo true)"
+
+echo "### Scenario 6 (Issue #76 regression): gh pr create fails with the known Actions PR-creation denial -> exit nonzero, surface original error + hint, no pr_number, no dispatch"
+echo '[]' >"${GH_EXISTING_PRS_JSON}"
+echo '[]' >"${GH_OPEN_PRS_JSON}"
+: >"${GH_LOG}"
+DENIAL_TEXT="pull request create failed: GraphQL: GitHub Actions is not permitted to create or approve pull requests (createPullRequest)"
+set +e
+GITHUB_OUTPUT="${WORKDIR}/out6" BRANCH="feature-branch" PRE_HEAD_SHA="" ISSUE_NUMBER="" \
+  GH_PR_CREATE_FAIL="${DENIAL_TEXT}" \
+  bash "${TARGET_SCRIPT}" >"${WORKDIR}/out6.stdout" 2>"${WORKDIR}/out6.stderr"
+scenario6_exit=$?
+set -e
+out6=$(cat "${WORKDIR}/out6" 2>/dev/null || true)
+out6_stderr=$(cat "${WORKDIR}/out6.stderr")
+assert "scenario 6: exits nonzero" "$([ "${scenario6_exit}" -ne 0 ] && echo true || echo false)"
+assert "scenario 6: original GitHub denial text is surfaced" "$(echo "${out6_stderr}" | grep -qF "${DENIAL_TEXT}" && echo true || echo false)"
+assert "scenario 6: actionable repository-setting hint is surfaced" "$(echo "${out6_stderr}" | grep -qi "Allow GitHub Actions to create and approve pull requests" && echo true || echo false)"
+assert "scenario 6: no pr_number reported" "$(echo "${out6}" | grep -q 'pr_number=' && echo false || echo true)"
+assert "scenario 6: no CI/Security/Risk dispatch after failed PR creation" "$(grep -q 'gh workflow run' "${GH_LOG}" && echo false || echo true)"
 
 echo
 if [ "${failures}" -gt 0 ]; then
