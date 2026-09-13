@@ -12,6 +12,25 @@ egress is independent static residential IPs (Webshare), rendered through
 an Xray/Mihomo gateway layer, with database-generated configuration and
 fail-closed traffic handling as non-negotiable invariants.
 
+**Relationship to `docs/84-implementation-roadmap-2026-09.md`:** that
+document already exists on `main` (produced for Issue #81, a prior,
+narrower repository-wide implementation audit) and already contains a
+frontend-pages/frontend-API-client status row. This document does not
+replace it and does not re-derive its findings from scratch; where the
+two overlap (frontend route/component/API-client state, provider-registry
+mock-only status), this document cross-checked and reused that prior
+finding rather than treating it as new. **`docs/83-project-continuity.md`
+remains the single authoritative source for current, fast-moving status**
+(per that document's own stated role); of the two audit snapshots,
+`docs/84-implementation-roadmap-2026-09.md` is the fresher one for
+day-to-day product-implementation status, since it predates this document
+by the same 2026-09-13 audit cycle for Issue #81 rather than #83. This
+document's distinct contribution is the full-breadth pass Issue #83
+explicitly asked for (egress/gateway/provisioning/subscription-generation/
+workers/deployment/CI/CD coverage together with API/DB/provider-registry),
+including this section's own direct frontend-architecture verification
+below rather than only citing the prior audit's row.
+
 ---
 
 ## 1. Completed capabilities
@@ -74,6 +93,23 @@ fail-closed traffic handling as non-negotiable invariants.
   order creation (`backend/app/api/public.py`), with the authoritative
   capacity check still enforced at payment-confirmation time — a
   performance/UX improvement that does not weaken the capacity guard.
+- **Frontend route/page coverage matches the described customer and admin
+  surface**: `frontend/app/(customer)/{login,register,portal,plans,
+  orders,orders/new,subscriptions,subscriptions/[id]}/page.tsx` and
+  `frontend/app/(admin)/admin/{page,orders,customers,egress,capacity}.tsx`
+  are real, functional pages — not stubs — each performing its own
+  `fetch()` calls against the backend API surface audited in section 1
+  above (e.g. `admin/page.tsx` renders live `/admin/metrics` data;
+  `login/page.tsx` and `admin/components.tsx`'s `AdminShell` both call
+  `POST /auth/login` and store the resulting bearer token). Session/auth
+  integration is client-side bearer-token storage in `window.localStorage`
+  (`lingsway_customer_access_token` / `lingsway_admin_access_token` in
+  `frontend/app/customer.tsx` and `frontend/app/(admin)/admin/components.tsx`
+  respectively, not cookies/server sessions), with a shared `request()`
+  helper in each shell that attaches `Authorization: Bearer <token>` and
+  clears the token on `401`/`403`. This pattern is duplicated between the
+  customer and admin shells rather than shared, but both are real,
+  working implementations, not scaffolding.
 - **Marzban accounting adapter exists as production-capable code**
   (`backend/app/providers/accounting/marzban.py`): a real HTTP client
   against the pinned Marzban v0.8.4 admin API, with its own offline
@@ -130,6 +166,18 @@ fail-closed traffic handling as non-negotiable invariants.
   not wired into rendering per ADR-012, pending Phase 0 real-client
   evidence collection into `docs/70-external-facts.md`. Intentionally
   paused on evidence, not abandoned.
+- **Frontend data-access layer** — `frontend/lib/api.ts` is a one-line
+  `NEXT_PUBLIC_API_BASE_URL` constant, not a typed API client; every page
+  (`login/page.tsx`, `register/page.tsx`, `admin/components.tsx`, etc.)
+  calls `fetch()` directly against ad hoc endpoint strings and hand-rolled
+  response types instead of going through one shared, typed seam. This
+  works today because the frontend is functionally connected to the real
+  backend, but a backend API-contract change has no single frontend
+  location to check for breakage, and the customer/admin `request()`
+  helpers duplicate the same bearer-token/401-handling logic instead of
+  sharing it. Already identified independently in
+  `docs/84-implementation-roadmap-2026-09.md` §1/§2; confirmed still
+  accurate against current code in this audit.
 - **Deployment automation** — `deploy/bootstrap.sh` and `deploy/lib/*`
   exist per the `ARCHITECTURE.md` §3/§9 structure, but every `deploy-*.yml`
   GitHub Actions workflow runs with `DRY_RUN=true` by design (`README.md`)
@@ -149,6 +197,17 @@ fail-closed traffic handling as non-negotiable invariants.
 
 ## 3. Missing production capabilities
 
+- **Client setup guide content** — `frontend/app/(docs)/guides/
+  {windows,macos,ios,android}/` each contain **only `.gitkeep`**; no
+  actual end-user client-setup documentation exists for any platform,
+  despite subscription generation (rendering a usable client config being
+  the product's core deliverable) requiring exactly this content to be
+  usable by a real customer. `frontend/components/{admin,layout,
+  subscription}/` are likewise `.gitkeep`-only — no shared/reusable
+  components exist yet; each page currently inlines its own markup and
+  state instead of drawing from a component library. Already identified
+  independently in `docs/84-implementation-roadmap-2026-09.md` §1;
+  confirmed still accurate against current code in this audit.
 - **Payment, notify, email, captcha, storage providers**: `payment/`,
   `notify/`, `email/`, `captcha/`, `storage/` each have **only** a
   mock/noop implementation — no `manual` payment provider file (despite
@@ -240,7 +299,14 @@ wiring first, then wiring registry providers strictly by TASK-T16's own
 read-before-write / one-at-a-time sequencing, then the remaining
 provider categories, then deploy verification, with process/automation
 fixes threaded in wherever they're already blocking or about to block
-something else.
+something else. The frontend gaps in section 3 (missing client-setup
+guide content, placeholder-only shared components, un-typed API client)
+do not change this ordering: none of them sits on the egress/gateway
+safety-critical path this order is sequenced around, and none blocks or
+is blocked by the provider-registry wiring work in steps 1–5. They are
+independent, lower-urgency follow-up work already tracked as candidates
+in `docs/84-implementation-roadmap-2026-09.md`'s own recommendation
+section — not duplicated as new TASK candidates here.
 
 1. **Close the two identified Xray/Mihomo failure-path gaps** (exception-path
    rollback on `install()`/first `reload()`; Mihomo `health()` actually
