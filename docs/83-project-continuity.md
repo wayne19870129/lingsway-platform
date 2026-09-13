@@ -208,6 +208,29 @@ Issue #76 is the immediate next queued workflow-reliability task —
 fresh session should not skip #76 and start T16 directly, or it risks
 reproducing this same broken Issue→Claude→PR loop.
 
+**Issue #76 update (2026-09-13): repository-level PR-creation toggle
+enabled, failure class B still unverified.** Diagnosis (Issue #76 run
+`34732975891`) confirmed the `createPullRequest` denial in run
+`34730093694` was caused by the repository setting **Settings → Actions
+→ General → Workflow permissions → "Allow GitHub Actions to create and
+approve pull requests"** being off — a repository-level policy GitHub
+enforces independently of the workflow's own `permissions:` block, not
+fixable by widening YAML permissions. The repository owner enabled that
+setting on 2026-09-13. The Issue #76 implementation run (this same
+change: `scripts/claude-ensure-pr-and-dispatch.sh` now surfaces the
+original `gh pr create` error text plus an actionable hint on non-zero
+exit, instead of only failing generically) is the **live validation**
+that the deterministic post-Claude step can now create a PR
+automatically end-to-end for an Issue-first trigger. **Do not assume
+this is fully closed yet:** the second live finding from this same
+Issue — same-repository Claude/Actions-authored PR pushes causing
+CI/Security/Risk runs to enter `action_required` and require manual
+"Approve and run" (failure class B) — is explicitly **unverified after
+the PR-creation setting change**. It has not been fixed in code (the
+external-contributor approval policy was deliberately left unchanged
+pending confirmation), and whether it still occurs must be observed on
+the PR this run produces before it can be called resolved.
+
 ## 6. Durable technical baseline
 
 High-level stack: Python/FastAPI backend (`backend/app/`), Next.js

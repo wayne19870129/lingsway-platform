@@ -117,8 +117,18 @@ if [ -z "${pr_number}" ]; then
   if [ -z "${body}" ]; then
     body="(no commit body was provided; see the commit history on this branch for details)"
   fi
-  pr_url=$(gh pr create --repo "${REPO}" --base "${BASE_BRANCH}" --head "${BRANCH}" \
-    --title "${title}" --body "${body}")
+  pr_create_err_file="$(mktemp)"
+  if ! pr_url=$(gh pr create --repo "${REPO}" --base "${BASE_BRANCH}" --head "${BRANCH}" \
+    --title "${title}" --body "${body}" 2>"${pr_create_err_file}"); then
+    pr_create_status=$?
+    cat "${pr_create_err_file}" >&2
+    if grep -qF 'GitHub Actions is not permitted to create or approve pull requests' "${pr_create_err_file}"; then
+      echo "HINT: this is the known GitHub repository-level restriction, not a script or token-scope bug. The repository owner must enable Settings -> Actions -> General -> Workflow permissions -> \"Allow GitHub Actions to create and approve pull requests\" before this deterministic step can create PRs. Widening this workflow's own 'permissions:' block does not fix it." >&2
+    fi
+    rm -f "${pr_create_err_file}"
+    exit "${pr_create_status}"
+  fi
+  rm -f "${pr_create_err_file}"
   pr_number=$(printf '%s' "${pr_url}" | grep -oE '[0-9]+$')
   echo "Created PR #${pr_number} for branch '${BRANCH}': ${pr_url}"
 else
