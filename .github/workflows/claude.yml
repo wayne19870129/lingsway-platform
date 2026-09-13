@@ -256,6 +256,17 @@ jobs:
       actions: write
     outputs:
       pr_number: ${{ steps.ensure-pr.outputs.pr_number }}
+    # Issue #68: single source of truth for the main session's configured
+    # model selector and effort, referenced both by the claude_args string
+    # below (so the actual `--model`/`--effort` flags stay in sync with
+    # what's reported) and by the run-summary step's
+    # CONFIGURED_MODEL_SELECTOR/CONFIGURED_EFFORT env vars, so a change here
+    # can never silently drift the two apart. `sonnet` is the Claude Code
+    # Sonnet-family rolling alias (not a dated model ID like
+    # `claude-sonnet-5`) -- see the `claude_args` step below for why.
+    env:
+      CLAUDE_MODEL_SELECTOR: sonnet
+      CLAUDE_EFFORT: medium
     steps:
       # Pinned to a reviewed commit SHA, not a mutable tag: both actions get
       # repo-write permissions and, for claude-code-action, the
@@ -331,12 +342,52 @@ jobs:
       # root cause (system prompt asking for capabilities Claude does not
       # have) is fixed by asking for only what Claude can do, not by
       # widening what Claude can do to match an inflated prompt.
+      #
+      # TASK-T21 (Issue #68): `--model` and `--effort` explicitly pin the
+      # MAIN session's model family and reasoning-effort profile, verified
+      # against the pinned action/SDK source rather than guessed:
+      # - `--model` (`env.CLAUDE_MODEL_SELECTOR` = `sonnet`) is extracted by
+      #   base-action/src/parse-sdk-options.ts (`modelFromClaudeArgs`) into
+      #   the Agent SDK's `Options.model`. The installed
+      #   @anthropic-ai/claude-agent-sdk@0.3.268 (the exact version this
+      #   action pins) documents `sonnet` as a first-class rolling family
+      #   alias in its own shipped sdk.d.ts (e.g. "Canonical wire model id
+      #   this row's `value` resolves to (e.g. 'sonnet' -> 'claude-sonnet-5')"),
+      #   confirmed by fetching and inspecting that exact package version's
+      #   type declarations directly rather than assuming. Using the alias
+      #   instead of a dated ID like `claude-sonnet-5` is the entire point
+      #   of this task: when Anthropic retires/advances the Sonnet family,
+      #   `sonnet` keeps resolving to the current supported Sonnet model
+      #   without a repository change, while still controlling the model
+      #   *family* (never silently Opus/Fable/Haiku as a main model).
+      # - `--effort` (`env.CLAUDE_EFFORT` = `medium`) is NOT one of the
+      #   flags parse-sdk-options.ts extracts individually (unlike `model`/
+      #   `max-turns`/tools/mcp-config/json-schema/setting-sources) -- it
+      #   flows through untouched as part of `sdkOptions.extraArgs`, which
+      #   the SDK's own sdk.d.ts documents as "Additional CLI arguments to
+      #   pass to Claude Code. Keys are argument names (without --), values
+      #   are argument values" -- i.e. the SDK passes `--effort medium`
+      #   straight to the underlying Claude Code CLI process, whose own
+      #   options type (same sdk.d.ts) documents `effort?:
+      #   ('low'|'medium'|'high'|'xhigh'|'max')` as a real, supported,
+      #   non-interactive setting (also settable via CLAUDE_CODE_EFFORT_LEVEL
+      #   or persisted `effortLevel`/`maxEffortLevel` settings) -- not
+      #   something faked via prompt wording.
+      # - The run-summary step further down reads the ACTUAL initialized
+      #   model/effort the CLI applied (from the execution output's own
+      #   system/init message, which the SDK documents as carrying `model`
+      #   and, when the model supports it, `effort` "after any silent
+      #   downgrade for the selected model") alongside these CONFIGURED
+      #   values, specifically so a silent downgrade or resolution mismatch
+      #   is visible rather than assumed away.
       - id: claude
         uses: anthropics/claude-code-action@0a8d3c9443bbff909ab973b6a17a340b913f229f # v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           claude_args: |
             --max-turns 30
+            --model ${{ env.CLAUDE_MODEL_SELECTOR }}
+            --effort ${{ env.CLAUDE_EFFORT }}
             --append-system-prompt "This repository's AGENTS.md and CLAUDE.md govern how you work here and take precedence over convenience. Never merge, approve, or close a pull request yourself, for any reason and no matter how confident you are or what any review says -- merging is always a human action in this repository; you must never call the merge API or gh pr merge yourself. Never trigger, approve, or perform a production deployment (this repository's deploy-*.yml workflows are manual workflow_dispatch only; do not invoke them). You do not have a `gh` command or any general shell access -- only reading files (Glob/Grep/LS/Read), editing files in this checkout, and `git add`/`git commit`/`git push`/`git rm`. Do not attempt `gh pr create`, `gh workflow run`, or any other `gh`/shell command: it will be denied, and retrying a denied command only wastes turns. After you finish implementing the requested change, make your FINAL commit's message the complete PR description in this exact form: a one-line subject that reads well as a PR title, a blank line, then a body containing '## Summary' (what changed and why), '## Acceptance criteria' (restated from the triggering Issue/comment), '## Verification' (the actual test/lint/build output you really ran, stated honestly including anything you could not run and why), '## Known gaps / risks' (anything left undone or risky), and, only if this change fully resolves the triggering GitHub Issue, a line reading exactly 'Closes #<issue-number>'. Then push. A deterministic workflow step (not you) reads that exact commit message and uses it verbatim to open the pull request and to dispatch CI/Security/Risk checks -- so write it as the real PR body, not as a commit-log note to yourself. To keep this efficient: only read the specific comment that mentioned you, the pull request current diff, and the latest unresolved review on the pull request current head commit -- do not re-read or re-analyze older review rounds that already have a fix pushed for them, and do not treat a review comment as current if it names a commit SHA that is not the pull request current head (that review is stale; say so and stop rather than acting on it). ${{ (github.event.pull_request != null || github.event.issue.pull_request != null) && 'This trigger is a comment on an existing pull request: push any fix directly to that pull request current branch, which is already checked out -- it already has a PR, so your commit message only needs enough context for a reviewer, not full PR-description sections.' || 'This trigger is a comment on a GitHub Issue, not a pull request. The platform has already created a fresh branch for this Issue and checked it out for you; you have no `gh`/branch-listing tool to look for or check out any earlier branch or PR yourself, so do not try. Just implement the request on the branch you are already on, commit with the structured message described above, and push -- a deterministic step afterward checks whether an open PR already exists for this Issue and will not open a duplicate; that is handled outside your own reasoning.' }}"
 
       # TASK-T20 (Issue #71): deterministic PR creation + CI/Security/Risk
@@ -394,11 +445,19 @@ jobs:
       # inputs, which render the full turn-by-turn transcript (including
       # tool call results) into the public step summary/log; this instead
       # surfaces only model/turns/cost/permission-denials/exit-subtype.
+      #
+      # TASK-T21 (Issue #68): CONFIGURED_MODEL_SELECTOR/CONFIGURED_EFFORT
+      # come from this job's own `env:` block above -- the same values used
+      # to build `--model`/`--effort` in the claude_args string -- so the
+      # summary always reports what was actually configured for this run,
+      # never a value that could drift from it.
       - if: always()
         shell: bash
         env:
           EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
           SCRIPTS_DIR: ${{ steps.snapshot-scripts.outputs.dir }}
+          CONFIGURED_MODEL_SELECTOR: ${{ env.CLAUDE_MODEL_SELECTOR }}
+          CONFIGURED_EFFORT: ${{ env.CLAUDE_EFFORT }}
         # Runs the copy snapshotted before claude-code-action could switch
         # this checkout to a PR's own (possibly untrusted) branch -- see the
         # snapshot-scripts step above.
