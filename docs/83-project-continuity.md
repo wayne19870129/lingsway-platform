@@ -245,10 +245,18 @@ merge readiness.** PR #78 head
 the deterministic `workflow_dispatch` CI (`34736481046`-style),
 Security, and Risk runs all completed `success` on that SHA — but
 GitHub still reported the PR as `mergeable=true` /
-`mergeable_state=blocked`, because the active `Protect main` ruleset
-requires the `pull_request`-triggered status checks specifically, and
-those three duplicate runs remained `action_required` (approval-gated,
-since the PR was created/updated through `GITHUB_TOKEN`). Same-SHA
+`mergeable_state=blocked`, while the three duplicate `pull_request`-event
+runs on that same SHA remained `action_required` (approval-gated, since
+the PR was created/updated through `GITHUB_TOKEN`). The active
+`Protect main` ruleset requires a fixed list of named GitHub Actions
+check contexts (`lint`, `shellcheck`, `backend`, `backend-image`,
+`frontend`, `gitleaks`, `python-audit`, `npm-audit`, `marzban-contract`);
+it does not bind those required contexts to a specific triggering event,
+so record only what was directly observed — dispatch-trio success,
+PR-run `action_required`, and `mergeable_state=blocked` occurring
+together on the same SHA — without asserting that the ruleset requires
+the `pull_request` event specifically, since no platform evidence for
+that causal mechanism has been checked. Same-SHA
 `workflow_dispatch` success is real evidence that the code and checks
 themselves execute correctly, but it does **not** remove GitHub's
 approval-required gate on the `pull_request`-triggered runs, and it does
