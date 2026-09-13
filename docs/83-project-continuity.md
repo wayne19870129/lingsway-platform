@@ -208,7 +208,14 @@ Issue #76 is the immediate next queued workflow-reliability task —
 fresh session should not skip #76 and start T16 directly, or it risks
 reproducing this same broken Issue→Claude→PR loop.
 
-**Issue #76 resolution (2026-09-13): both failure classes closed out.**
+**Issue #76 current status (updated 2026-09-13, live evidence through
+PR #78): failure class A is resolved and validated; failure class B
+remains open.** This is the single current-status narrative for #76 —
+treat any earlier "both failure classes closed out" / "failure class B
+... resolved" wording in this document's history as superseded by this
+section, not as still-current fact.
+
+*Failure class A — `createPullRequest` denial — fixed and validated.*
 Diagnosis (Issue #76 run `34732975891`) confirmed the `createPullRequest`
 denial in run `34730093694` was caused by the repository setting
 **Settings → Actions → General → Workflow permissions → "Allow GitHub
@@ -219,46 +226,44 @@ repository owner enabled that setting on 2026-09-13. PR #77 (the Issue
 #76 implementation run, `scripts/claude-ensure-pr-and-dispatch.sh`
 surfacing the original `gh pr create` error text plus an actionable hint
 on non-zero exit) was created automatically end-to-end from an
-Issue-first trigger, confirming **failure class A is fixed and
-validated**.
+Issue-first trigger, confirming failure class A is fixed and validated.
 
-**Failure class B (`action_required` on same-repository Claude/Actions
-PR pushes) — resolved, not by code/policy change but by correcting what
-counts as the authoritative check.** Live evidence from PR #77 head
-`1df3441f92fc883fa358eb93c8659277126fbb84`: six workflow runs fired for
-that one SHA. The three `pull_request`-event runs entered
-`action_required` — expected GitHub behavior whenever a workflow using
-the repository `GITHUB_TOKEN` creates/updates a PR, not a defect and not
-evidence the deterministic checks failed. Separately, the deterministic
-post-Claude dispatch path launched exactly three `workflow_dispatch`
-runs on that same SHA, and all three completed successfully with no
-maintainer approval required:
+*Failure class B — `action_required` / protected-branch block on
+same-repository Claude/Actions PR pushes — still open.* Live evidence
+from PR #77 head `1df3441f92fc883fa358eb93c8659277126fbb84`: six
+workflow runs fired for that one SHA. The three `pull_request`-event
+runs entered `action_required` — expected GitHub behavior whenever a
+workflow using the repository `GITHUB_TOKEN` creates/updates a PR, not a
+defect and not evidence the deterministic checks failed. Separately, the
+deterministic post-Claude dispatch path launched exactly three
+`workflow_dispatch` runs on that same SHA, and all three completed
+successfully with no maintainer approval required:
 
 - CI run `34736481046` — `workflow_dispatch` — `success`
 - Security run `34736481706` — `workflow_dispatch` — `success`
 - Risk classification run `34736482463` — `workflow_dispatch` — `success`
 
-**Correction (2026-09-13, live evidence from PR #78 on this same
-automation path): the "durable review rule" above was wrong about
-merge readiness.** PR #78 head
-`cf688fd5b304f2a62eb9f958fd49cd640aa88191` reproduced the same pattern —
-the deterministic `workflow_dispatch` CI (`34736481046`-style),
-Security, and Risk runs all completed `success` on that SHA — but
-GitHub still reported the PR as `mergeable=true` /
-`mergeable_state=blocked`, while the three duplicate `pull_request`-event
-runs on that same SHA remained `action_required` (approval-gated, since
-the PR was created/updated through `GITHUB_TOKEN`). The active
-`Protect main` ruleset requires a fixed list of named GitHub Actions
-check contexts (`lint`, `shellcheck`, `backend`, `backend-image`,
-`frontend`, `gitleaks`, `python-audit`, `npm-audit`, `marzban-contract`);
-it does not bind those required contexts to a specific triggering event,
-so record only what was directly observed — dispatch-trio success,
-PR-run `action_required`, and `mergeable_state=blocked` occurring
-together on the same SHA — without asserting that the ruleset requires
-the `pull_request` event specifically, since no platform evidence for
-that causal mechanism has been checked. Same-SHA
-`workflow_dispatch` success is real evidence that the code and checks
-themselves execute correctly, but it does **not** remove GitHub's
+At the time of that PR #77 evidence, this document mistakenly concluded
+that dispatch-trio success meant failure class B was "resolved." Live
+evidence from PR #78 on this same automation path disproved that: PR #78
+head `cf688fd5b304f2a62eb9f958fd49cd640aa88191` reproduced the same
+dispatch-trio-success pattern, but GitHub still reported the PR as
+`mergeable=true` / `mergeable_state=blocked`, while the three duplicate
+`pull_request`-event runs on that same SHA remained `action_required`
+(approval-gated, since the PR was created/updated through
+`GITHUB_TOKEN`). The active `Protect main` ruleset requires a fixed list
+of named GitHub Actions check contexts (`lint`, `shellcheck`, `backend`,
+`backend-image`, `frontend`, `gitleaks`, `python-audit`, `npm-audit`,
+`marzban-contract`); it does not bind those required contexts to a
+specific triggering event, so record only what was directly observed —
+dispatch-trio success, PR-run `action_required`, and
+`mergeable_state=blocked` occurring together on the same SHA — without
+asserting that the ruleset requires the `pull_request` event
+specifically, since no platform evidence for that causal mechanism has
+been checked.
+
+Same-SHA `workflow_dispatch` success is real evidence that the code and
+checks themselves execute correctly, but it does **not** remove GitHub's
 approval-required gate on the `pull_request`-triggered runs, and it does
 **not** unblock the protected-branch merge state on its own. Do not
 report a PR as merge-ready on dispatch-trio success alone; the
@@ -270,7 +275,9 @@ approval protections. The durable fix for zero-manual-approval —
 issuing the PR-creating/updating call from a GitHub App installation
 token or a PAT instead of `GITHUB_TOKEN`, so GitHub does not classify
 the resulting `pull_request` runs as needing approval — has **not**
-been implemented; Issue #76 remains open on that basis.
+been implemented. **Issue #76 remains open on that basis** until a PR
+created/updated through this automation no longer needs per-SHA
+maintainer approval to merge.
 
 **Process lesson from PR #77 (Issue #76 reopened once because of this):**
 GitHub parses a leading closing-keyword form (`Closes #N`, `Fixes #N`,
