@@ -1,4 +1,10 @@
-# TASK-T24 — Remove legacy `arrickcherney-ops` identity from active workflow (audit)
+# TASK-T25 — Remove legacy `arrickcherney-ops` identity from active workflow (audit)
+
+> Note: this task was originally numbered TASK-T24. It was renumbered to
+> TASK-T25 during PR #93 review because PR #91 independently introduced
+> an unrelated `TASK-T24-claude-pr-and-verification.md` on its own
+> branch; keeping both as T24 would have made the number ambiguous once
+> both PRs merged.
 
 ## 目标
 
@@ -34,7 +40,7 @@ not need to re-derive it from scratch.
 
 ## 允许修改的文件
 
-- `docs/82-tasks/TASK-T24-remove-legacy-identity-audit.md` (this file)
+- `docs/82-tasks/TASK-T25-remove-legacy-identity-audit.md` (this file)
 - `docs/83-project-continuity.md`
 
 No other file needed a change — see Findings below.
@@ -75,21 +81,38 @@ workflow's identity/token design.
   references; neither names `arrickcherney-ops`. The workflow's only
   Claude-side credential is `CLAUDE_CODE_OAUTH_TOKEN`, scoped to
   `wayne19870129`'s own Claude Code Action installation.
-- The only observed remaining link to the legacy identity is **PR #91
-  itself**, which GitHub recorded as authored by `arrickcherney-ops` at
-  creation time (historical fact, not reproducible from any file in this
-  repo) and whose `pull_request`-triggered check runs were held behind
-  GitHub's maintainer-approval gate. That gate is a repository/Actions
-  **setting** (see `docs/83-project-continuity.md` §5's "failure class
-  B" discussion of `action_required` runs and the "Protect main" ruleset
-  in `docs/10-deploy-new-server.md`), not a value stored in any
-  version-controlled file — it cannot be changed by this PR, and this
-  session has no `gh`/GitHub API access to inspect or change repository
-  collaborator/Actions-approval settings even if it were otherwise in
-  scope. Whether `arrickcherney-ops` still holds collaborator access,
-  and whether that access should be revoked, is therefore a GitHub
-  Settings action for `wayne19870129` to take directly — not a finding
-  this audit can resolve by editing code.
+- The remaining link to the legacy identity is **PR #91 itself**, which
+  GitHub recorded as authored by `arrickcherney-ops` at creation time
+  (historical fact, not reproducible from any file in this repo) and
+  whose `pull_request`-triggered check runs required maintainer
+  approval before running. Two things are observed facts and one
+  remains unverified from inside this session:
+  - Observed: PR #91 is legacy-account-authored.
+  - Observed: its `pull_request`-triggered checks required maintainer
+    approval before running.
+  - Not independently verifiable from this session: the exact
+    repository/Actions setting that caused that approval requirement.
+    This session has no working `gh`/GitHub API network access to
+    inspect Actions or collaborator configuration directly (attempted
+    and blocked by the sandbox), so that causal link is not asserted
+    here beyond what's stated in `docs/10-deploy-new-server.md`'s
+    "Protect main" and `docs/83-project-continuity.md` §5's
+    `action_required` discussion.
+  - **Collaborator permission on `arrickcherney-ops`:** during PR #93
+    review, `wayne19870129` (the repository owner, reviewing
+    independently outside this session) reported directly querying
+    repository collaborator permissions and confirmed `arrickcherney-ops`
+    **currently holds `write` collaborator access** on
+    `wayne19870129/lingsway-platform`. This session cannot independently
+    re-verify that query (no working GitHub API/`gh` network access from
+    inside the sandbox), so it is recorded here as owner-reported current
+    state rather than something this audit confirmed itself — but per
+    the reviewer's explicit instruction it is treated as known, current
+    fact rather than left as unresolved speculation. Revoking that write
+    access is a GitHub Settings action only `wayne19870129` can take
+    directly (collaborator-removal is outside this session's authority
+    regardless of this being confirmed); this audit does not perform
+    it and Issue #92 stays open until it's done.
 
 ## 验收标准
 
