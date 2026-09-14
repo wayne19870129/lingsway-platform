@@ -67,20 +67,75 @@ an HTML-comment marker for that branch, and records the pending branch
 plus a maintainer reconciliation instruction. This keeps one Issue / one
 PR, prevents silent orphaning, and preserves Contents read-only access.
 
-The generated PR body deliberately never contains a closing keyword
-(`Closes`/`Fixes`/`Resolves #N`) and states the Issue is not
-auto-closed. This is not an oversight: `docs/83-project-continuity.md`
-records a real incident (PR #77 / Issue #76) where GitHub's keyword
-parser closed an Issue from a PR body containing the literal string
-"`Closes #76`" even inside a sentence explicitly saying it was *not*
-included. Given the create-pr job has no reliable signal for whether an
-Issue is fully or partially resolved (only a branch name crosses the
-trust boundary from the Claude job), emitting a conditional closing
-keyword would reproduce that exact failure mode. The Summary section
-instead lists the actual commit subjects and changed file paths pulled
-from the already-fetched `compare` response, so a reviewer gets a real,
-data-derived "what changed" without rereading the whole diff, while the
-Issue-closure decision stays a manual, reviewed step.
+The generated PR body carries a trustworthy full-vs-partial Issue-closure
+signal without any new permission or trust-boundary crossing. The
+create-pr job already fetches every commit message on the branch via the
+Contents-read `compareCommitsWithBasehead` call (used for the Summary
+section); `scripts/claude-create-pr.cjs` trusts only a literal,
+line-anchored `Closes #<issue-number>` line for the exact triggering
+Issue — never a substring inside prose — and otherwise states plainly
+that the Issue stays open.
+
+**Known gap: the Claude-side half of this signal is not yet wired up.**
+The plan is for `claude.yml`'s `--append-system-prompt` to ask Claude to
+add that exact line to one of its commits *only if* the change fully
+resolves the triggering Issue. This PR's automated rework session could
+not add that instruction: pushing a `.github/workflows/**` change from
+this session's GitHub App token was rejected server-side
+("refusing to allow a GitHub App to create or update workflow
+`.github/workflows/claude.yml` without `workflows` permission"). Until a
+maintainer (or a session/token with `workflows` write) adds this sentence
+to the existing
+`--append-system-prompt` value, Claude never emits the marker and every
+generated PR body will state the Issue stays open — safe, but not yet the
+intended full-resolution signal:
+
+> If, and only if, your change fully resolves the triggering Issue, put a
+> line containing exactly `Closes #<issue-number>` (the real number,
+> nothing else on that line) in one of your commit messages. If the work
+> is partial, never write that word (or Fixes/Resolves) followed by an
+> issue number anywhere, in any commit message or comment; state the
+> remaining work instead.
+
+`docs/83-project-continuity.md` records a real prior
+incident (PR #77 / Issue #76) where GitHub's keyword parser closed an
+Issue from a PR body containing the literal string "`Closes #76`" even
+inside a sentence explicitly saying it was *not* included; the lesson
+from that incident is "never write a negated/conditional closing-keyword
+phrase," not "never write a real one when it's actually true." The
+negative-case wording here never contains the words Closes/Fixes/Resolves
+next to an issue number, so it cannot reproduce that failure mode.
+A second, related risk this round's testing surfaced directly (not
+previously covered): a commit *subject* quoted verbatim in the Summary
+section could itself contain an incidental `Closes #N` for some other
+Issue (e.g. a commit message that legitimately closes a different,
+already-fixed issue). GitHub's keyword parser does not care that the text
+is inside a quoted "commits in this run" bullet list. `claude-create-pr.cjs`
+now defuses any such token in quoted commit-subject text with a
+zero-width space before it reaches the PR body, so only the one, explicit,
+line-anchored `closureNote` computed above can ever act as a real closing
+reference.
+
+**Open architectural conflict (not resolved by this change) —
+same-Issue follow-up work does not reach the existing PR's head/CI.**
+When a later same-Issue Claude run produces a different timestamped
+branch while an open PR already exists, this helper records one durable
+pending-branch pointer on that PR (see Acceptance) rather than creating a
+second PR. That prevents silent loss, but it is not equivalent to the
+later commits becoming part of the existing PR's reviewable head or
+triggering its CI. GitHub's PR API has no way to repoint an existing PR's
+head branch; the only way to land another branch's commits on that head
+(`git merge`/`git push` equivalent) needs Contents:write to that specific
+ref. A prior round of independent review flagged exactly that Contents:
+write expansion as "broader than the intended small PR-creation tail" and
+asked for it to be reverted, and a later round asked for the head/CI
+reachability back while explicitly keeping Contents read-only. Those two
+asks are mutually exclusive under GitHub's current REST surface — there
+is no third mechanism. This is intentionally left as an open question for
+a human decision (accept the pointer as final behavior and have
+maintainers reply on the PR directly for follow-ups, vs. deliberately
+approving a narrower reviewed Contents:write grant), not silently decided
+either way in code.
 
 After review, the maintainer creates a fine-grained PAT under GitHub
 Settings > Developer settings > Personal access tokens > Fine-grained

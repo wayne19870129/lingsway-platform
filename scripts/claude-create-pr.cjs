@@ -37,11 +37,32 @@ module.exports = async function createClaudePR({ github, context, core, branch }
     owner, repo, state: 'open', per_page: 100,
   });
   const existing = openPRs.find(sameIssue);
+  // Trustworthy full-vs-partial signal: only an exact, standalone line in a
+  // real commit on this Issue's own branch counts, never free-text/prose.
+  // Never emit a literal Closes/Fixes/Resolves token in the negative case
+  // (see docs/83-project-continuity.md's #77/#76 incident) - the two
+  // branches below use disjoint wording, not a negated keyword.
+  const closesMarker = new RegExp(`^(?:Closes|Fixes|Resolves)\\s+#${issue.number}$`, 'i');
+  const fullyResolved = (diff.commits || []).some((c) =>
+    c.commit.message.split('\n').some((line) => closesMarker.test(line.trim())));
+  const closureNote = fullyResolved
+    ? `Closes #${issue.number}`
+    : `Issue #${issue.number} stays open; the linked commit did not mark it fully resolved.`;
+  // Raw commit subjects are quoted verbatim below for review context, but a
+  // subject can itself contain an accidental "Closes #N" for some other
+  // Issue; GitHub's keyword parser does not care about surrounding prose
+  // (the same #77/#76 failure mode). Defuse any such token in quoted text
+  // with a zero-width space so only the trusted closureNote line above can
+  // ever act as a real closing reference.
+  const zeroWidthSpace = String.fromCharCode(8203);
+  const defuseKeywords = (s) =>
+    s.replace(/\b(closes?|closed|fix(?:es|ed)?|resolves?|resolved)(\s+)#(\d+)/gi,
+      (_, kw, sp, num) => `${kw}${sp}#${zeroWidthSpace}${num}`);
   // Sanitized, data-only summary: no shell evaluation of Issue/commit text.
   const summary = [
     'Commits from this Issue run:',
     ...(diff.commits || []).slice(-20).map((c) =>
-      `- ${c.commit.message.split('\n')[0].replace(/[\r\n]/g, ' ').slice(0, 200)}`),
+      `- ${defuseKeywords(c.commit.message.split('\n')[0].replace(/[\r\n]/g, ' ').slice(0, 200))}`),
     '', 'Files touched:',
     ...diff.files.slice(0, 50).map((f) => `- \`${f.filename}\``),
   ].join('\n');
@@ -83,7 +104,7 @@ module.exports = async function createClaudePR({ github, context, core, branch }
       '## Existing-customer impact', 'Review the diff and Issue acceptance criteria before merging.',
       '## Rollback plan', 'If merged, revert through a separately reviewed PR.',
       '## Risk classification', 'Use the normal Risk classification check and human review.',
-      'Human merge is mandatory. This PR does not automatically close the Issue.',
+      'Human merge is mandatory.', closureNote,
     ].join('\n\n'),
   });
   core.info('Created PR; normal pull_request workflows will evaluate it');

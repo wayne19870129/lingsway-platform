@@ -125,6 +125,40 @@ TASK-T24 completes the minimal design after PR #88's live test:
   existing PR; it never writes or merges branches. Same-Issue creation jobs
   serialize without cancelling the running job; existing PRs with no new
   branch, or no diff, mean no new PR. No workflow dispatch is involved.
+  **Open architectural conflict, not yet resolved (Issue #89 / PR #91
+  round 2 review):** GitHub's PR API cannot repoint an existing PR's head
+  branch, and the only way to land the later branch's commits on the
+  existing PR's own head/CI is a write to that branch ref (`git merge`/
+  `git push` equivalent), which needs Contents:write — the exact scope a
+  prior round of the same review flagged as "broader than the intended
+  small PR-creation tail" and asked to be reverted. Keeping Contents
+  read-only (current state) and reaching the existing head/CI automatically
+  are mutually exclusive with GitHub's current REST surface; there is no
+  third option. This is recorded as `NEEDS_CLARIFICATION` pending an
+  explicit human choice between (a) accepting the pending-branch pointer
+  as the final behavior — the maintainer replies on the PR itself for
+  follow-up work rather than re-mentioning the Issue — or (b) deliberately
+  approving a narrower, reviewed Contents:write grant for this one
+  operation.
+- The generated PR body is designed to carry a trustworthy full-vs-partial
+  Issue-closure signal without any new permission: `create-pr`'s existing
+  Contents-read `compareCommitsWithBasehead` call already returns every
+  commit message on the branch, and `scripts/claude-create-pr.cjs` trusts
+  only a literal, anchored `Closes #<issue-number>` line for the same
+  Issue (never prose) — otherwise it states the Issue stays open, never
+  emitting a negated closing-keyword phrase (the #77/#76 failure mode).
+  Raw commit-subject text quoted in the body's Summary section is defused
+  (zero-width space) so an incidental `Closes #N` for an unrelated Issue
+  in a commit subject can never act as a real closing reference.
+  **The other half is not wired up yet:** `claude.yml`'s system prompt
+  does not yet ask Claude to write that line, because this session's
+  GitHub App token cannot push `.github/workflows/**` changes ("refusing
+  to allow a GitHub App to create or update workflow ... without
+  `workflows` permission" on push). A maintainer or a session with
+  `workflows` write must add the sentence recorded in TASK-T24 to the
+  existing `--append-system-prompt` value before any PR body will ever
+  contain a real `Closes #N`; until then every generated PR states the
+  Issue stays open, which is safe but incomplete.
 - Scoped verification tools, preinstalled dependencies, Actions read
   permissions and a 30-turn limit replace the previous unbounded run.
 - There is no custom App token, manual workflow dispatch, dedup job,

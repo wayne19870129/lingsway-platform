@@ -105,6 +105,24 @@ test('a manual same-Issue PR matched by Issue URL also records a note', async ()
   assert.equal(f.creates.length, 0);
   assert.equal(f.updates.length, 1);
 });
+test('exact standalone Closes line in a commit adds the real closing keyword', async () => {
+  const f = fixture({ commits: [{ commit: { message: 'Do the thing' } },
+    { commit: { message: 'Fix wording\n\nCloses #89' } }] });
+  await createPR(f);
+  assert.match(f.creates[0].body, /(?:^|\n)Closes #89(?:\n|$)/);
+});
+test('closing keyword embedded in prose is not trusted', async () => {
+  const f = fixture({ commits: [{ commit: { message: 'Says Closes #89 in passing' } }] });
+  await createPR(f);
+  assert.doesNotMatch(f.creates[0].body, /(?:^|\n)Closes #89(?:\n|$)/);
+  assert.match(f.creates[0].body, /stays open/);
+});
+test('closing keyword for a different issue number is not trusted', async () => {
+  const f = fixture({ commits: [{ commit: { message: 'Closes #90' } }] });
+  await createPR(f);
+  assert.doesNotMatch(f.creates[0].body, /Closes #\d/);
+  assert.match(f.creates[0].body, /stays open/);
+});
 test('does not duplicate the pending-branch note on rerun', async () => {
   const f = fixture({ open: [{ number: 90, head: { ref: 'manual' },
     body: 'Related #89.\n\n<!-- claude-pending-branch:claude/issue-89-test -->\nalready noted' }] });
