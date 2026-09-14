@@ -447,20 +447,22 @@ decays quickly.
   Risk trio is green — see section 5's correction. The zero-manual-
   approval acceptance criterion is not yet satisfied.
 - **Current technical frontier**: TASK-T16 Phase 2B-remain-1A,
-  architecture-only. ADR-019 defines the Xray desired-state and credential
-  boundary needed before remain-1B code implementation: full DB snapshot with
-  current-read freshness, ref-only outbound DTOs, operation-scoped credential
-  resolution, plaintext lifecycle, and CandidateConfig redaction. Remain-1A is
-  not implemented in production code; remain-1B has not started. Phase 2B is
-  still **not COMPLETE**. Issue #97 and PR #98 are historical Phase 2C attempt
-  artifacts, both closed; PR #98 was never merged. Issue #101 is also closed
-  as Not planned. Phase 2C remains technically **BLOCKED**, and
-  `GATEWAY_PROVIDER=xray_file` registry wiring must remain paused until
-  Phase 2B is complete and independently reviewed/approved for manual merge.
-  Real providers remain non-selectable in `build_registry()` (see section 6).
-  For future small T16 slices, TASK-T16 plus the corresponding PR are the
-  durable requirement/acceptance/hand-off record; do not create a separate
-  Issue unless explicitly requested.
+  architecture-only. ADR-019 now fixes route/endpoint/binding/Secret
+  current-read freshness, ref-only outbound DTOs with safe repr, the
+  operation-scoped resolver API, plaintext lifecycle, and CandidateConfig
+  redaction. Remain-1A is not implemented in production code; remain-1B has
+  not started. The chosen sequence is dormant security infrastructure in
+  remain-1B, followed by one coherent remain-3 full-snapshot and
+  `outbound_tags -> outbounds` live cutover; no intermediate full-snapshot
+  contract + delta producer may merge. Phase 2B is still **not COMPLETE**.
+  Issue #97 and PR #98 are historical Phase 2C attempt artifacts, both closed;
+  PR #98 was never merged. Issue #101 is also closed as Not planned. Phase 2C
+  remains technically **BLOCKED**, and `GATEWAY_PROVIDER=xray_file` registry
+  wiring must remain paused until Phase 2B is complete and independently
+  reviewed/approved for manual merge. Real providers remain non-selectable in
+  `build_registry()` (see section 6). For future small T16 slices, TASK-T16
+  plus the corresponding PR are the durable requirement/acceptance/hand-off
+  record; do not create a separate Issue unless explicitly requested.
 - **Issue #87 / TASK-T23 replaces the abandoned custom-App proposal.**
   The minimal workflow is implemented in PR #88 and needs post-merge
   live validation with a new Issue comment. TASK-T22 is retained only as
