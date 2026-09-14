@@ -1976,5 +1976,34 @@ adapter、DTO/编排改动、独立的 reconciliation 工具/作业、
 - 新增离线确定性测试，覆盖 mock 健康状态、admin accounting/transport 分派、
   Marzban 认证成功、认证失败、传输失败、异常响应和凭据/token 脱敏。
 
-本项完成不等于 Phase 2B 完成。PR #98 / Issue #97 仍保持 OPEN/PAUSED，不能恢复；
-Xray gateway 接线及其余 Phase 2B 工作仍需独立审查和人工合并。
+本项完成不等于 Phase 2B 完成。Issue #97 与 PR #98 是历史上提前启动的
+Phase 2C attempt，现均已关闭；PR #98 从未 merge，不能恢复。Xray gateway 接线
+及其余 Phase 2B 工作仍需独立审查和人工合并。
+
+
+## Phase 2B-remain-1A — Finalize Xray desired-state / credential boundary
+
+本阶段是 docs-only 架构阶段，依据新增的
+`docs/80-decisions/ADR-019-xray-desired-state-credential-boundary.md`
+定义后续实现契约：
+
+- architecture contract 已定义：完整 `XrayOutboundDTO`、route 与 Secret
+  统一 current-read freshness、full DB snapshot、operation-scoped
+  `CredentialResolver`、明文生命周期、DTO/CandidateConfig repr 脱敏和
+  credential precedence。
+- 本阶段尚未实施任何业务代码、provider/base DTO、secret resolver、renderer、
+  schema、migration 或 Xray registry wiring；remain-1B 代码实现尚未开始。
+- remain-1B 只允许先落地 dormant 安全基础设施，不得切换 live
+  `DesiredRoutingState` producer 或 `outbound_tags`。
+- remain-3 必须在一个连贯 PR 中完成 deterministic full-snapshot query、route/
+  endpoint/binding/Secret freshness、precedence、`outbound_tags -> outbounds`
+  和全部 caller/test cutover，避免“full-snapshot contract + delta producer”
+  的可合并中间态。
+- 当前 binding override 的非空 malformed ref 必须 fail closed；仅 NULL/空字符串
+  才允许回退 endpoint-level ref。Gateway provider/renderer 不得依赖 SQLAlchemy
+  Session。
+- Phase 2B 仍未 COMPLETE。Issue #97 与 PR #98 是历史上提前启动的 Phase 2C
+  attempt，现均已关闭且 PR #98 从未 merge；Phase 2C 这个技术阶段仍为
+  BLOCKED，与 `GATEWAY_PROVIDER=xray_file` registry wiring 不得恢复。
+- Issue #101（本阶段早期 tracking artifact）已按 Not planned 关闭。以后本系列
+  小阶段不再新建 Issue，以 TASK-T16 与对应 PR 作为需求、验收和交接记录。
