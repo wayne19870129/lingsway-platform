@@ -23,6 +23,7 @@ from backend.app.domain.provisioning import (
     ProvisionStatus,
     ProvisionStep,
 )
+from backend.app.infra.credential_resolver import SqlAlchemyCredentialResolver
 from backend.app.infra.gateway_route_lock import gateway_route_binding_write
 from backend.app.infra.provisioning_state import SqlAlchemyProvisioningState
 from backend.app.models import (
@@ -702,6 +703,7 @@ def admin_confirm_payment(
         )
         state = _OrderProvisioningState(db, order_id)
         runs = _SqlAlchemyProvisionRuns(db)
+        credential_resolver = SqlAlchemyCredentialResolver(db)
         try:
             outcome = confirm_payment_and_provision(
                 command,
@@ -712,6 +714,7 @@ def admin_confirm_payment(
                 _SqlAlchemyOrderState(db),
                 data.payment_reference,
                 providers=registry,
+                credential_resolver=credential_resolver,
             )
         finally:
             runs.close()

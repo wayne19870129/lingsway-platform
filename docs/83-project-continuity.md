@@ -1,7 +1,9 @@
 # Project Continuity / Handoff
 
-**Last reconciled with main baseline:** `d45197da388262b840497d6ce611293eec95ed9b`
-(verified 2026-09-14 UTC after PR #100 merge and before Phase 2B-remain-1A — dates in
+**Last reconciled with main baseline:** `d4a16ce21f21227670adc4e64233ecd382b435da`
+(verified 2026-09-14 UTC after PR #102 merge; PR #103 is the implementation vehicle
+for Phase 2B-remain-1B and its acceptance condition is independent PASS followed by
+manual merge — dates in
 this document are UTC unless stated otherwise, so a local-time reading
 of a commit's own timestamp can legitimately differ by a day), during
 Issue #74; corrected 2026-09-13 on this same PR (#75) after independent
@@ -446,20 +448,21 @@ decays quickly.
   `GITHUB_TOKEN`, even when the same-SHA `workflow_dispatch` CI/Security/
   Risk trio is green — see section 5's correction. The zero-manual-
   approval acceptance criterion is not yet satisfied.
-- **Current technical frontier**: TASK-T16 Phase 2B-remain-1A,
-  architecture-only. ADR-019 now fixes route/endpoint/binding/Secret
-  current-read freshness, ref-only outbound DTOs with safe repr, the
-  operation-scoped resolver API, plaintext lifecycle, and CandidateConfig
-  redaction. Remain-1A is not implemented in production code; remain-1B has
-  not started. The chosen sequence is dormant security infrastructure in
-  remain-1B, followed by one coherent remain-3 full-snapshot and
+- **Current technical frontier**: TASK-T16 Phase 2B-remain-1B,
+  whose implementation vehicle is PR #103. ADR-019 is Accepted and now fixes
+  route/endpoint/binding/Secret current-read freshness, ref-only
+  outbound DTOs with safe repr, the operation-scoped resolver API, plaintext
+  lifecycle, and CandidateConfig redaction. Remain-1B adds the resolver,
+  stable error contract, explicit provisioning/provider dependency, and
+  regression tests; it does not change the live desired-state shape. When PR #103
+  is on main, remain-1B is complete there. The next step is one coherent remain-3 full-snapshot and
   `outbound_tags -> outbounds` live cutover; no intermediate full-snapshot
   contract + delta producer may merge. Phase 2B is still **not COMPLETE**.
   Issue #97 and PR #98 are historical Phase 2C attempt artifacts, both closed;
   PR #98 was never merged. Issue #101 is also closed as Not planned. Phase 2C
   remains technically **BLOCKED**, and `GATEWAY_PROVIDER=xray_file` registry
-  wiring must remain paused until Phase 2B is complete and independently
-  reviewed/approved for manual merge. Real providers remain non-selectable in
+  wiring must remain paused until Phase 2B is complete under the remain-3 gate.
+  Real providers remain non-selectable in
   `build_registry()` (see section 6). For future small T16 slices, TASK-T16
   plus the corresponding PR are the durable requirement/acceptance/hand-off
   record; do not create a separate Issue unless explicitly requested.

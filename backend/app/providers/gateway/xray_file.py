@@ -17,6 +17,7 @@ from typing import NoReturn, Protocol
 from backend.app.providers.base import (
     ApplyResult,
     CandidateConfig,
+    CredentialResolver,
     DesiredRoutingState,
     HealthReport,
     ValidationResult,
@@ -58,7 +59,10 @@ class XrayFileProvider:
         self._alert = alert
         self._audit = audit
 
-    def render(self, desired: DesiredRoutingState) -> CandidateConfig:
+    def render(
+        self, desired: DesiredRoutingState, resolver: CredentialResolver
+    ) -> CandidateConfig:
+        del resolver
         rules: list[dict[str, object]] = [
             {"type": "field", "ip": ["geoip:private"], "outboundTag": "BLOCK"}
         ]

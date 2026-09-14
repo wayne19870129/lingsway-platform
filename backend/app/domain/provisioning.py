@@ -15,6 +15,7 @@ from backend.app.providers.base import (
     AccountingProvider,
     AccountUserDTO,
     CredentialDTO,
+    CredentialResolver,
     DesiredForwarderState,
     DesiredRoutingState,
     EgressEndpointDTO,
@@ -268,9 +269,12 @@ class ProvisioningState(Protocol):
 
 @dataclass(slots=True)
 class ProvisioningService:
+    """Provisioning orchestration with ADR-019's resolver dependency."""
+
     egress: EgressProvider
     accounting: AccountingProvider
     gateway: GatewayProvider
+    credential_resolver: CredentialResolver
     forwarder: ForwarderProvider
     notify: NotifyProvider
     state: ProvisioningState
@@ -514,7 +518,7 @@ class ProvisioningService:
             desired_routing = self.state.desired_routing_state(
                 request, endpoint, tenant, routing_principal
             )
-            candidate = self.gateway.render(desired_routing)
+            candidate = self.gateway.render(desired_routing, self.credential_resolver)
             validation = self.gateway.validate(candidate)
             if not validation.valid:
                 errors = "; ".join(validation.errors)
