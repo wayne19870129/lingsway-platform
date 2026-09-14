@@ -212,7 +212,7 @@ def test_mysql_snapshot_sees_b_committed_and_a_uncommitted_with_one_session(
             )  # type: ignore[arg-type]
 
             assert {outbound.tag for outbound in desired.outbounds} == {
-                "egress-a",
+                "egress-1",
                 "egress-b",
             }
             assert desired.outbounds[1].host == "b-after.example.invalid"
