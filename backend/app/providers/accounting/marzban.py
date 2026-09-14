@@ -524,6 +524,15 @@ class MarzbanAccountingProvider:
 
     # -- AccountingProvider contract -------------------------------------
 
+    def health_check(self) -> bool:
+        """Probe the pinned admin authentication contract without user mutation."""
+        try:
+            self._token = self._authenticate()
+        except MarzbanApiError:
+            self._token = None
+            return False
+        return True
+
     def create_user(
         self, username: str, quota_bytes: int, expire_at: datetime | None
     ) -> AccountUserDTO:
