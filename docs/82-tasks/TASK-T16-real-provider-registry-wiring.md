@@ -2051,7 +2051,8 @@ active route、endpoint、binding 与 credential ref 的全量 current-read 快�
 - 快照前不提前 commit；render/apply 成功后才由既有调用方 commit，失败则在
   named-lock span 内 rollback。未修改 Reality、preservation 校验、registry
   wiring、schema/migration、部署或生产 Xray IO。
-- 已新增 unit/provider 覆盖和 MySQL-only current-read/concurrency 集成覆盖。
+- 已新增 unit/provider 覆盖和 `test_mysql_xray_snapshot_concurrency.py` 的
+  MySQL-only current-read/concurrency 集成覆盖。
   本阶段若独立审查 PASS 且人工合并，则 full snapshot/outbound cutover 完成。
   preservation rewrite、Reality persistence/ownership、writer-guard/drift
   baseline、existing-data reconciliation 仍是后续工作；Phase 2B 仍未
