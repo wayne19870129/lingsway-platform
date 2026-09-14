@@ -1987,13 +1987,18 @@ Phase 2C attempt，现均已关闭；PR #98 从未 merge，不能恢复。Xray g
 `docs/80-decisions/ADR-019-xray-desired-state-credential-boundary.md`
 定义后续实现契约：
 
-- architecture contract 已定义：完整 `XrayOutboundDTO`、full DB snapshot、
-  operation-scoped `CredentialResolver`、明文生命周期、`CandidateConfig`
-  脱敏和 credential precedence。
+- architecture contract 已定义：完整 `XrayOutboundDTO`、route 与 Secret
+  统一 current-read freshness、full DB snapshot、operation-scoped
+  `CredentialResolver`、明文生命周期、DTO/CandidateConfig repr 脱敏和
+  credential precedence。
 - 本阶段尚未实施任何业务代码、provider/base DTO、secret resolver、renderer、
   schema、migration 或 Xray registry wiring；remain-1B 代码实现尚未开始。
-- `DesiredRoutingState` 后续必须由完整 active DB snapshot 驱动，不能只传入新增
-  subscription，也不能读取运行时文件增量拼接。
+- remain-1B 只允许先落地 dormant 安全基础设施，不得切换 live
+  `DesiredRoutingState` producer 或 `outbound_tags`。
+- remain-3 必须在一个连贯 PR 中完成 deterministic full-snapshot query、route/
+  endpoint/binding/Secret freshness、precedence、`outbound_tags -> outbounds`
+  和全部 caller/test cutover，避免“full-snapshot contract + delta producer”
+  的可合并中间态。
 - 当前 binding override 的非空 malformed ref 必须 fail closed；仅 NULL/空字符串
   才允许回退 endpoint-level ref。Gateway provider/renderer 不得依赖 SQLAlchemy
   Session。
