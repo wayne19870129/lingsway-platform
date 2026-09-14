@@ -132,6 +132,12 @@ class Runs:
         pass
 
 
+@dataclass(frozen=True)
+class FakeCredentialResolver:
+    def resolve(self, secret_ref: str) -> CredentialDTO:
+        return CredentialDTO("resolver-user", "resolver-password")
+
+
 @dataclass
 class WorkflowState:
     events: list[str] = field(default_factory=list)
@@ -214,6 +220,7 @@ def command(order_type: BillingOrderType = BillingOrderType.PURCHASE) -> Billing
 
 def test_external_failure_keeps_paid_order_marks_subscription_failed_and_disables_user() -> None:
     providers = registry()
+    credential_resolver = FakeCredentialResolver()
     accounting = MockAccountingProvider(
         failures={"create_user": RuntimeError("accounting unavailable")}
     )
@@ -243,6 +250,7 @@ def test_external_failure_keeps_paid_order_marks_subscription_failed_and_disable
             workflow,
             "receipt-1",
             providers=providers,
+            credential_resolver=credential_resolver,
         )
 
     assert "order:paid" in workflow.events
@@ -269,6 +277,7 @@ def test_pending_manual_never_acquires_the_named_lock() -> None:
             raise ExternalTenantCreationError("provider response lost", "external-tenant-1")
 
     providers = registry()
+    credential_resolver = FakeCredentialResolver()
     providers = ProviderRegistry(
         egress=PartiallyCreatedEgress(),
         accounting=providers.accounting,
@@ -293,6 +302,7 @@ def test_pending_manual_never_acquires_the_named_lock() -> None:
         workflow,
         "receipt-1",
         providers=providers,
+        credential_resolver=credential_resolver,
     )
 
     assert outcome is not None
@@ -313,6 +323,7 @@ def test_lock_acquisition_failure_disables_accounting_user_and_rolls_back() -> N
     provision_apply_gateway() (the only caller of desired_routing_state())
     never runs at all."""
     providers = registry()
+    credential_resolver = FakeCredentialResolver()
     workflow = WorkflowState()
     runs = Runs()
     provisioning_state = State(lock_error=GatewayRouteBindingLockError("GET_LOCK timed out"))
@@ -327,6 +338,7 @@ def test_lock_acquisition_failure_disables_accounting_user_and_rolls_back() -> N
             workflow,
             "receipt-1",
             providers=providers,
+            credential_resolver=credential_resolver,
         )
 
     assert isinstance(providers.accounting, MockAccountingProvider)
@@ -354,6 +366,7 @@ def test_paid_non_purchase_orders_use_ordering_branch(
     order_type: BillingOrderType, event: str
 ) -> None:
     providers = registry()
+    credential_resolver = FakeCredentialResolver()
     workflow = WorkflowState()
 
     result = confirm_payment_and_provision(
@@ -365,6 +378,7 @@ def test_paid_non_purchase_orders_use_ordering_branch(
         workflow,
         "receipt-1",
         providers=providers,
+        credential_resolver=credential_resolver,
     )
 
     assert result is None
@@ -374,9 +388,13 @@ def test_paid_non_purchase_orders_use_ordering_branch(
 
 def test_services_compose_t3_provisioning_from_registry() -> None:
     providers = registry()
-    container = build_services(State(), Runs(), providers=providers)
+    credential_resolver = FakeCredentialResolver()
+    container = build_services(
+        State(), Runs(), providers=providers, credential_resolver=credential_resolver
+    )
 
     assert container.providers is providers
+    assert container.provisioning.credential_resolver is credential_resolver
     outcome = container.provisioning.provision(request())
     assert outcome.status is ProvisionStatus.SUCCEEDED
 

@@ -1,0 +1,182 @@
+from __future__ import annotations
+
+import json
+from collections.abc import Iterator
+from pathlib import Path
+from typing import cast
+
+import pytest
+from sqlalchemy import Table, create_engine, select
+from sqlalchemy.dialects import mysql
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session
+
+import backend.app.models  # noqa: F401
+from backend.app.core.database import Base
+from backend.app.core.secrets import put_secret
+from backend.app.infra.credential_resolver import (
+    SqlAlchemyCredentialResolver,
+    _current_secret_statement,
+)
+from backend.app.models import Secret
+from backend.app.providers.base import (
+    CandidateConfig,
+    CredentialDTO,
+    CredentialResolutionError,
+    DesiredRoutingState,
+    XrayOutboundDTO,
+)
+from backend.app.providers.gateway.mock import MockGatewayProvider
+from backend.app.providers.gateway.xray_file import XrayFileProvider
+
+
+@pytest.fixture
+def engine(tmp_path: Path) -> Iterator[Engine]:
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'secrets.db'}")
+    secret_table = cast(Table, Secret.__table__)
+    Base.metadata.create_all(engine, tables=[secret_table])
+    yield engine
+    Base.metadata.drop_all(engine, tables=[secret_table])
+    engine.dispose()
+
+
+def test_secret_bearing_dtos_and_candidate_hide_values_from_repr() -> None:
+    username = "sentinel-username"
+    password = "sentinel-password"
+    ref = "sentinel-secret-ref"
+    content = {"password": password, "credential_secret_ref": ref}
+
+    values = (
+        repr(CredentialDTO(username, password)),
+        repr(XrayOutboundDTO("egress", "proxy.example.invalid", 1080, "socks5", ref)),
+        repr(CandidateConfig(content, "v1")),
+    )
+
+    assert all(username not in value for value in values)
+    assert all(password not in value for value in values)
+    assert all(ref not in value for value in values)
+    assert CredentialDTO(username, password).username == username
+    assert CandidateConfig(content, "v1") == CandidateConfig(content, "v1")
+
+
+def test_current_read_statement_refreshes_identity_map_and_locks_on_mysql() -> None:
+    statement = _current_secret_statement("credential/current")
+
+    assert statement.get_execution_options()["populate_existing"] is True
+    assert "FOR UPDATE" in str(statement.compile(dialect=mysql.dialect()))
+
+
+def test_resolver_reads_own_uncommitted_put(engine: Engine) -> None:
+    with Session(engine) as db:
+        put_secret(
+            db,
+            "credential/own-write",
+            json.dumps({"username": "alice", "password": "pw"}),
+            "EGRESS_CREDENTIAL",
+        )
+
+        resolved = SqlAlchemyCredentialResolver(db).resolve("credential/own-write")
+
+    assert resolved == CredentialDTO("alice", "pw")
+
+
+def test_resolver_refreshes_stale_identity_map_from_latest_commit(engine: Engine) -> None:
+    with Session(engine) as writer:
+        put_secret(
+            writer,
+            "credential/stale",
+            json.dumps({"username": "old-user", "password": "old-pw"}),
+            "EGRESS_CREDENTIAL",
+        )
+        writer.commit()
+
+    with Session(engine) as reader:
+        stale = reader.scalar(select(Secret).where(Secret.secret_ref == "credential/stale"))
+        assert stale is not None
+        with Session(engine) as writer:
+            put_secret(
+                writer,
+                "credential/stale",
+                json.dumps({"username": "new-user", "password": "new-pw"}),
+                "EGRESS_CREDENTIAL",
+            )
+            writer.commit()
+
+        resolved = SqlAlchemyCredentialResolver(reader).resolve("credential/stale")
+
+    assert resolved == CredentialDTO("new-user", "new-pw")
+
+
+@pytest.mark.parametrize(
+    ("secret_ref", "plaintext", "expected_code"),
+    [
+        ("credential/json", "not-json", "CREDENTIAL_MALFORMED"),
+        ("credential/list", json.dumps(["alice", "pw"]), "CREDENTIAL_MALFORMED"),
+        ("credential/missing", json.dumps({"username": "alice"}), "CREDENTIAL_MALFORMED"),
+        (
+            "credential/unknown",
+            json.dumps({"username": "alice", "password": "pw", "extra": "x"}),
+            "CREDENTIAL_MALFORMED",
+        ),
+        (
+            "credential/blank",
+            json.dumps({"username": " ", "password": "pw"}),
+            "CREDENTIAL_MALFORMED",
+        ),
+        (
+            "credential/non-string",
+            json.dumps({"username": "alice", "password": 123}),
+            "CREDENTIAL_MALFORMED",
+        ),
+    ],
+)
+def test_resolver_rejects_malformed_payloads(
+    engine: Engine, secret_ref: str, plaintext: str, expected_code: str
+) -> None:
+    with Session(engine) as db:
+        put_secret(db, secret_ref, plaintext, "EGRESS_CREDENTIAL")
+        with pytest.raises(CredentialResolutionError) as raised:
+            SqlAlchemyCredentialResolver(db).resolve(secret_ref)
+
+    assert raised.value.code == expected_code
+    assert str(raised.value) == expected_code
+    assert secret_ref not in str(raised.value)
+    assert plaintext not in str(raised.value)
+
+
+def test_resolver_rejects_blank_missing_and_decrypt_failures(engine: Engine) -> None:
+    with Session(engine) as db:
+        with pytest.raises(CredentialResolutionError) as blank:
+            SqlAlchemyCredentialResolver(db).resolve(" ")
+        with pytest.raises(CredentialResolutionError) as missing:
+            SqlAlchemyCredentialResolver(db).resolve("credential/missing")
+        db.add(
+            Secret(
+                secret_ref="credential/bad-ciphertext",
+                ciphertext="ciphertext-sentinel",
+                purpose="EGRESS_CREDENTIAL",
+            )
+        )
+        db.flush()
+        with pytest.raises(CredentialResolutionError) as decrypt_failed:
+            SqlAlchemyCredentialResolver(db).resolve("credential/bad-ciphertext")
+
+    assert blank.value.code == "CREDENTIAL_REF_INVALID"
+    assert missing.value.code == "CREDENTIAL_NOT_FOUND"
+    assert decrypt_failed.value.code == "CREDENTIAL_DECRYPT_FAILED"
+    assert "ciphertext-sentinel" not in str(decrypt_failed.value)
+
+
+def test_gateway_providers_accept_operation_scoped_resolver() -> None:
+    class Resolver:
+        def resolve(self, secret_ref: str) -> CredentialDTO:
+            return CredentialDTO("resolver-user", "resolver-password")
+
+    resolver = Resolver()
+    desired = DesiredRoutingState({"user": "egress"}, ("egress", "BLOCK"))
+
+    mock_candidate = MockGatewayProvider().render(desired, resolver)
+    xray_candidate = XrayFileProvider(runtime=None).render(desired, resolver)  # type: ignore[arg-type]
+
+    assert mock_candidate.version == "gateway-mock-v1"
+    assert xray_candidate.version

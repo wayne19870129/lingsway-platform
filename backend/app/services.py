@@ -30,6 +30,7 @@ from backend.app.domain.provisioning import (
 )
 from backend.app.domain.subscription_render import RenderedSubscription, render_subscription
 from backend.app.infra.gateway_route_lock import GatewayRouteBindingLockError
+from backend.app.providers.base import CredentialResolver
 from backend.app.providers.registry import ProviderRegistry
 
 
@@ -46,6 +47,7 @@ def build_services(
     runs: ProvisionRunStore,
     *,
     providers: ProviderRegistry,
+    credential_resolver: CredentialResolver,
 ) -> ServiceContainer:
     """Compose domain services from the caller-supplied, already-owned
     provider registry.
@@ -65,6 +67,7 @@ def build_services(
             egress=registry.egress,
             accounting=registry.accounting,
             gateway=registry.gateway,
+            credential_resolver=credential_resolver,
             forwarder=registry.forwarder,
             notify=registry.notify,
             state=state,
@@ -79,9 +82,12 @@ def provision(
     runs: ProvisionRunStore,
     *,
     providers: ProviderRegistry,
+    credential_resolver: CredentialResolver,
 ) -> ProvisionOutcome:
     """Run the single supported T3 nine-step provisioning orchestration."""
-    return build_services(state, runs, providers=providers).provisioning.provision(request)
+    return build_services(
+        state, runs, providers=providers, credential_resolver=credential_resolver
+    ).provisioning.provision(request)
 
 
 def confirm_payment_and_provision(
@@ -94,6 +100,7 @@ def confirm_payment_and_provision(
     payment_reference: str,
     *,
     providers: ProviderRegistry,
+    credential_resolver: CredentialResolver,
     payment_provider_code: str = "manual",
 ) -> ProvisionOutcome | None:
     """Run the three-phase paid-order workflow.
@@ -139,7 +146,9 @@ def confirm_payment_and_provision(
     # (provision_apply_gateway, APPLY_GATEWAY..NOTIFY) may mutate it, so
     # the named lock is acquired only immediately before that call --
     # never for the external-provider-only steps below.
-    provisioning = build_services(state, runs, providers=registry).provisioning
+    provisioning = build_services(
+        state, runs, providers=registry, credential_resolver=credential_resolver
+    ).provisioning
     try:
         prepared = provisioning.provision_prepare(request)
     except Exception as exc:

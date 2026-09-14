@@ -73,8 +73,17 @@ class TransportCapacityDTO:
 
 @dataclass(frozen=True, slots=True)
 class CredentialDTO:
-    username: str
+    username: str = field(repr=False)
     password: str = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class XrayOutboundDTO:
+    tag: str
+    host: str
+    port: int
+    protocol: str
+    credential_secret_ref: str = field(repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,7 +132,7 @@ class DesiredForwarderState:
 
 @dataclass(frozen=True, slots=True)
 class CandidateConfig:
-    content: Mapping[str, object]
+    content: Mapping[str, object] = field(repr=False)
     version: str
 
 
@@ -182,6 +191,30 @@ class BlobDTO:
 
 class NotSupportedError(RuntimeError):
     """Raised when a provider deliberately does not support an operation."""
+
+
+_CREDENTIAL_ERROR_CODES = frozenset(
+    {
+        "CREDENTIAL_REF_INVALID",
+        "CREDENTIAL_NOT_FOUND",
+        "CREDENTIAL_DECRYPT_FAILED",
+        "CREDENTIAL_MALFORMED",
+        "CREDENTIAL_RESOLUTION_FAILED",
+    }
+)
+
+
+class CredentialResolutionError(RuntimeError):
+    """Stable, secret-safe failure contract for credential resolution."""
+
+    def __init__(self, code: str) -> None:
+        safe_code = code if code in _CREDENTIAL_ERROR_CODES else "CREDENTIAL_RESOLUTION_FAILED"
+        self.code = safe_code
+        super().__init__(safe_code)
+
+
+class CredentialResolver(Protocol):
+    def resolve(self, secret_ref: str) -> CredentialDTO: ...
 
 
 class EgressProvider(Protocol):
@@ -296,7 +329,9 @@ class TransportProvider(Protocol):
 
 
 class GatewayProvider(Protocol):
-    def render(self, desired: DesiredRoutingState) -> CandidateConfig: ...
+    def render(
+        self, desired: DesiredRoutingState, resolver: CredentialResolver
+    ) -> CandidateConfig: ...
 
     def validate(self, candidate: CandidateConfig) -> ValidationResult: ...
 

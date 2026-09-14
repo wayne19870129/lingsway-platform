@@ -132,6 +132,12 @@ class FakeRuns:
         self.notification_error = error
 
 
+@dataclass(frozen=True, slots=True)
+class FakeCredentialResolver:
+    def resolve(self, secret_ref: str) -> CredentialDTO:
+        return CredentialDTO(username="resolver-user", password="resolver-password")
+
+
 @dataclass(slots=True)
 class PartiallyCreatedEgress(MockEgressProvider):
     externally_created: list[str] = field(default_factory=list)
@@ -167,14 +173,17 @@ def request() -> ProvisionRequest:
 def service(
     *,
     egress: MockEgressProvider | None = None,
-    accounting: MockAccountingProvider | None = None,
-    state: FakeState | None = None,
+        accounting: MockAccountingProvider | None = None,
+        state: FakeState | None = None,
     runs: FakeRuns | None = None,
+    credential_resolver: FakeCredentialResolver | None = None,
+    gateway: MockGatewayProvider | None = None,
 ) -> ProvisioningService:
     return ProvisioningService(
         egress=egress or MockEgressProvider(),
         accounting=accounting or MockAccountingProvider(),
-        gateway=MockGatewayProvider(),
+        gateway=gateway or MockGatewayProvider(),
+        credential_resolver=credential_resolver or FakeCredentialResolver(),
         forwarder=MockForwarderProvider(),
         notify=NoopNotifyProvider(),
         state=state or FakeState(),
@@ -190,6 +199,23 @@ def test_provisioning_runs_all_nine_steps_in_order() -> None:
     assert started_steps == list(ProvisionStep)
     assert outcome.status is ProvisionStatus.SUCCEEDED
     assert outcome.subscription_url == "https://subs.example.invalid/s/one-time-token"
+
+
+def test_provisioning_passes_exact_resolver_to_gateway() -> None:
+    class RecordingGateway(MockGatewayProvider):
+        received_resolver: object | None = None
+
+        def render(self, desired, resolver):  # type: ignore[no-untyped-def]
+            self.received_resolver = resolver
+            return super().render(desired, resolver)
+
+    resolver = FakeCredentialResolver()
+    gateway = RecordingGateway()
+
+    outcome = service(gateway=gateway, credential_resolver=resolver).provision(request())
+
+    assert outcome.status is ProvisionStatus.SUCCEEDED
+    assert gateway.received_resolver is resolver
 
 
 def test_step_3_failure_keeps_external_tenant_and_records_pending_manual() -> None:
@@ -397,6 +423,7 @@ def test_fail_apply_gateway_lock_acquisition_disables_user_and_marks_run_failed(
         egress=MockEgressProvider(),
         accounting=accounting,
         gateway=MockGatewayProvider(),
+        credential_resolver=FakeCredentialResolver(),
         forwarder=MockForwarderProvider(),
         notify=notify,
         state=FakeState(),

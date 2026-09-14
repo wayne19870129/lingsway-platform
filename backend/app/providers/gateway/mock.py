@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from backend.app.providers.base import (
     ApplyResult,
     CandidateConfig,
+    CredentialResolver,
     DesiredRoutingState,
     HealthReport,
     ValidationResult,
@@ -16,7 +17,10 @@ class MockGatewayProvider:
     failures: Mapping[str, Exception] = field(default_factory=dict)
     applied_versions: list[str] = field(default_factory=list)
 
-    def render(self, desired: DesiredRoutingState) -> CandidateConfig:
+    def render(
+        self, desired: DesiredRoutingState, resolver: CredentialResolver
+    ) -> CandidateConfig:
+        del resolver
         raise_injected(self.failures, "render")
         return CandidateConfig(
             {"user_routes": dict(desired.user_routes), "outbound_tags": desired.outbound_tags},

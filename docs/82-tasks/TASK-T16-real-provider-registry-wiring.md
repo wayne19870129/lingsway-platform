@@ -1992,7 +1992,7 @@ Phase 2C attempt，现均已关闭；PR #98 从未 merge，不能恢复。Xray g
   `CredentialResolver`、明文生命周期、DTO/CandidateConfig repr 脱敏和
   credential precedence。
 - 本阶段尚未实施任何业务代码、provider/base DTO、secret resolver、renderer、
-  schema、migration 或 Xray registry wiring；remain-1B 代码实现尚未开始。
+  schema、migration 或 Xray registry wiring；remain-1B 的实现见下方对应小节。
 - remain-1B 只允许先落地 dormant 安全基础设施，不得切换 live
   `DesiredRoutingState` producer 或 `outbound_tags`。
 - remain-3 必须在一个连贯 PR 中完成 deterministic full-snapshot query、route/
@@ -2007,3 +2007,24 @@ Phase 2C attempt，现均已关闭；PR #98 从未 merge，不能恢复。Xray g
   BLOCKED，与 `GATEWAY_PROVIDER=xray_file` registry wiring 不得恢复。
 - Issue #101（本阶段早期 tracking artifact）已按 Not planned 关闭。以后本系列
   小阶段不再新建 Issue，以 TASK-T16 与对应 PR 作为需求、验收和交接记录。
+
+
+## Phase 2B-remain-1B — Dormant credential-boundary infrastructure
+
+本阶段在候选 PR 中已实现，等待独立审查和人工合并：
+
+- 新增 dormant `XrayOutboundDTO`、严格的 `CredentialResolver` 协议、稳定且不泄露
+  Secret 内容的 `CredentialResolutionError`，以及 `SqlAlchemyCredentialResolver`。
+- resolver 使用调用方 provisioning `Session`，对 Secret 做 current read：刷新可能过期的
+  SQLAlchemy identity-map 对象，并请求行锁；同 Session 未提交的 `put_secret()` 写入可见。
+  `reveal_secret()` 的既有 subscription-token 语义未改变。
+- `CredentialDTO`、`XrayOutboundDTO` 和 `CandidateConfig` 的 repr 已做边界脱敏；严格
+  credential JSON 载荷校验失败时 fail closed。
+- `ProvisioningService` 与 `GatewayProvider.render()` 已改为显式接收同一 operation-scoped
+  resolver；admin composition boundary 负责构造 resolver。registry 不持有 resolver，provider
+  不接触 Session/ORM，live desired routing 仍保持 `user_routes` / `outbound_tags` 旧形状。
+- 本阶段没有启动 remain-3：没有 full DB snapshot、route/Secret live cutover、
+  `outbound_tags -> outbounds` 展开、registry Xray wiring、migration、deploy 或 reload 变更。
+
+本 PR 不创建 Issue、不自动合并，也不重新打开 #97/#98。Phase 2B 仍未 COMPLETE；remain-3
+仍未开始，Phase 2C 继续 BLOCKED。`main` 在人工合并前仍以 ADR-019 已合并的基线为准。

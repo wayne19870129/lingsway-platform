@@ -69,6 +69,7 @@ from backend.app.providers.base import (
     AccountingCreateEffect,
     AccountingCreateUserError,
     AccountUserDTO,
+    CredentialDTO,
     DesiredRoutingState,
 )
 from backend.app.providers.captcha.noop import NoopCaptchaProvider
@@ -82,7 +83,7 @@ from backend.app.providers.payment.mock import MockPaymentProvider
 from backend.app.providers.registry import ProviderRegistry
 from backend.app.providers.storage.mock import MockBlobStorage
 from backend.app.providers.transport.mock import MockTransportProvider
-from backend.app.services import confirm_payment_and_provision
+from backend.app.services import confirm_payment_and_provision as _confirm_payment_and_provision
 
 
 @pytest.fixture
@@ -262,6 +263,18 @@ def _request(order_id: int, customer_id: int, *, username: str) -> ProvisionRequ
     )
 
 
+@dataclass(frozen=True)
+class _FakeCredentialResolver:
+    def resolve(self, secret_ref: str) -> CredentialDTO:
+        return CredentialDTO("resolver-user", "resolver-password")
+
+
+def confirm_payment_and_provision(*args: Any, **kwargs: Any) -> ProvisionOutcome | None:
+    """Keep every production-path integration call explicitly resolver-bound."""
+    kwargs.setdefault("credential_resolver", _FakeCredentialResolver())
+    return _confirm_payment_and_provision(*args, **kwargs)
+
+
 def _registry(**overrides: object) -> ProviderRegistry:
     defaults: dict[str, object] = {
         "egress": MockEgressProvider(),
@@ -314,6 +327,7 @@ def test_provision_prepare_never_needs_the_lock_even_while_another_session_holds
             egress=registry.egress,
             accounting=registry.accounting,
             gateway=registry.gateway,
+            credential_resolver=_FakeCredentialResolver(),
             forwarder=registry.forwarder,
             notify=registry.notify,
             state=state,
@@ -1550,7 +1564,9 @@ def test_production_xray_render_uses_routing_principal_as_the_user_routes_key(
             outbound_tags=(binding.outbound_tag, "BLOCK"),
         )
 
-    candidate = XrayFileProvider(runtime=None).render(desired)  # type: ignore[arg-type]
+    candidate = XrayFileProvider(runtime=None).render(  # type: ignore[arg-type]
+        desired, _FakeCredentialResolver()
+    )
     rules = candidate.content["routing"]["rules"]  # type: ignore[index]
     user_rule = next(rule for rule in rules if rule.get("user"))  # type: ignore[union-attr]
 
