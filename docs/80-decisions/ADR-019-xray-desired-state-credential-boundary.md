@@ -1,5 +1,6 @@
 # ADR-019：Xray desired state 与 credential boundary
 
+- Status: Accepted candidate（待独立审查与人工合并）
 - 状态：Accepted candidate（待独立审查与人工合并）
 - 日期：2026-09-14
 - 范围：TASK-T16 Phase 2B-remain-1A（架构与契约，仅文档）
