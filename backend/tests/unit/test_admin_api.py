@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import importlib
 import socket
-from types import SimpleNamespace
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from decimal import Decimal
 from typing import Any, cast
 
