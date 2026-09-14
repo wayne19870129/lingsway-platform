@@ -240,6 +240,32 @@ the full evidence trail. Still open: `arrickcherney-ops` collaborator
 branch-to-existing-PR-head validation, which this run did not exercise.
 This checkpoint therefore remains partial and Issue #92 stays open.
 
+**Round 2 correction — approval-free behavior confirmed only for initial
+PR creation, not for follow-up automation commits (2026-09-14, PR #94):**
+the round-1 fix commit above (`c98648b76de9aa3ed2b17c53e4641568cfbe7d70`)
+was pushed to the already-open PR #94 through this session's standard
+Claude Code Action identity (not the `create-pr` job's `CLAUDE_PR_TOKEN`
+path). Per independent review, that commit's three `pull_request`-
+triggered checks initially entered `action_required` ("3 workflows
+awaiting approval") before `wayne19870129` approved them; this session's
+own CI-status tooling, queried after approval, independently confirmed
+Risk classification and Security both `success` and CI `in_progress` on
+that same SHA, consistent with the reported approval sequence (the
+pre-approval `action_required` transition itself had already resolved by
+the time this session checked, the same tooling limitation already noted
+for the collaborator-permission check above). This is additional
+confirmation of the already-open Issue #76 "failure class B" finding
+(§5 above): only the narrow `CLAUDE_PR_TOKEN`-backed PR-creation call has
+been shown to avoid the approval gate — a subsequent commit pushed
+through the standard Claude identity to an already-open PR still triggers
+it. **Approval-free behavior for this automation is therefore validated
+for initial PR creation only, not end-to-end for every push; do not
+describe it as fully resolved.** See TASK-T25's "Post-#91 live-acceptance
+round 2" section for the full evidence trail. Still open:
+`arrickcherney-ops` collaborator `write` access, TASK-T24's later
+same-Issue branch-to-existing-PR-head validation, and Issue #76 failure
+class B itself. Issue #92 stays open and no closing keyword is used.
+
 **This Issue (#74) is itself the first real post-merge live validation of
 the TASK-T21 configuration** (rolling `sonnet` + `medium` effort). Do not
 change that configuration as part of unrelated work; if this run's own

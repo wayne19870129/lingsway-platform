@@ -225,3 +225,54 @@ commits onto an already-open PR's own head/CI). This round pushed the
 first commit to a brand-new branch/PR pair, not a second branch onto an
 already-existing PR, so that specific path remains unexercised and is
 explicitly left pending here.
+
+## Post-#91 live-acceptance round 2: follow-up automation commit hit the approval gate (this round)
+
+The round-1 fix commit above (`c98648b76de9aa3ed2b17c53e4641568cfbe7d70`)
+was pushed to the already-open PR #94 by this session's own standard
+`git-push.sh` step — the same-repository Claude Code Action identity, not
+the separate `create-pr` job's `CLAUDE_PR_TOKEN` path that created the PR
+in the first place. Per independent review of that commit, its three
+`pull_request`-triggered checks (CI run `34811194942`, Risk classification
+run `34811194960`, Security run `34811195021`) initially entered
+`action_required`, and the maintainer UI showed "3 workflows awaiting
+approval," before `wayne19870129` approved them. This session's own
+CI-status tooling, queried after that approval, independently confirms
+the resulting state: Risk classification and Security both show
+`conclusion: success`, and CI is `in_progress` (running as a second
+attempt on the same run IDs) — consistent with, though not a substitute
+for re-observing, the pre-approval `action_required` transition itself,
+which had already resolved by the time this session queried it (this
+session has no `gh`/GitHub API network access to pull historical run-
+attempt/status-transition data directly, the same category of limitation
+already noted above for the `arrickcherney-ops` collaborator-permission
+check).
+
+This is a **material distinction from the round-1 record above, not a
+contradiction of it**: round 1 correctly recorded that the `create-pr`
+job's own PR-creation event and that event's resulting checks ran without
+an approval gate on the initial SHA (`d45e21b`). This round's evidence
+shows that a *subsequent* commit pushed to the same PR through the
+standard Claude Code Action identity (rather than through the
+`CLAUDE_PR_TOKEN`-backed `create-pr` job) re-triggers the approval gate
+on its `pull_request`-triggered runs. This matches — and is now confirmed
+against this automation path specifically — the already-documented
+Issue #76 "failure class B" finding in `docs/83-project-continuity.md`
+§5: `pull_request`-triggered runs enter `action_required` whenever a
+workflow using the repository's own token creates/updates a PR; only the
+narrow `CLAUDE_PR_TOKEN`-backed PR-creation call has been shown to avoid
+it.
+
+**Conclusion: approval-free automation is therefore validated only for
+the initial PR-creation event, not for follow-up commits pushed to an
+already-open PR through the standard Claude identity.** Do not describe
+this workflow's approval behavior as fully resolved end-to-end; Issue #76
+already tracks failure class B as open on exactly this basis, and this
+round's evidence is additional confirmation of that open state, not a
+new or separate problem to file.
+
+What remains unchanged from the checkpoints above: `arrickcherney-ops`
+still holds `write` collaborator access (unverifiable from this session,
+recorded as reviewer/owner-observed state); TASK-T24's later same-Issue
+branch → existing-PR-head validation remains pending; Issue #92 stays
+open and this PR carries no closing keyword.
