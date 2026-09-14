@@ -276,3 +276,64 @@ still holds `write` collaborator access (unverifiable from this session,
 recorded as reviewer/owner-observed state); TASK-T24's later same-Issue
 branch → existing-PR-head validation remains pending; Issue #92 stays
 open and this PR carries no closing keyword.
+
+**Correction (round 3): the "Issue #76" framing above is superseded —
+see the round 3 section below.** Round 2's conclusion described the
+approval-gate observation as "additional confirmation of the
+already-open Issue #76 'failure class B' finding" and said "Issue #76
+already tracks failure class B as open." Per round-3 independent
+review, Issue #76 is actually **closed** (`state_reason=completed`),
+and Issue #79 (an earlier, separate proposal about the manual-approval
+requirement) is also **closed** (`not_planned`). Neither is an open
+tracker for this behavior. Do not read the round-2 text above as
+correctly describing Issue #76's current tracking status.
+
+## Post-#91 live-acceptance round 3: collaborator cleanup and issue-tracker correction (this round)
+
+Two findings from round-3 independent review, both accepted as
+**VALID**, with the same caveat stated for each: this session still has
+no working `gh`/GitHub API network access and a `WebFetch` attempt on
+the relevant public issue pages was not granted permission in this
+session, so neither fact below is independently re-confirmed by this
+session itself — both are recorded as externally/reviewer-reported
+current state, the same epistemic status already used throughout this
+document for the `arrickcherney-ops` collaborator-permission fact.
+
+1. **Collaborator access change — VALID.** Per round-3 independent
+   review, the repository owner (`wayne19870129`) has removed
+   `arrickcherney-ops`'s elevated repository access; an independent
+   permission query now reports **`read`**, not the `write` recorded in
+   every earlier section of this file. This is a collaborator
+   *permission* change, not a destructive account deletion and not a
+   Git history rewrite — nothing about PR #91's historical authorship
+   changes. This resolves the collaborator-access item that Findings and
+   every prior checkpoint above listed as the reason Issue #92 stays
+   partial.
+2. **Issue #76 / Issue #79 tracker correction — VALID.** Issue #76 is
+   closed (`completed`) and Issue #79 is closed (`not_planned`); neither
+   should be cited as an open tracker for the `pull_request`-triggered
+   approval-gate behavior ("failure class B") discussed in round 2 above
+   and in `docs/83-project-continuity.md` §5. That behavior itself is
+   not asserted resolved or unresolved by this correction — this round's
+   own CI-status check on the pre-this-round head SHA
+   (`2bd2749d2b2f7f5b4c0b947151b5aac59ba79358`) independently confirmed
+   via this session's own CI-status tooling that CI, Security, and Risk
+   classification were all `action_required` at review time, consistent
+   with the approval-gate pattern round 2 already described. Going
+   forward, track that observation under Issue #92 / this TASK file
+   directly rather than citing #76 or #79, since neither is open.
+
+With finding 1 resolved, the only remaining open item from the original
+Findings section is the approval-gate/CI behavior itself: whether a
+push made after this collaborator-permission change still requires
+maintainer workflow approval on its `pull_request`-triggered checks.
+This round's own commit is the fresh post-removal observation point;
+per the reviewing instruction for this round, its resulting workflow
+state is left for the next review round to observe and report, not
+pre-claimed here. TASK-T24's later same-Issue branch →
+existing-automation-owned-PR-head validation also remains pending and
+unexercised.
+
+**Issue #92 stays open**: the approval-gate acceptance criterion is
+unresolved and TASK-T24's pending validation item is unresolved. This
+commit/PR carries no `Closes`/`Fixes`/`Resolves #92` line.

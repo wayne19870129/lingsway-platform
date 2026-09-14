@@ -266,6 +266,38 @@ round 2" section for the full evidence trail. Still open:
 same-Issue branch-to-existing-PR-head validation, and Issue #76 failure
 class B itself. Issue #92 stays open and no closing keyword is used.
 
+**Round 3 correction — collaborator access resolved; Issue #76/#79 are
+not open trackers (2026-09-14, PR #94):** the round-2 text just above
+cited "the already-open Issue #76 'failure class B' finding" and said
+"Issue #76 already tracks failure class B as open" — per round-3
+independent review, that is wrong: Issue #76 is closed
+(`state_reason=completed`) and Issue #79 (an earlier, separate proposal
+about the manual-approval requirement) is also closed (`not_planned`).
+Neither is an open tracker; do not cite either going forward for this
+behavior — track it under Issue #92 / TASK-T25 directly instead.
+Separately, round-3 review also reports that `wayne19870129` has removed
+`arrickcherney-ops`'s elevated collaborator access: an independent
+permission query now reports **`read`**, not the `write` recorded in
+every section above. This is a permission-level change only — not a
+destructive account deletion and not a history rewrite. This session has
+no working `gh`/GitHub API network access, and a `WebFetch` attempt on
+the relevant public issue pages was not granted permission in this
+session, so neither fact is independently re-confirmed here; both are
+recorded as externally/reviewer-reported current state, the same
+epistemic status already used for the `write`-access fact itself before
+this correction. This session's own CI-status tooling did independently
+confirm that, on the pre-this-round head SHA
+(`2bd2749d2b2f7f5b4c0b947151b5aac59ba79358`), CI/Security/Risk
+classification were all `action_required` at review time — consistent
+with, though not proof of, the round-2 approval-gate pattern. See
+TASK-T25's "Post-#91 live-acceptance round 3" section for the full
+evidence trail. Still open: the approval-gate/CI behavior question
+itself (whether a push made after this collaborator-permission change
+still needs maintainer approval — this round's own commit is the fresh
+observation point, left for the next review round to report) and
+TASK-T24's later same-Issue branch-to-existing-PR-head validation. Issue
+#92 stays open and no closing keyword is used.
+
 **This Issue (#74) is itself the first real post-merge live validation of
 the TASK-T21 configuration** (rolling `sonnet` + `medium` effort). Do not
 change that configuration as part of unrelated work; if this run's own
