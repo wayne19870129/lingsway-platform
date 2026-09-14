@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
+from dataclasses import asdict
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from sqlalchemy import Table, create_engine, select
@@ -40,23 +41,56 @@ def engine(tmp_path: Path) -> Iterator[Engine]:
     engine.dispose()
 
 
-def test_secret_bearing_dtos_and_candidate_hide_values_from_repr() -> None:
+def test_secret_bearing_values_have_safe_repr_and_keep_value_access() -> None:
     username = "sentinel-username"
     password = "sentinel-password"
     ref = "sentinel-secret-ref"
     content = {"password": password, "credential_secret_ref": ref}
 
-    values = (
-        repr(CredentialDTO(username, password)),
-        repr(XrayOutboundDTO("egress", "proxy.example.invalid", 1080, "socks5", ref)),
-        repr(CandidateConfig(content, "v1")),
-    )
+    credential = CredentialDTO(username, password)
+    outbound = XrayOutboundDTO("egress", "proxy.example.invalid", 1080, "socks5", ref)
+    candidate = CandidateConfig(content, "v1")
+    values = (repr(credential), repr(outbound), repr(candidate))
 
     assert all(username not in value for value in values)
     assert all(password not in value for value in values)
     assert all(ref not in value for value in values)
-    assert CredentialDTO(username, password).username == username
-    assert CandidateConfig(content, "v1") == CandidateConfig(content, "v1")
+    assert repr(credential) == "CredentialDTO(username=<redacted>, password=<redacted>)"
+    assert "version='v1'" in repr(candidate)
+    assert "content=<redacted>" in repr(candidate)
+    assert credential.username == username
+    assert credential.password == password
+    assert outbound.credential_secret_ref == ref
+    assert candidate.content == content
+    assert candidate.version == "v1"
+    assert candidate == CandidateConfig(content, "v1")
+
+
+def test_sensitive_values_reject_generic_dataclass_serialization() -> None:
+    username = "sentinel_username"
+    password = "sentinel_password"
+    ref = "sentinel_secret_ref"
+    candidate = CandidateConfig(
+        {
+            "username": username,
+            "password": password,
+            "credential_secret_ref": ref,
+        },
+        "v1",
+    )
+    values = (
+        CredentialDTO(username, password),
+        candidate,
+        XrayOutboundDTO("egress", "proxy.example.invalid", 1080, "socks5", ref),
+    )
+
+    for value in values:
+        with pytest.raises(TypeError) as raised:
+            asdict(cast(Any, value))
+        assert "dataclass" in str(raised.value)
+        assert username not in str(raised.value)
+        assert password not in str(raised.value)
+        assert ref not in str(raised.value)
 
 
 def test_current_read_statement_refreshes_identity_map_and_locks_on_mysql() -> None:

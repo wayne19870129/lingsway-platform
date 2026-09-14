@@ -71,19 +71,116 @@ class TransportCapacityDTO:
     expire_at: datetime | None = None
 
 
-@dataclass(frozen=True, slots=True)
 class CredentialDTO:
-    username: str = field(repr=False)
-    password: str = field(repr=False)
+    """Immutable credential value with an intentionally redacted repr."""
+
+    __slots__ = ("_username", "_password")
+    _username: str
+    _password: str
+
+    def __init__(self, username: str, password: str) -> None:
+        object.__setattr__(self, "_username", username)
+        object.__setattr__(self, "_password", password)
+
+    @property
+    def username(self) -> str:
+        return self._username
+
+    @property
+    def password(self) -> str:
+        return self._password
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError(f"{type(self).__name__} is immutable")
+
+    def __repr__(self) -> str:
+        return "CredentialDTO(username=<redacted>, password=<redacted>)"
+
+    def __eq__(self, other: object) -> bool:
+        return (
+            isinstance(other, CredentialDTO)
+            and self.username == other.username
+            and self.password == other.password
+        )
+
+    def __hash__(self) -> int:
+        return hash((self.username, self.password))
 
 
-@dataclass(frozen=True, slots=True)
 class XrayOutboundDTO:
-    tag: str
-    host: str
-    port: int
-    protocol: str
-    credential_secret_ref: str = field(repr=False)
+    """Immutable ref-only outbound value with a redacted secret reference."""
+
+    __slots__ = ("_tag", "_host", "_port", "_protocol", "_credential_secret_ref")
+    _tag: str
+    _host: str
+    _port: int
+    _protocol: str
+    _credential_secret_ref: str
+
+    def __init__(
+        self,
+        tag: str,
+        host: str,
+        port: int,
+        protocol: str,
+        credential_secret_ref: str,
+    ) -> None:
+        object.__setattr__(self, "_tag", tag)
+        object.__setattr__(self, "_host", host)
+        object.__setattr__(self, "_port", port)
+        object.__setattr__(self, "_protocol", protocol)
+        object.__setattr__(self, "_credential_secret_ref", credential_secret_ref)
+
+    @property
+    def tag(self) -> str:
+        return self._tag
+
+    @property
+    def host(self) -> str:
+        return self._host
+
+    @property
+    def port(self) -> int:
+        return self._port
+
+    @property
+    def protocol(self) -> str:
+        return self._protocol
+
+    @property
+    def credential_secret_ref(self) -> str:
+        return self._credential_secret_ref
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError(f"{type(self).__name__} is immutable")
+
+    def __repr__(self) -> str:
+        return (
+            "XrayOutboundDTO("
+            f"tag={self.tag!r}, host={self.host!r}, port={self.port!r}, "
+            f"protocol={self.protocol!r}, credential_secret_ref=<redacted>)"
+        )
+
+    def __eq__(self, other: object) -> bool:
+        return (
+            isinstance(other, XrayOutboundDTO)
+            and self.tag == other.tag
+            and self.host == other.host
+            and self.port == other.port
+            and self.protocol == other.protocol
+            and self.credential_secret_ref == other.credential_secret_ref
+        )
+
+    def __hash__(self) -> int:
+        return hash(
+            (
+                self.tag,
+                self.host,
+                self.port,
+                self.protocol,
+                self.credential_secret_ref,
+            )
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,10 +227,37 @@ class DesiredForwarderState:
     listeners: Mapping[str, str] = field(default_factory=dict)
 
 
-@dataclass(frozen=True, slots=True)
 class CandidateConfig:
-    content: Mapping[str, object] = field(repr=False)
-    version: str
+    """Immutable candidate whose generic dataclass serialization is unavailable."""
+
+    __slots__ = ("_content", "_version")
+    _content: Mapping[str, object]
+    _version: str
+
+    def __init__(self, content: Mapping[str, object], version: str) -> None:
+        object.__setattr__(self, "_content", content)
+        object.__setattr__(self, "_version", version)
+
+    @property
+    def content(self) -> Mapping[str, object]:
+        return self._content
+
+    @property
+    def version(self) -> str:
+        return self._version
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError(f"{type(self).__name__} is immutable")
+
+    def __repr__(self) -> str:
+        return f"CandidateConfig(version={self.version!r}, content=<redacted>)"
+
+    def __eq__(self, other: object) -> bool:
+        return (
+            isinstance(other, CandidateConfig)
+            and self.content == other.content
+            and self.version == other.version
+        )
 
 
 @dataclass(frozen=True, slots=True)
