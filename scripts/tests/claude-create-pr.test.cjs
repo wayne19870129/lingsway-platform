@@ -3,8 +3,8 @@ const assert = require('node:assert/strict');
 const createPR = require('../claude-create-pr.cjs');
 
 function fixture({ head = [], open = [], ahead = 1, files = [{ filename: 'a.txt' }],
-  commits = [{ commit: { message: 'Do the thing' } }], mergeError = null, updateError = null } = {}) {
-  const creates = []; const merges = []; const updates = [];
+  commits = [{ commit: { message: 'Do the thing' } }], updateError = null } = {}) {
+  const creates = []; const updates = [];
   const github = {
     rest: {
       pulls: {
@@ -17,12 +17,11 @@ function fixture({ head = [], open = [], ahead = 1, files = [{ filename: 'a.txt'
           assert.equal(args.basehead, 'main...claude/issue-89-test');
           return { data: { ahead_by: ahead, files, commits } };
         },
-        merge: async (args) => { if (mergeError) throw mergeError; merges.push(args); },
       },
     },
     paginate: async (_, args) => args.state === 'all' ? head : open,
   };
-  return { creates, merges, updates, github, branch: 'claude/issue-89-test',
+  return { creates, updates, github, branch: 'claude/issue-89-test',
     context: { repo: { owner: 'wayne19870129', repo: 'lingsway-platform' },
       payload: { issue: { number: 89, title: 'Test `literal` $(text)',
         html_url: 'https://github.com/wayne19870129/lingsway-platform/issues/89' } },
@@ -44,7 +43,7 @@ for (const [name, options] of [
   ['existing head including closed PR', { head: [{ number: 90 }] }],
 ]) test(name, async () => {
   const f = fixture(options); await createPR(f);
-  assert.equal(f.creates.length, 0); assert.equal(f.merges.length, 0); assert.equal(f.updates.length, 0);
+  assert.equal(f.creates.length, 0); assert.equal(f.updates.length, 0);
 });
 test('different Issue number does not block', async () => {
   const f = fixture({ open: [{ head: { ref: 'manual' }, body: 'Related #890. https://github.com/wayne19870129/lingsway-platform/issues/890' }] });
@@ -75,41 +74,27 @@ test('comparison authorization failure is not treated as empty branch', async ()
   };
   await assert.rejects(createPR(f), /Forbidden/); assert.equal(f.creates.length, 0);
 });
-test('serialized second Issue branch observes the first PR and does not merge/update', async () => {
+test('serialized rerun of the same branch observes the first PR and does not update', async () => {
   const f = fixture(); await createPR(f);
   const next = fixture({ open: [{ number: 91, head: { ref: f.branch,
     repo: { full_name: 'wayne19870129/lingsway-platform' } } }] });
   await createPR(next);
-  assert.equal(next.creates.length, 0); assert.equal(next.merges.length, 0); assert.equal(next.updates.length, 0);
+  assert.equal(next.creates.length, 0); assert.equal(next.updates.length, 0);
 });
-test('same-Issue follow-up work is merged into the existing own-repo PR branch, not orphaned', async () => {
+test('same-Issue follow-up branch is recorded without automatic branch writes', async () => {
   const f = fixture({ open: [{ number: 90, head: { ref: 'claude/issue-89-other',
     repo: { full_name: 'wayne19870129/lingsway-platform' } } }] });
-  await createPR(f);
-  assert.equal(f.creates.length, 0);
-  assert.equal(f.merges.length, 1);
-  assert.equal(f.merges[0].base, 'claude/issue-89-other');
-  assert.equal(f.merges[0].head, f.branch);
-  assert.equal(f.updates.length, 0);
-});
-test('a merge conflict falls back to recording a pending-branch note, not silent loss', async () => {
-  const f = fixture({
-    open: [{ number: 90, head: { ref: 'claude/issue-89-other',
-      repo: { full_name: 'wayne19870129/lingsway-platform' } } }],
-    mergeError: Object.assign(new Error('Merge conflict'), { status: 409 }),
-  });
   await createPR(f);
   assert.equal(f.creates.length, 0);
   assert.equal(f.updates.length, 1);
   assert.equal(f.updates[0].pull_number, 90);
   assert.match(f.updates[0].body, /claude-pending-branch:claude\/issue-89-test/);
-  assert.match(f.updates[0].body, /not lost/);
+  assert.match(f.updates[0].body, /did not create a second PR or modify this PR branch/);
 });
-test('a manual same-Issue PR on another repo/fork records a note instead of merging', async () => {
+test('a manual same-Issue PR records a note instead of creating another PR', async () => {
   const f = fixture({ open: [{ number: 90, head: { ref: 'manual' }, body: 'Related #89.' }] });
   await createPR(f);
   assert.equal(f.creates.length, 0);
-  assert.equal(f.merges.length, 0);
   assert.equal(f.updates.length, 1);
   assert.match(f.updates[0].body, /claude-pending-branch:claude\/issue-89-test/);
 });

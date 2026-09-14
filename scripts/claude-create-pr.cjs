@@ -7,10 +7,9 @@ module.exports = async function createClaudePR({ github, context, core, branch }
   if (!branch.startsWith(prefix) || !/^[A-Za-z0-9/_-]+$/.test(branch)) {
     throw new Error('Unexpected Claude branch for this Issue');
   }
-  const fullRepo = `${owner}/${repo}`.toLowerCase();
-  const isOwnHead = (pr) => pr.head.repo?.full_name?.toLowerCase() === fullRepo;
   const sameIssue = (pr) => {
-    return (isOwnHead(pr) && pr.head.ref.startsWith(prefix)) ||
+    const ownBranch = pr.head.repo?.full_name?.toLowerCase() === `${owner}/${repo}`.toLowerCase();
+    return (ownBranch && pr.head.ref.startsWith(prefix)) ||
       new RegExp(`(?:^|[^A-Za-z0-9_/])#${issue.number}(?![0-9])`).test(pr.body || '') ||
       (pr.body || '').split(issue.html_url).slice(1).some((tail) => !/^[0-9]/.test(tail));
   };
@@ -51,22 +50,9 @@ module.exports = async function createClaudePR({ github, context, core, branch }
     if (existing.head.ref === branch) {
       return core.info(`PR #${existing.number} already tracks ${branch}`);
     }
-    // Same-Issue follow-up work must reach the existing PR, not a second one.
-    // Consolidate by merging the new branch into the existing PR's own-repo
-    // head; a fork head or a merge conflict falls back to recording a
-    // pointer so the later implementation is never silently lost.
-    if (isOwnHead(existing)) {
-      try {
-        await github.rest.repos.merge({
-          owner, repo, base: existing.head.ref, head: branch,
-          commit_message: `Merge ${branch} into ${existing.head.ref} for Issue #${issue.number}`,
-        });
-        return core.info(`Merged ${branch} into existing PR #${existing.number}`);
-      } catch (error) {
-        if (error.status !== 409 && error.status !== 404) throw error;
-        core.warning(`Could not auto-merge ${branch} into PR #${existing.number} (${error.status})`);
-      }
-    }
+    // Keep one PR per Issue without granting this token branch-write access.
+    // A durable, idempotent pointer makes the later branch visible for a
+    // maintainer to reconcile; this helper never merges or deletes branches.
     const marker = `<!-- claude-pending-branch:${branch} -->`;
     if ((existing.body || '').includes(marker)) {
       return core.info(`PR #${existing.number} already references pending branch ${branch}`);
@@ -74,9 +60,10 @@ module.exports = async function createClaudePR({ github, context, core, branch }
     await github.rest.pulls.update({
       owner, repo, pull_number: existing.number,
       body: [existing.body || '', marker,
-        `Additional Issue #${issue.number} work was pushed to \`${branch}\` and could not be merged ` +
-        'into this PR automatically (cross-repository head or a merge conflict). ' +
-        'It is not lost: a maintainer must merge or rebase it into this PR manually.',
+        `Additional Issue #${issue.number} work was pushed to \`${branch}\`. ` +
+        'To preserve one Issue / one PR and least-privilege Contents read access, ' +
+        'automation did not create a second PR or modify this PR branch. ' +
+        'A maintainer must reconcile the referenced branch manually.',
         summary].join('\n\n'),
     });
     return core.info(`Recorded pending branch ${branch} on existing PR #${existing.number}`);

@@ -25,15 +25,14 @@ https://github.com/anthropics/claude-code-action/blob/0a8d3c9443bbff909ab973b6a1
 
 - Owner/mention gate and OAuth/OIDC identity remain intact.
 - Successful Issue runs with a pushed, nonempty diff create one PR to main.
-- No branch, no changes, or existing head PR: no creation. An existing
-  same-Issue PR gets the new branch merged into its own-repo head (or a
-  recorded pointer on fork/conflict) instead of a second PR.
+- No branch, no changes, or existing head PR: no creation. If a different
+  branch appears for an Issue that already has an open PR, add one durable,
+  idempotent pointer to that branch on the existing PR; never create a second
+  PR or write/merge branches automatically.
 - Serialize only PR creation per Issue; never cancel a running job.
 - PAT is supplied only to trusted code on a separate runner.
 - Normal verification tools are scoped; max turns is 30; no model change.
-- No PR-merge/approval/deploy/delete/dispatch API or general Bash grant.
-  ("Merge" here is `repos.merge` — combining two branches with a merge
-  commit — never `pulls.merge`, which would merge a PR into `main`.)
+- No branch-write/merge/approval/deploy/delete/dispatch API or general Bash grant.
 - Mock API regression tests and normal PR CI pass; live acceptance awaits
   reviewed merge and maintainer configuration of CLAUDE_PR_TOKEN.
 
@@ -60,23 +59,13 @@ create. Rerun failed jobs after fixing configuration to retry safely.
 
 Because the pinned Action names Issue branches with a timestamp
 (`claude/issue-<n>-<timestamp>`), a second successful `@claude` run on
-the same Issue produces a *different* branch than the one already
-backing an open PR. Since GitHub's PR API cannot repoint an existing
-PR's head branch, and simply returning on "Issue already has a PR" would
-silently drop that second branch's commits, the helper instead merges
-the new branch into the existing PR's own-repository head branch via
-`repos.merge` (`main...head` was already compared; this is a second,
-fixed, non-interpolated API call with `base`/`head` taken only from
-validated branch names). A successful merge updates the existing PR's
-diff in place — no second PR, no lost work. If the existing PR's head is
-on a fork (cross-repository, no push access) or the merge API reports a
-conflict (`409`), the helper cannot safely consolidate the branches
-automatically; it instead edits the existing PR's body (idempotently,
-guarded by an HTML-comment marker per branch) to record the pending
-branch name and state that a maintainer must merge or rebase it
-manually. The branch and its commits are never deleted or lost either
-way; the PR body change and warnings are the durable evidence a
-maintainer relies on to complete a genuine conflict/fork case.
+the same Issue can produce a *different* branch than the one already
+backing an open PR. GitHub's PR API cannot repoint an existing PR's head
+branch. The least-privilege helper therefore does not attempt to merge
+or write either branch. It edits the existing PR body once, guarded by
+an HTML-comment marker for that branch, and records the pending branch
+plus a maintainer reconciliation instruction. This keeps one Issue / one
+PR, prevents silent orphaning, and preserves Contents read-only access.
 
 The generated PR body deliberately never contains a closing keyword
 (`Closes`/`Fixes`/`Resolves #N`) and states the Issue is not
@@ -102,13 +91,11 @@ Repository permissions:
 | Permission | Level | Actual use |
 | --- | --- | --- |
 | Metadata | Read (automatic) | Repository metadata |
-| Contents | Read and write | Compare main and the pushed branch; merge a later same-Issue branch into an existing open PR's own-repo head so follow-up work is not orphaned |
-| Pull requests | Read and write | List existing PRs, create one, and update an existing PR's body when a follow-up branch cannot be auto-merged |
+| Contents | Read | Compare main and the pushed branch |
+| Pull requests | Read and write | List existing PRs, create one, and append a pending-branch pointer to an existing PR |
 
-Contents write is scoped to this one repository and used only for the
-single, fixed `repos.merge` call described below; no other write path
-(arbitrary push, force-push, ref deletion) is exposed. No Issues,
-Actions, Workflows, or Administration grant is needed. Add the token in
+No Contents-write, Issues, Actions, Workflows, or Administration grant
+is needed. Add the token in
 repository Settings > Secrets and variables
 > Actions > New repository secret, named CLAUDE_PR_TOKEN. Do not paste
 its value in chat, an Issue, or a PR. Leave CLAUDE_CODE_OAUTH_TOKEN and
@@ -121,14 +108,39 @@ Permission minima are verified against GitHub's REST documentation for
 They have not yet been exercised with the new PAT, which is not configured.
 [GitHub's workflow-trigger rules](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow)
 explain why the built-in GITHUB_TOKEN must not create the PR. Normal PR
-workflows remain unchanged; no dispatch or approval workaround is added.
+workflows remain unchanged; no dispatch workaround is added.
+
+### One-time workflow approval setting
+
+The rework commit on PR #91 reproduced `action_required` for CI,
+Security, and Risk even though the jobs did not fail: the
+`pull_request/synchronize` event actor was `github-actions[bot]`.
+GitHub evaluates both the PR author and the actor that triggered the PR
+event against the repository's public-fork contributor approval policy.
+Under the current policy the automation actor is approval-gated.
+
+There is no workflow-YAML change that can remove that repository policy
+while also preserving the required standard Claude OAuth/OIDC/App
+authentication path. After review, the owner must go to repository
+**Settings > Actions > General > Approval for running fork pull request
+workflows from contributors** and select **Require approval for first-time
+contributors who are new to GitHub** (instead of all external
+contributors). This leaves an approval boundary for newly created,
+first-time external accounts while excluding GitHub's established
+automation actor. Do not enable secrets or write tokens for fork
+workflows. Then validate on a new Claude-pushed SHA. The setting cannot
+be read or changed with the
+current CLI token (GitHub returned 403), so this PR does not claim it is
+already applied.
+
+Reference: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository
 
 ## Tool permissions and limits
 
 Preinstall Python 3.12 dev dependencies and frontend dependencies using
 Node 22 from the trusted default-branch checkout. Allow pytest, ruff check,
 mypy (direct and python/python3 -m forms), exact make test-unit/make lint,
-and exact frontend npm lint/typecheck/build commands. No general python,
+exact `node --test`, and exact frontend npm lint/typecheck/build commands. No general python,
 python -c, pip, npm, make, npx, gh, curl, ssh, or Bash grant. The current
 model default is unchanged; max-turns 30 bounds the previous 84-turn run.
 Actions read is granted both in workflow permissions and the Action's
@@ -137,22 +149,17 @@ additional_permissions input, as its official FAQ requires.
 These are command permissions, not a sandbox for arbitrary modified test
 code: pytest, make and npm execute repository code. Human-only merge and
 no deployment remain repository policy; the PAT never reaches that code.
-The PR helper has no `pulls.merge`/review/deploy/delete/dispatch call —
-it never merges a pull request into `main` or approves one. Its Contents
-permission is Read and write, scoped to this one repository, used only
-for the single fixed `repos.merge` (branch-to-branch merge) call so a
-later same-Issue implementation reaches an already-open PR instead of
-being orphaned on an unreferenced branch; PR-write inherently permits
-reviews, but the helper never calls that API either.
+The PR helper has no branch-write/merge/review/deploy/delete/dispatch
+call. Its Contents permission is read-only. PR-write inherently permits
+reviews, but the helper calls only list/create/update PR APIs.
 Do not claim command allowlisting alone makes malicious code harmless.
 
 ## Validation and remaining live acceptance
 
 Local Node tests cover create/no-op/duplicate/error decisions, literal
-Markdown handling, rerunning after a prior creation, merging a later
-same-Issue branch into an existing own-repo PR, and the pending-branch
-fallback note (fork head or merge conflict), including its idempotent
-rerun. CI runs the same tests in its existing lint job. Syntax and PR CI
+Markdown handling, rerunning after a prior creation, and the durable
+pending-branch pointer, including its idempotent rerun. CI runs the same
+tests in its existing lint job. Syntax and PR CI
 results are recorded in the PR description.
 
 After configuring the secret and human merge, the owner should request a
@@ -161,8 +168,8 @@ normal pull_request CI/Security/Risk runs automatically with no approval
 button, and the requested test/lint commands execute without denials.
 Repeat a question-only request (no PR), rerun the successful creation job
 (no duplicate), and request another change on the same Issue — confirm
-the second branch's commits land in the existing PR (merged, or a
-pending-branch note if a real conflict occurs) rather than a second PR.
+the existing PR records the second branch once rather than creating a
+second PR or writing either branch automatically.
 Check unauthorized comments skip and PR rework skips creation.
 Do not probe dangerous operations against the live repository. Until
 these tests run, do not report the end-to-end workflow as validated.

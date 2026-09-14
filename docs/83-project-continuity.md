@@ -119,12 +119,10 @@ TASK-T24 completes the minimal design after PR #88's live test:
   Code GitHub App authentication path.
 - Claude uses `CLAUDE_CODE_OAUTH_TOKEN` and standard OIDC authentication.
 - A separate trusted runner uses `CLAUDE_PR_TOKEN` only to compare/list/
-  create a PR after successful Issue implementation, or — when a later
-  same-Issue run lands on a new timestamped branch while an open PR for
-  that Issue already exists — to merge the new branch into that PR's own
-  -repo head (`repos.merge`, distinct from merging a PR into `main`) so
-  the follow-up implementation isn't orphaned, falling back to a noted
-  pointer on a fork head or a real conflict. Same-Issue creation jobs
+  create or update a PR after successful Issue implementation. When a
+  later same-Issue run lands on a new timestamped branch while an open PR
+  already exists, it records one idempotent pending-branch pointer on the
+  existing PR; it never writes or merges branches. Same-Issue creation jobs
   serialize without cancelling the running job; existing PRs with no new
   branch, or no diff, mean no new PR. No workflow dispatch is involved.
 - Scoped verification tools, preinstalled dependencies, Actions read
