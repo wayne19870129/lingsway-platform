@@ -76,26 +76,15 @@ line-anchored `Closes #<issue-number>` line for the exact triggering
 Issue — never a substring inside prose — and otherwise states plainly
 that the Issue stays open.
 
-**Known gap: the Claude-side half of this signal is not yet wired up.**
-The plan is for `claude.yml`'s `--append-system-prompt` to ask Claude to
-add that exact line to one of its commits *only if* the change fully
-resolves the triggering Issue. This PR's automated rework session could
-not add that instruction: pushing a `.github/workflows/**` change from
-this session's GitHub App token was rejected server-side
-("refusing to allow a GitHub App to create or update workflow
-`.github/workflows/claude.yml` without `workflows` permission"). Until a
-maintainer (or a session/token with `workflows` write) adds this sentence
-to the existing
-`--append-system-prompt` value, Claude never emits the marker and every
-generated PR body will state the Issue stays open — safe, but not yet the
-intended full-resolution signal:
-
-> If, and only if, your change fully resolves the triggering Issue, put a
-> line containing exactly `Closes #<issue-number>` (the real number,
-> nothing else on that line) in one of your commit messages. If the work
-> is partial, never write that word (or Fixes/Resolves) followed by an
-> issue number anywhere, in any commit message or comment; state the
-> remaining work instead.
+The Claude-side half of this signal is now wired into
+`.github/workflows/claude.yml`'s existing `--append-system-prompt`.
+Claude is instructed to place a line containing exactly
+`Closes #<issue-number>` in one of its commit messages if, and only if,
+its change fully resolves the triggering Issue. Partial work must not
+write Closes/Fixes/Resolves followed by an Issue number in a commit
+message or comment and must state the remaining work instead. This keeps
+the full-vs-partial decision with the implementation agent while the
+trusted PR helper accepts only the exact line-anchored marker.
 
 `docs/83-project-continuity.md` records a real prior
 incident (PR #77 / Issue #76) where GitHub's keyword parser closed an
@@ -172,21 +161,15 @@ Security, and Risk even though the jobs did not fail: the
 `pull_request/synchronize` event actor was `github-actions[bot]`.
 GitHub evaluates both the PR author and the actor that triggered the PR
 event against the repository's public-fork contributor approval policy.
-Under the current policy the automation actor is approval-gated.
+Under the prior policy the automation actor was approval-gated.
 
-There is no workflow-YAML change that can remove that repository policy
-while also preserving the required standard Claude OAuth/OIDC/App
-authentication path. After review, the owner must go to repository
+The owner has now applied the documented repository setting:
 **Settings > Actions > General > Approval for running fork pull request
-workflows from contributors** and select **Require approval for first-time
-contributors who are new to GitHub** (instead of all external
-contributors). This leaves an approval boundary for newly created,
-first-time external accounts while excluding GitHub's established
-automation actor. Do not enable secrets or write tokens for fork
-workflows. Then validate on a new Claude-pushed SHA. The setting cannot
-be read or changed with the
-current CLI token (GitHub returned 403), so this PR does not claim it is
-already applied.
+workflows from contributors > Require approval for first-time
+contributors who are new to GitHub**. Do not enable secrets or write
+tokens for fork workflows. A fresh owner-authored SHA after this change
+started normal PR checks without an approval gate; the actual
+Claude-bot-triggered path remains part of the post-merge live acceptance.
 
 Reference: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository
 
