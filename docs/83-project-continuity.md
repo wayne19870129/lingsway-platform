@@ -171,6 +171,13 @@ TASK-T24 completes the minimal design after PR #88's live test:
 - The earlier request to restore workflow-wide cancellation is superseded
   by the small serialized creation job in TASK-T24. No manual concurrency
   patch or old helper framework should be restored.
+- **TASK-T26 (Issue #95) adds a second trusted-writer path specifically
+  for PR-comment rework** (a comment on an already-open PR, as opposed to
+  the Issue-first path above): `claude-rework` (no push credential) plus
+  `apply-pr-rework` (the only other job besides `create-pr` holding
+  `CLAUDE_PR_TOKEN`, writing via GitHub's Git Data API only). See the
+  entry under Issue #92/#95 below and TASK-T26 itself for the full design;
+  not yet live-validated.
 
 Historical TASK-T19/T20/T21 documents explain the superseded complex
 design. TASK-T24 is the current workflow definition and setup guide.
@@ -205,6 +212,48 @@ current state (this session could not independently re-query it).
 Revoking that access remains an open GitHub Settings action for
 `wayne19870129` to take directly; Issue #92 stays open until it's done,
 and no closing keyword was used in PR #93.
+
+**Issue #95 / TASK-T26 — trusted writer for Claude PR-rework pushes
+(implemented, not yet live-validated).** Post-#91 live acceptance on PR
+#94 found a second, distinct approval-gate blocker after the legacy
+`arrickcherney-ops` write access was already removed: an owner `@claude`
+comment reworking an already-open, automation-created PR caused the
+interactive Claude step to push its follow-up commit directly to that PR
+branch using its own GitHub-App/OIDC identity, and GitHub recorded the
+resulting `pull_request/synchronize` runs' actor as `github-actions[bot]`
+— gated behind manual **Approve workflows to run**, independent of the
+legacy collaborator identity. `.github/workflows/claude.yml` now routes
+a comment on an already-open PR to two new jobs instead of the original
+`claude`/`create-pr` pair (which are now explicitly guarded to Issue-only
+comments via `!github.event.issue.pull_request`, unchanged otherwise):
+`claude-rework` (interactive, given no push credential at all — no
+`contents: write`, no `id-token: write`, and an explicit least-privilege
+`github_token: ${{ secrets.GITHUB_TOKEN }}` override so the Action's own
+push attempt is rejected by GitHub itself; it captures Claude's local
+working-tree diff into a small manifest job output after Claude's turn
+finishes) and `apply-pr-rework` (trusted, the only job holding
+`CLAUDE_PR_TOKEN`, `scripts/claude-apply-pr-rework.cjs`, writing purely
+through GitHub's Git Data API — blob/tree/commit/fast-forward-only
+`updateRef` — never a git clone or any repository-controlled
+application/test code). The trusted writer fails closed before any API
+write on: a fork head, a same-repo branch not matching the automation-
+owned `claude/issue-<n>-<token>` naming policy, a closed/merged PR, a
+head-ref mismatch, a stale starting SHA, a concurrent `updateRef` race,
+or a malformed/invalid manifest — see
+`docs/82-tasks/TASK-T26-trusted-pr-rework-writer.md` for the full design,
+security reasoning, and the post-merge live-acceptance procedure (a
+fresh automation-owned PR must show CI/Security/Risk starting
+automatically with no approval button on the trusted writer's new SHA).
+Deterministic regression tests
+(`scripts/tests/claude-rework-diff.test.cjs`,
+`scripts/tests/claude-apply-pr-rework.test.cjs`) cover the manifest
+parsing and every fail-closed path above, plus that only `create-pr` and
+`apply-pr-rework` ever wire up `CLAUDE_PR_TOKEN` as a credential.
+**PR #94 remains open, unmerged, and is intentionally left as this
+Issue's own live-acceptance evidence trail — it is not merged as part of
+this work and must not be used to manufacture a clean test.** Issue #95
+stays open until the live-acceptance procedure in TASK-T26 is actually
+run and its result recorded here.
 
 **This Issue (#74) is itself the first real post-merge live validation of
 the TASK-T21 configuration** (rolling `sonnet` + `medium` effort). Do not
@@ -456,6 +505,11 @@ decays quickly.
   The minimal workflow is implemented in PR #88 and needs post-merge
   live validation with a new Issue comment. TASK-T22 is retained only as
   a short superseded-design marker so older review links remain valid.
+- **Issue #95 / TASK-T26 is implemented but not yet live-validated.**
+  The trusted-writer PR-rework path (section 5) needs the post-merge
+  live-acceptance procedure in TASK-T26 run on a fresh automation-owned
+  PR before Issue #95 can be closed. PR #94 stays open/unmerged as
+  Issue #92's own evidence trail throughout this.
 - **This Issue (#74)**: adds this continuity document and the
   `CLAUDE.md` startup-reading-order/maintenance-rule update described
   below; also serves as the first live validation of the TASK-T21

@@ -14,10 +14,16 @@ permissions:
   actions: read
 
 jobs:
+  # Issue-first path only. PR-comment rework is handled by claude-rework /
+  # apply-pr-rework below (see docs/82-tasks/TASK-T26-trusted-pr-rework-writer.md)
+  # so that a follow-up push to an already-open PR is never made by this
+  # job's own bot-authenticated git push, which GitHub's Approve-workflows
+  # gate treats as an untrusted actor on `pull_request/synchronize`.
   claude:
     if: |
       github.event.comment.user.login == 'wayne19870129' &&
-      contains(github.event.comment.body, '@claude')
+      contains(github.event.comment.body, '@claude') &&
+      !github.event.issue.pull_request
     runs-on: ubuntu-latest
     outputs:
       branch: ${{ steps.claude.outputs.branch_name }}
@@ -80,3 +86,147 @@ jobs:
               throw new Error('Configure CLAUDE_PR_TOKEN as documented in TASK-T24; no GITHUB_TOKEN fallback.');
             }
             await require('./scripts/claude-create-pr.cjs')({github, context, core, branch: process.env.CLAUDE_BRANCH});
+
+  # PR-comment rework path (Issue #95 / TASK-T26). This job never receives
+  # CLAUDE_PR_TOKEN and is deliberately given no git-write credential at all:
+  # no `contents: write`, no `id-token: write` (so the Action's own GitHub
+  # App/OIDC auth is unavailable), and an explicit least-privilege
+  # `github_token` override so any push attempt the Action makes internally
+  # is rejected by GitHub itself rather than by trusting our own code not to
+  # call it. Claude can still read, edit, run tests, and comment; it just
+  # cannot land anything on the PR branch. Its local working-tree diff is
+  # captured below and handed to apply-pr-rework, the only job holding the
+  # trusted token, on a separate runner.
+  claude-rework:
+    if: |
+      github.event.comment.user.login == 'wayne19870129' &&
+      contains(github.event.comment.body, '@claude') &&
+      github.event.issue.pull_request
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: write
+    outputs:
+      has_changes: ${{ steps.capture.outputs.has_changes }}
+      pr_number: ${{ github.event.issue.number }}
+      branch: ${{ steps.prinfo.outputs.branch }}
+      base_sha: ${{ steps.prinfo.outputs.base_sha }}
+      # The manifest itself (small, base64) travels as a job output rather
+      # than a workflow artifact, so no third-party upload/download-artifact
+      # action needs to be trusted/pinned for this trust-sensitive path.
+      manifest_b64: ${{ steps.capture.outputs.manifest_b64 }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Record the PR head before Claude runs
+        id: prinfo
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner, repo: context.repo.repo,
+              pull_number: context.payload.issue.number,
+            });
+            core.setOutput('branch', pr.head.ref);
+            core.setOutput('base_sha', pr.head.sha);
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+      - name: Install verification dependencies from trusted default-branch checkout
+        run: |
+          python -m pip install -e '.[dev]'
+          npm ci --prefix frontend
+
+      - name: Run Claude Code
+        id: claude
+        # A push attempt inside this step is expected to fail (no
+        # contents:write, no id-token). That must not fail the job: the
+        # capture step below runs unconditionally and only cares about the
+        # working tree, not whether the Action's own push succeeded.
+        continue-on-error: true
+        uses: anthropics/claude-code-action@0a8d3c9443bbff909ab973b6a17a340b913f229f # v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Least-privilege override: this token can read and comment but
+          # cannot push (job permissions above grant no contents:write), so
+          # the Action's own internal git push is denied by GitHub itself.
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          additional_permissions: |
+            actions: read
+          claude_args: |
+            --max-turns 30
+            --allowedTools "Bash(pytest:*),Bash(python -m pytest:*),Bash(python3 -m pytest:*),Bash(ruff check:*),Bash(python -m ruff check:*),Bash(python3 -m ruff check:*),Bash(mypy:*),Bash(python -m mypy:*),Bash(python3 -m mypy:*),Bash(node --test:*),Bash(make test-unit),Bash(make lint),Bash(npm --prefix frontend run lint),Bash(npm --prefix frontend run typecheck),Bash(npm --prefix frontend run build),Bash(cd frontend),Bash(npm run lint),Bash(npm run typecheck),Bash(npm run build)"
+            --disallowedTools "Bash(gh:*),Bash(curl:*),Bash(ssh:*),Bash(git push:*),Bash(git reset:*),Bash(git branch:*),Bash(git clean:*)"
+            --append-system-prompt "This is a rework request on an already-open, automation-created pull request. Implement and verify the request the same way as a normal task, then leave your changes committed or staged locally. You have no credential to push: a separate trusted job verifies the PR is still open and unchanged, then applies your exact committed content to the PR branch itself. Do not attempt to work around a denied git push; report the plan and verification results in your final comment instead. Never merge or approve PRs, close issues, delete branches, or deploy. Human review and merge are mandatory."
+
+      - name: Capture the local rework diff for the trusted writer
+        id: capture
+        if: always()
+        run: |
+          set -euo pipefail
+          BASE_SHA="${{ steps.prinfo.outputs.base_sha }}"
+          if git diff --quiet "$BASE_SHA" --; then
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            echo "No local changes found relative to $BASE_SHA; nothing to hand off"
+          else
+            node scripts/claude-rework-diff.cjs "$BASE_SHA" "$RUNNER_TEMP/manifest.json"
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "manifest_b64=$(base64 -w0 "$RUNNER_TEMP/manifest.json")"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+  # Trusted writer (Issue #95 / TASK-T26). The only job that ever sees
+  # CLAUDE_PR_TOKEN. It never executes repository-controlled application or
+  # test code: it decodes the small manifest job output (plain data) from
+  # claude-rework and applies it through GitHub's Git Data API only
+  # (blob/tree/commit/ref), never a `git clone`/`npm ci`/`pytest`/etc.
+  # against the target branch. See scripts/claude-apply-pr-rework.cjs and
+  # TASK-T26 for the full trust boundary and fail-closed checks (open PR,
+  # same-repo head, expected branch, unchanged head SHA).
+  apply-pr-rework:
+    needs: claude-rework
+    if: >-
+      github.event.comment.user.login == 'wayne19870129' &&
+      contains(github.event.comment.body, '@claude') &&
+      github.event.issue.pull_request &&
+      needs.claude-rework.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    concurrency:
+      group: claude-rework-${{ github.repository }}-${{ github.event.issue.number }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          PR_NUMBER: ${{ needs.claude-rework.outputs.pr_number }}
+          REWORK_BRANCH: ${{ needs.claude-rework.outputs.branch }}
+          BASE_SHA: ${{ needs.claude-rework.outputs.base_sha }}
+          MANIFEST_B64: ${{ needs.claude-rework.outputs.manifest_b64 }}
+          PR_TOKEN_CONFIGURED: ${{ secrets.CLAUDE_PR_TOKEN != '' }}
+        with:
+          github-token: ${{ secrets.CLAUDE_PR_TOKEN }}
+          script: |
+            if (process.env.PR_TOKEN_CONFIGURED !== 'true') {
+              throw new Error('Configure CLAUDE_PR_TOKEN as documented in TASK-T26; no GITHUB_TOKEN fallback.');
+            }
+            const manifest = JSON.parse(Buffer.from(process.env.MANIFEST_B64 || '', 'base64').toString('utf8'));
+            await require('./scripts/claude-apply-pr-rework.cjs')({
+              github, context, core, manifest,
+              prNumber: Number(process.env.PR_NUMBER),
+              branch: process.env.REWORK_BRANCH,
+              baseSha: process.env.BASE_SHA,
+            });
