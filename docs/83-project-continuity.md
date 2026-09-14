@@ -119,51 +119,55 @@ TASK-T24 completes the minimal design after PR #88's live test:
   Code GitHub App authentication path.
 - Claude uses `CLAUDE_CODE_OAUTH_TOKEN` and standard OIDC authentication.
 - A separate trusted runner uses `CLAUDE_PR_TOKEN` only to compare/list/
-  create or update a PR after successful Issue implementation. When a
-  later same-Issue run lands on a new timestamped branch while an open PR
-  already exists, it records one idempotent pending-branch pointer on the
-  existing PR; it never writes or merges branches. Same-Issue creation jobs
+  create/update a PR, or merge a later same-Issue branch into an existing
+  PR's own head, after successful Issue implementation. This token is
+  never given to the interactive Claude step. Same-Issue creation jobs
   serialize without cancelling the running job; existing PRs with no new
   branch, or no diff, mean no new PR. No workflow dispatch is involved.
-  **Open architectural conflict, not yet resolved (Issue #89 / PR #91
-  round 2 review):** GitHub's PR API cannot repoint an existing PR's head
-  branch, and the only way to land the later branch's commits on the
-  existing PR's own head/CI is a write to that branch ref (`git merge`/
-  `git push` equivalent), which needs Contents:write — the exact scope a
-  prior round of the same review flagged as "broader than the intended
-  small PR-creation tail" and asked to be reverted. Keeping Contents
-  read-only (current state) and reaching the existing head/CI automatically
-  are mutually exclusive with GitHub's current REST surface; there is no
-  third option. This is recorded as `NEEDS_CLARIFICATION` pending an
-  explicit human choice between (a) accepting the pending-branch pointer
-  as the final behavior — the maintainer replies on the PR itself for
-  follow-up work rather than re-mentioning the Issue — or (b) deliberately
-  approving a narrower, reviewed Contents:write grant for this one
-  operation.
-- The generated PR body is designed to carry a trustworthy full-vs-partial
-  Issue-closure signal without any new permission: `create-pr`'s existing
-  Contents-read `compareCommitsWithBasehead` call already returns every
-  commit message on the branch, and `scripts/claude-create-pr.cjs` trusts
-  only a literal, anchored `Closes #<issue-number>` line for the same
-  Issue (never prose) — otherwise it states the Issue stays open, never
-  emitting a negated closing-keyword phrase (the #77/#76 failure mode).
-  Raw commit-subject text quoted in the body's Summary section is defused
-  (zero-width space) so an incidental `Closes #N` for an unrelated Issue
-  in a commit subject can never act as a real closing reference.
-  **The other half is not wired up yet:** `claude.yml`'s system prompt
-  does not yet ask Claude to write that line, because this session's
-  GitHub App token cannot push `.github/workflows/**` changes ("refusing
-  to allow a GitHub App to create or update workflow ... without
-  `workflows` permission" on push). A maintainer or a session with
-  `workflows` write must add the sentence recorded in TASK-T24 to the
-  existing `--append-system-prompt` value before any PR body will ever
-  contain a real `Closes #N`; until then every generated PR states the
-  Issue stays open, which is safe but incomplete.
+  **Resolved architectural decision (Issue #89 / PR #91 round 3):**
+  GitHub's PR API cannot repoint an existing PR's head branch, so landing
+  a later same-Issue branch's commits on an existing PR's own head/CI
+  needs a write to that branch ref (`git merge`/`git push` equivalent),
+  i.e. Contents:write. Round 1 of that PR's review added this but flagged
+  the grant as broader than the intended small PR-creation tail; it was
+  reverted to Contents:read + a pending-branch-pointer fallback; a later
+  round then asked for the head/CI reachability back while keeping
+  Contents read-only, which is mutually exclusive with the first ask under
+  GitHub's REST surface and was recorded as `NEEDS_CLARIFICATION`. The
+  repository owner has since approved a narrow Contents:write grant
+  confined to this one branch-to-branch merge inside the trusted
+  post-Claude job. The helper now merges a later same-Issue branch into an
+  existing PR's head only when that PR's head is itself a same-repository
+  branch this automation created for the same Issue (matching its
+  `claude/issue-<n>-` prefix); a same-Issue PR matched only by body text,
+  or a fork head, or a real merge conflict, still falls back to the
+  idempotent pending-branch pointer rather than a forced write.
+- The generated PR body carries a trustworthy full-vs-partial
+  Issue-closure signal: `create-pr`'s existing Contents-read
+  `compareCommitsWithBasehead` call already returns every commit message
+  on the branch, and `scripts/claude-create-pr.cjs` trusts only a literal,
+  anchored `Closes #<issue-number>` line for the same Issue (never prose)
+  — otherwise it states the Issue stays open, never emitting a negated
+  closing-keyword phrase (the #77/#76 failure mode). Raw commit-subject
+  text quoted in the body's Summary section is defused (zero-width space)
+  so an incidental `Closes #N` for an unrelated Issue in a commit subject
+  can never act as a real closing reference. **This signal is now fully
+  wired end to end:** `claude.yml`'s `--append-system-prompt` (added by
+  the maintainer directly, since Claude sessions cannot push
+  `.github/workflows/**` changes) instructs Claude to place a line
+  containing exactly `Closes #<issue-number>` in a commit message if, and
+  only if, its change fully resolves the triggering Issue, and to never
+  write Closes/Fixes/Resolves next to an Issue number otherwise. TASK-T24
+  is synchronized with this wired state.
 - Scoped verification tools, preinstalled dependencies, Actions read
   permissions and a 30-turn limit replace the previous unbounded run.
 - There is no custom App token, manual workflow dispatch, dedup job,
-  completion marker, recovery job, automatic approval, automatic merge,
-  automatic close, or deployment step.
+  completion marker, recovery job, automatic approval, automatic **PR**
+  merge, automatic Issue close, or deployment step. (The one branch-to-
+  branch `repos.merge` call above is a narrow exception scoped to
+  consolidating a same-Issue automation-owned branch into an existing PR's
+  head — it never merges a pull request itself, and human PR merge remains
+  mandatory.)
 - The earlier request to restore workflow-wide cancellation is superseded
   by the small serialized creation job in TASK-T24. No manual concurrency
   patch or old helper framework should be restored.

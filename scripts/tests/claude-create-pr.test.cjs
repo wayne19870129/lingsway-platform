@@ -1,10 +1,13 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const createPR = require('../claude-create-pr.cjs');
 
 function fixture({ head = [], open = [], ahead = 1, files = [{ filename: 'a.txt' }],
-  commits = [{ commit: { message: 'Do the thing' } }], updateError = null } = {}) {
-  const creates = []; const updates = [];
+  commits = [{ commit: { message: 'Do the thing' } }], updateError = null,
+  mergeError = null } = {}) {
+  const creates = []; const updates = []; const merges = [];
   const github = {
     rest: {
       pulls: {
@@ -17,11 +20,12 @@ function fixture({ head = [], open = [], ahead = 1, files = [{ filename: 'a.txt'
           assert.equal(args.basehead, 'main...claude/issue-89-test');
           return { data: { ahead_by: ahead, files, commits } };
         },
+        merge: async (args) => { if (mergeError) throw mergeError; merges.push(args); },
       },
     },
     paginate: async (_, args) => args.state === 'all' ? head : open,
   };
-  return { creates, updates, github, branch: 'claude/issue-89-test',
+  return { creates, updates, merges, github, branch: 'claude/issue-89-test',
     context: { repo: { owner: 'wayne19870129', repo: 'lingsway-platform' },
       payload: { issue: { number: 89, title: 'Test `literal` $(text)',
         html_url: 'https://github.com/wayne19870129/lingsway-platform/issues/89' } },
@@ -81,15 +85,60 @@ test('serialized rerun of the same branch observes the first PR and does not upd
   await createPR(next);
   assert.equal(next.creates.length, 0); assert.equal(next.updates.length, 0);
 });
-test('same-Issue follow-up branch is recorded without automatic branch writes', async () => {
+test('same-Issue follow-up on an automation-owned branch merges into the existing PR head', async () => {
   const f = fixture({ open: [{ number: 90, head: { ref: 'claude/issue-89-other',
     repo: { full_name: 'wayne19870129/lingsway-platform' } } }] });
+  await createPR(f);
+  assert.equal(f.creates.length, 0);
+  assert.equal(f.updates.length, 0);
+  assert.equal(f.merges.length, 1);
+  assert.equal(f.merges[0].base, 'claude/issue-89-other');
+  assert.equal(f.merges[0].head, f.branch);
+});
+test('a merge conflict on an automation-owned branch falls back to a pending-branch pointer', async () => {
+  const f = fixture({ open: [{ number: 90, head: { ref: 'claude/issue-89-other',
+    repo: { full_name: 'wayne19870129/lingsway-platform' } } }],
+    mergeError: Object.assign(new Error('Conflict'), { status: 409 }) });
   await createPR(f);
   assert.equal(f.creates.length, 0);
   assert.equal(f.updates.length, 1);
   assert.equal(f.updates[0].pull_number, 90);
   assert.match(f.updates[0].body, /claude-pending-branch:claude\/issue-89-test/);
-  assert.match(f.updates[0].body, /did not create a second PR or modify this PR branch/);
+  assert.match(f.updates[0].body, /could not be merged into this PR's head automatically/);
+});
+test('a missing-branch merge failure on an automation-owned branch falls back to a pointer', async () => {
+  const f = fixture({ open: [{ number: 90, head: { ref: 'claude/issue-89-other',
+    repo: { full_name: 'wayne19870129/lingsway-platform' } } }],
+    mergeError: Object.assign(new Error('Not Found'), { status: 404 }) });
+  await createPR(f);
+  assert.equal(f.creates.length, 0);
+  assert.equal(f.updates.length, 1);
+  assert.equal(f.merges.length, 0);
+});
+test('an unexpected merge error is not swallowed into a pointer', async () => {
+  const f = fixture({ open: [{ number: 90, head: { ref: 'claude/issue-89-other',
+    repo: { full_name: 'wayne19870129/lingsway-platform' } } }],
+    mergeError: Object.assign(new Error('Forbidden'), { status: 403 }) });
+  await assert.rejects(createPR(f), /Forbidden/);
+  assert.equal(f.updates.length, 0);
+});
+test('a same-Issue PR matched only by body text is never merged into, only pointed at', async () => {
+  const f = fixture({ open: [{ number: 90, head: { ref: 'manual-branch',
+    repo: { full_name: 'wayne19870129/lingsway-platform' } }, body: 'Fixes #89 manually.' }] });
+  await createPR(f);
+  assert.equal(f.creates.length, 0);
+  assert.equal(f.merges.length, 0);
+  assert.equal(f.updates.length, 1);
+  assert.equal(f.updates[0].pull_number, 90);
+  assert.match(f.updates[0].body, /is not a branch this automation created/);
+});
+test('a same-Issue fork-headed PR is never merged into, only pointed at', async () => {
+  const f = fixture({ open: [{ number: 90, head: { ref: 'claude/issue-89-other',
+    repo: { full_name: 'someone-else/lingsway-platform' } }, body: 'Related #89.' }] });
+  await createPR(f);
+  assert.equal(f.creates.length, 0);
+  assert.equal(f.merges.length, 0);
+  assert.equal(f.updates.length, 1);
 });
 test('a manual same-Issue PR records a note instead of creating another PR', async () => {
   const f = fixture({ open: [{ number: 90, head: { ref: 'manual' }, body: 'Related #89.' }] });
@@ -129,4 +178,17 @@ test('does not duplicate the pending-branch note on rerun', async () => {
   await createPR(f);
   assert.equal(f.creates.length, 0);
   assert.equal(f.updates.length, 0);
+});
+test('the trusted PR-write/branch-write token is never given to the Claude step', () => {
+  const workflow = fs.readFileSync(
+    path.join(__dirname, '..', '..', '.github', 'workflows', 'claude.yml'), 'utf8');
+  const claudeJobStart = workflow.indexOf('\n  claude:\n');
+  const createPrJobStart = workflow.indexOf('\n  create-pr:\n');
+  assert.ok(claudeJobStart >= 0 && createPrJobStart > claudeJobStart, 'expected both jobs in order');
+  const claudeJobText = workflow.slice(claudeJobStart, createPrJobStart);
+  const createPrJobText = workflow.slice(createPrJobStart);
+  assert.doesNotMatch(claudeJobText, /CLAUDE_PR_TOKEN/,
+    'the interactive Claude step must never receive the PR/branch-write PAT');
+  assert.match(createPrJobText, /CLAUDE_PR_TOKEN/,
+    'the trusted post-Claude job should be the only consumer of the PAT');
 });

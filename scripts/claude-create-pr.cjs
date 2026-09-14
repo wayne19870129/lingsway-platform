@@ -7,12 +7,17 @@ module.exports = async function createClaudePR({ github, context, core, branch }
   if (!branch.startsWith(prefix) || !/^[A-Za-z0-9/_-]+$/.test(branch)) {
     throw new Error('Unexpected Claude branch for this Issue');
   }
+  const isOwnHead = (pr) => pr.head.repo?.full_name?.toLowerCase() === `${owner}/${repo}`.toLowerCase();
   const sameIssue = (pr) => {
-    const ownBranch = pr.head.repo?.full_name?.toLowerCase() === `${owner}/${repo}`.toLowerCase();
-    return (ownBranch && pr.head.ref.startsWith(prefix)) ||
+    return (isOwnHead(pr) && pr.head.ref.startsWith(prefix)) ||
       new RegExp(`(?:^|[^A-Za-z0-9_/])#${issue.number}(?![0-9])`).test(pr.body || '') ||
       (pr.body || '').split(issue.html_url).slice(1).some((tail) => !/^[0-9]/.test(tail));
   };
+  // Only a same-repo branch this automation itself created (matches the
+  // Issue's own naming prefix) is safe to write to. A PR merely referencing
+  // the Issue in prose may be a human's own branch; never force-write there
+  // even though the newly approved PAT scope would technically allow it.
+  const isClaudeOwnedHead = (pr) => isOwnHead(pr) && pr.head.ref.startsWith(prefix);
   // Include closed/merged head PRs: reruns must not reopen finished work.
   const headPRs = await github.paginate(github.rest.pulls.list, {
     owner, repo, head: `${owner}:${branch}`, state: 'all', per_page: 100,
@@ -71,9 +76,31 @@ module.exports = async function createClaudePR({ github, context, core, branch }
     if (existing.head.ref === branch) {
       return core.info(`PR #${existing.number} already tracks ${branch}`);
     }
-    // Keep one PR per Issue without granting this token branch-write access.
-    // A durable, idempotent pointer makes the later branch visible for a
-    // maintainer to reconcile; this helper never merges or deletes branches.
+    // Same-Issue follow-up work must reach the existing PR's own head/CI,
+    // not just be recorded in prose. The maintainer-approved narrow
+    // Contents:write grant (confined to this trusted post-Claude job; never
+    // exposed to the Claude step or repository-controlled code) allows a
+    // real branch merge, but only onto a branch this automation itself
+    // created for this Issue. A same-Issue PR matched only by body text
+    // (a human's own branch) is never written to — that would be force-
+    // writing into an unexpected/unsafe branch relationship.
+    const claudeOwnedHead = isClaudeOwnedHead(existing);
+    if (claudeOwnedHead) {
+      try {
+        await github.rest.repos.merge({
+          owner, repo, base: existing.head.ref, head: branch,
+          commit_message: `Merge ${branch} into ${existing.head.ref} for Issue #${issue.number}`,
+        });
+        return core.info(`Merged ${branch} into existing PR #${existing.number}'s head; its CI will re-run`);
+      } catch (error) {
+        if (error.status !== 409 && error.status !== 404) throw error;
+        core.warning(`Could not merge ${branch} into PR #${existing.number}'s head (${error.status}); recording a pointer instead`);
+      }
+    }
+    // Fallback: a durable, idempotent pointer makes the later branch visible
+    // for a maintainer to reconcile manually. Reached either because the
+    // existing PR's head is not an automation-owned branch (fork or a
+    // human/manual PR), or because the merge above hit a real conflict.
     const marker = `<!-- claude-pending-branch:${branch} -->`;
     if ((existing.body || '').includes(marker)) {
       return core.info(`PR #${existing.number} already references pending branch ${branch}`);
@@ -81,10 +108,9 @@ module.exports = async function createClaudePR({ github, context, core, branch }
     await github.rest.pulls.update({
       owner, repo, pull_number: existing.number,
       body: [existing.body || '', marker,
-        `Additional Issue #${issue.number} work was pushed to \`${branch}\`. ` +
-        'To preserve one Issue / one PR and least-privilege Contents read access, ' +
-        'automation did not create a second PR or modify this PR branch. ' +
-        'A maintainer must reconcile the referenced branch manually.',
+        claudeOwnedHead
+          ? `Additional Issue #${issue.number} work on \`${branch}\` could not be merged into this PR's head automatically (merge conflict or missing branch). A maintainer must merge or rebase it into this PR manually.`
+          : `Additional Issue #${issue.number} work was pushed to \`${branch}\`. This PR's head is not a branch this automation created, so it was not written to automatically. A maintainer must reconcile the referenced branch manually.`,
         summary].join('\n\n'),
     });
     return core.info(`Recorded pending branch ${branch} on existing PR #${existing.number}`);
