@@ -180,6 +180,32 @@ with 84 turns and 15 permission denials. New PAT setup and post-merge live
 acceptance remain required; green CI on this repair PR does not prove
 that the Issue-to-PR flow has been exercised.
 
+**Issue #92 — legacy `arrickcherney-ops` identity audit (TASK-T25, PR
+#93; originally filed as TASK-T24 and renumbered during review to avoid
+colliding with PR #91's own unrelated `TASK-T24-claude-pr-and-
+verification.md`):** a full case-insensitive search of the working tree
+found **zero** references to `arrickcherney-ops` anywhere in workflows,
+config, docs, or code. `.github/workflows/claude.yml`'s job-level gate
+already checks `github.event.comment.user.login == 'wayne19870129'`
+only, `.github/CODEOWNERS` already lists only `@wayne19870129`, and this
+document's collaboration model (§3) already names only `wayne19870129`
+as the owner. The only remaining link to that identity is that GitHub
+recorded PR #91 as authored by it (a historical fact, not reproducible
+from any file here) and its `pull_request`-triggered checks required
+maintainer approval before running — the exact repository/Actions
+setting that caused that requirement is not independently verified from
+inside this session (no working `gh`/GitHub API network access), so
+only the observed facts are stated, not an unverified causal claim. See
+`docs/82-tasks/TASK-T25-remove-legacy-identity-audit.md` for the full
+audit trail. **Collaborator access:** during PR #93 review,
+`wayne19870129` reported directly querying repository collaborator
+permissions and confirmed `arrickcherney-ops` currently holds **`write`**
+collaborator access on this repository — recorded here as owner-reported
+current state (this session could not independently re-query it).
+Revoking that access remains an open GitHub Settings action for
+`wayne19870129` to take directly; Issue #92 stays open until it's done,
+and no closing keyword was used in PR #93.
+
 **This Issue (#74) is itself the first real post-merge live validation of
 the TASK-T21 configuration** (rolling `sonnet` + `medium` effort). Do not
 change that configuration as part of unrelated work; if this run's own
