@@ -29,6 +29,17 @@ class Settings:
     marzban_default_protocol: str = "vless"
     marzban_default_inbounds_json: str = "{}"
     marzban_verify_tls: bool = True
+    # TASK-T16 Phase 2C1: only read/constructed into a LocalXrayRuntime when
+    # gateway_provider == "xray_file" (build_registry() never touches the
+    # filesystem while doing so -- see backend/app/providers/registry.py).
+    # Defaults intentionally mirror LocalXrayRuntime's own dataclass
+    # defaults so opting in without overriding every field still behaves
+    # the same as constructing LocalXrayRuntime directly.
+    xray_config_path: str = "/etc/lingsway/xray_config.json"
+    xray_backup_dir: str = "/etc/lingsway/xray_backups"
+    xray_binary_path: str = "/usr/local/bin/xray"
+    xray_asset_dir: str = "/usr/local/share/xray"
+    xray_reload_command: str = "systemctl reload xray"
     accounting_sync_batch_size: int = 100
     grace_period_hours: int = 24
     subscription_base_url: str = "http://localhost:8000"

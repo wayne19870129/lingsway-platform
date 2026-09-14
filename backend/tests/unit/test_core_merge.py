@@ -20,6 +20,31 @@ def test_merged_settings_preserve_provider_and_legacy_fields() -> None:
     assert settings.webshare_total_quota_gb == Decimal("500")
 
 
+def test_from_env_reads_xray_runtime_settings_for_phase_2c1() -> None:
+    settings = Settings.from_env(
+        {
+            "GATEWAY_PROVIDER": "xray_file",
+            "XRAY_CONFIG_PATH": "/srv/xray/config.json",
+            "XRAY_BACKUP_DIR": "/srv/xray/backups",
+            "XRAY_BINARY_PATH": "/srv/xray/bin/xray",
+            "XRAY_ASSET_DIR": "/srv/xray/assets",
+            "XRAY_RELOAD_COMMAND": "systemctl reload xray",
+        }
+    )
+    assert settings.gateway_provider == "xray_file"
+    assert settings.xray_config_path == "/srv/xray/config.json"
+    assert settings.xray_backup_dir == "/srv/xray/backups"
+    assert settings.xray_binary_path == "/srv/xray/bin/xray"
+    assert settings.xray_asset_dir == "/srv/xray/assets"
+    assert settings.xray_reload_command == "systemctl reload xray"
+
+
+def test_default_settings_keep_gateway_provider_mock() -> None:
+    """Default Settings() (no env at all) must not silently switch away
+    from the mock gateway -- TASK-T16 Phase 2C1 acceptance criterion."""
+    assert Settings().gateway_provider == "mock"
+
+
 def test_merged_logging_redacts_credentials_and_subscription_tokens() -> None:
     record = logging.LogRecord(
         "test",

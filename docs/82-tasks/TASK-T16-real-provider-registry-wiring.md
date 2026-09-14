@@ -1962,3 +1962,157 @@ adapter、DTO/编排改动、独立的 reconciliation 工具/作业、
   验证**，最终以 GitHub CI 的真实 MySQL 8.4 backend job 为准）。
 
   **仍未完成**：与前几轮完全一致，未扩大 scope。
+
+## 阶段二 C1：explicit opt-in Xray gateway registry wiring（Issue #97，
+2026-09-14，实现 + 测试，非生产启用）
+
+按 Issue #97 的要求，只做 Phase 2C 的第一片：让已经存在的
+`XrayFileProvider`/`LocalXrayRuntime` 可以通过 `build_registry()` 显式
+opt-in 选中，默认行为（`GATEWAY_PROVIDER=mock`、全 mock/noop registry）
+保持不变。这不是生产启用、不是部署任务、不涉及真实凭据或真实 reload。
+
+### 前置确认
+
+- `ARCHITECTURE.md`/`docs/REPO_ARCHITECTURE.md` 第 280 行已经把
+  `GATEWAY_PROVIDER=xray_file|mock` 记录为权威取值——本轮选用的
+  `"xray_file"` 字符串和仓库既有架构文档一致，不是本轮新造的名字。
+- Phase 2B8（`ProviderRegistry.close()`、process-lifetime ownership）
+  已经合并在 `main` 上，本轮未改动 `close()`/ownership 语义。
+- `docs/82-tasks/TASK-T16-real-provider-registry-wiring.md`"构造 vs.
+  组装 vs. 运行期"一节（阶段一）已经确认：只要 `build_registry()` 拿到
+  的是已经解析好的路径/命令字符串，构造 `LocalXrayRuntime`/
+  `XrayFileProvider` 本身不产生真实 IO——本轮实现严格遵守这一条，没有
+  引入任何组装期文件系统访问（不使用 `local_runtime_from_env()` 那类
+  工厂函数,`Settings`本身就是唯一输入来源）。
+- Decision 3 route identity（ADR-016）、Marzban accounting、Reality
+  持久化等 Phase 2B 范围的问题**完全不在本次改动范围内**——本轮只碰
+  gateway 这一个 provider 分类的 registry wiring,不读、不写、不依赖
+  ADR-016/017/018 的任何具体结论,只是在开始前确认它们没有和这次改动
+  冲突（确认无冲突：三份 ADR 分别处理 route identity 架构、
+  provisioning lock 范围、accounting create_user 失败契约,均不涉及
+  `gateway_provider` 选择逻辑或 `Settings` 的 provider-selection 字段）。
+
+### 实现
+
+- `backend/app/core/config.py`：新增 5 个 `Settings` 字段
+  （`xray_config_path`/`xray_backup_dir`/`xray_binary_path`/
+  `xray_asset_dir`/`xray_reload_command`），默认值分别镜像
+  `LocalXrayRuntime` 自己的 dataclass 默认值（除
+  `xray_config_path`/`xray_backup_dir`——`LocalXrayRuntime` 这两个字段
+  没有默认值，本轮给了一个占位路径,只有在真正选中 `xray_file` 且真的
+  调用 runtime 的 IO 方法时才会被访问）。全部是普通 `str` 字段，
+  `Settings.from_env()` 现有的"未在特殊列表里的字段一律按大写字段名读取
+  原始字符串"逻辑自动覆盖，未新增任何解析分支。
+- `backend/app/providers/registry.py`：
+  - 新增模块级常量 `_SUPPORTED_GATEWAY_PROVIDERS = frozenset({"mock",
+    "xray_file"})`，`build_registry()` 的校验从"`!= "mock"` 就拒绝"
+    改成"不在这个集合里就拒绝"——未知取值仍然抛
+    `ProviderConfigurationError`（`_unsupported()` 不变）。
+  - 新增私有函数 `_build_gateway(settings)`：`gateway_provider ==
+    "mock"` 时返回 `MockGatewayProvider()`（默认路径逐字节不变）；
+    `== "xray_file"` 时用 `Path(...)` 包装 5 个新 `Settings` 字段（纯
+    字符串包装，不访问文件系统）构造 `LocalXrayRuntime`，再传给
+    `XrayFileProvider(...)`（纯属性赋值，不访问文件系统/网络/
+    subprocess，见阶段一"构造 vs. 组装 vs. 运行期"一节的结论）。
+  - `build_registry()` 里原来内联的 `MockGatewayProvider()` 调用改成
+    `gateway=_build_gateway(settings)`；其余 9 个 provider 分类的装配
+    代码逐字节未改动。
+- 未改动 `backend/app/domain/**`、`backend/app/providers/base.py`、
+  `XrayFileProvider`/`LocalXrayRuntime` 本身的任何一行、`ProviderRegistry`
+  的 `close()`/字段/frozen 语义、九步安全重载/回滚逻辑。没有触碰
+  Webshare/Marzban/Mihomo/subscription transport/payment/notify/email/
+  captcha/storage 中的任何一个。没有修改 `.env.example`（默认值仍是
+  `GATEWAY_PROVIDER=mock`，本任务明确不负责切换默认部署配置）、
+  `AGENTS.md`、`.github/workflows/**`。
+
+### 测试
+
+`backend/tests/unit/test_registry.py` 新增 8 条（Phase 2C1 小节）：
+
+- `test_default_settings_still_select_the_mock_gateway`——默认
+  `Settings()` 仍然装配 `MockGatewayProvider`。
+- `test_explicit_xray_file_gateway_selection_returns_xray_file_provider`——
+  `gateway_provider="xray_file"` 返回一个 `XrayFileProvider`，其内部
+  `runtime` 是 `LocalXrayRuntime`。
+- `test_settings_runtime_paths_and_command_propagate_exactly_into_local_xray_runtime`——
+  5 个新 `Settings` 字段的自定义值精确传播到 `LocalXrayRuntime` 对应
+  字段（含 `reload_command` 按空格切分成 tuple）。
+- `test_xray_file_gateway_defaults_match_local_xray_runtime_own_defaults`——
+  不覆盖新字段时，`build_registry()` 产出的 runtime 和直接构造
+  `LocalXrayRuntime(config_path=..., backup_dir=...)`（只给必填字段）
+  在 `xray_binary`/`asset_dir`/`reload_command` 上完全一致。
+- `test_build_registry_performs_no_io_or_subprocess_when_selecting_xray`——
+  monkeypatch 掉 `subprocess.run`、`socket.socket`、
+  `socket.create_connection`、`Path.read_text`/`write_text`/`mkdir`/
+  `open`（每一个都在被调用时立即 `AssertionError`），选中 `xray_file`
+  后 `build_registry()` 仍然成功返回，证明构造期间零 IO/subprocess/
+  socket 副作用。
+- `test_registry_rejects_unknown_gateway_selection`——未知
+  `GATEWAY_PROVIDER`（如 `"mihomo"`）继续 fail closed 抛
+  `ProviderConfigurationError`。
+- `test_xray_gateway_selection_does_not_wire_any_other_real_provider`——
+  选中 Xray 网关后，其余 9 个 provider 分类仍然是各自的 mock/noop
+  实现，没有被意外接线。
+- （既有）`test_all_mock_registry_assembles_without_network_or_docker`/
+  `test_registry_rejects_unimplemented_selection`/
+  `test_registry_rejects_unimplemented_transport_selection`/Phase 2B8
+  的全部 lifecycle 测试——逐字节未改动，全部保持通过，证明本轮改动
+  没有破坏既有行为。
+
+`backend/tests/unit/test_core_merge.py` 新增 2 条：
+
+- `test_from_env_reads_xray_runtime_settings_for_phase_2c1`——
+  `Settings.from_env()` 从环境变量正确读出全部 5 个新字段。
+- `test_default_settings_keep_gateway_provider_mock`——`Settings()`
+  默认值验收标准的直接断言。
+
+### 验证结果
+
+在 `python3.12 -m venv /tmp/venv312` + `pip install -e '.[dev]'` 环境下
+（沙箱默认 `python3` 是 3.11，`pyproject.toml` 要求 `>=3.12`，因此专门
+建了 3.12 虚拟环境，做法与 Phase 2B8 round 3/4 一致）：
+
+- `ruff check backend/` → **全过**。
+- `mypy backend/app backend/tests`（strict）→ **无问题**（修复过程中
+  发现并改正了测试文件里两处新增的类型问题：`_reject_side_effect`
+  缺返回类型标注、直接访问 `GatewayProvider` Protocol 上不存在的
+  `_runtime` 私有属性——改成一个显式 `isinstance` 收窄的
+  `_xray_runtime()` 测试辅助函数）。
+- `pytest backend/tests/unit backend/tests/guards -q`（
+  `EGRESS_PROVIDER=mock ACCOUNTING_PROVIDER=mock GATEWAY_PROVIDER=mock
+  FORWARDER_PROVIDER=mock PAYMENT_PROVIDER=mock NOTIFY_PROVIDER=noop
+  EMAIL_PROVIDER=noop CAPTCHA_PROVIDER=noop STORAGE_PROVIDER=mock
+  TRANSPORT_PROVIDER_MODE=mock`）→ **240 通过，0 失败**（含
+  `backend/tests/guards/test_safe_reload.py`、
+  `test_mihomo_safe_reload.py` 全部保持通过，证明九步安全重载/回滚
+  行为逐字节未变）。
+- 未运行 `backend/tests/integration`（未改动数据库/编排代码，且本次
+  环境没有配置 `TEST_DATABASE_URL`；集成套件与本次改动的文件范围
+  无关，CI 的真实 MySQL 8.4 backend job 会独立覆盖）。
+- 没有调用真实 Xray/Marzban/网络/subprocess/socket，没有使用真实
+  凭据，没有部署，没有真实 reload。
+
+### 本阶段（2C1）验收
+
+- 默认 `Settings()`/默认环境仍然装配和改动前逐字节相同的全
+  mock/noop registry（`test_default_settings_still_select_the_mock_gateway`、
+  `test_default_settings_keep_gateway_provider_mock`）。
+- `GATEWAY_PROVIDER=xray_file` 返回一个由 `Settings` 配置好的
+  `LocalXrayRuntime` 支撑的 `XrayFileProvider`，构造期间零文件系统/
+  网络/subprocess/socket/reload 副作用（已用 monkeypatch 断言）。
+- 未知 gateway 取值继续 fail closed。
+- 其余 9 个 provider 分类未被本轮改动接触，Webshare/Marzban/Mihomo/
+  subscription transport/payment/notify/email/captcha/storage 全部
+  保持现状。
+- `ProviderRegistry.close()`、process-lifetime ownership、九步安全
+  重载/回滚契约、`backend/app/domain/**`、
+  `backend/app/providers/base.py` 全部未改动——不需要触发 Issue #97
+  要求的"发现必须改这些才能完成就停下报告 blocker"条款，本任务在不
+  碰它们的前提下完整可实现。
+- 下一步（Phase 2C 后续切片，本任务不实现）：生产环境是否/何时真的把
+  某台服务器的 `GATEWAY_PROVIDER` 配置成 `xray_file`，是运维层面的
+  显式决定，不是这次 registry wiring 自动带来的行为；真正让 Xray
+  provider 在生产可用还需要先完成 Phase 2B 范围内被 Decision 3
+  （ADR-016 现已 `SELECTED`）解锁但尚未实现的编排/DTO/renderer 改动
+  （见上方"Phase 2B implementation matrix"），这些仍然独立于本次
+  registry wiring 之外。

@@ -331,17 +331,22 @@ provider-pluggable architecture behind explicit boundaries
 `ARCHITECTURE.md` and `README.md` for the full picture — not repeated
 here.
 
-- **ProviderRegistry is mock/noop-only today — MERGED fact, verified
-  directly against `backend/app/providers/registry.py` on the SHA
-  above.** `build_registry()` raises `_unsupported(...)` for any
+- **ProviderRegistry is mock/noop-only for 9 of its 10 provider
+  categories — updated after TASK-T16 Phase 2C1 (Issue #97, pending
+  merge), verified directly against `backend/app/providers/registry.py`.**
+  `build_registry()` still raises `_unsupported(...)` for any
   non-`mock`/`noop` value of `egress_provider`, `accounting_provider`,
-  `gateway_provider`, `forwarder_provider`, `payment_provider`,
-  `notify_provider`, `email_provider`, `captcha_provider`,
-  `storage_provider`, and `transport_provider_mode`. No real provider
-  (Webshare, Xray, Mihomo, Marzban) is imported or wired into the
-  registry. Real-provider wiring ("Phase 2C") is **PLANNED**, not
-  started — do not assume any live accounting/egress/gateway selection
-  works today.
+  `forwarder_provider`, `payment_provider`, `notify_provider`,
+  `email_provider`, `captcha_provider`, `storage_provider`, and
+  `transport_provider_mode`. **`gateway_provider` is the one exception**:
+  `"mock"` (default, unchanged) and `"xray_file"` (new explicit opt-in)
+  are both accepted; any other value still fails closed the same way.
+  No other real provider (Webshare, Mihomo, Marzban) is imported or
+  wired into the registry — real-provider wiring for those remains
+  **PLANNED**, not started. Do not assume any live accounting/egress
+  selection works today, and do not assume Xray is live-selectable in
+  any actual deployment just because the registry can now construct it
+  when explicitly configured to.
 - Real provider implementations exist in partial form
   (`backend/app/providers/egress/webshare.py`,
   `backend/app/providers/gateway/xray_file.py`,
@@ -446,12 +451,37 @@ decays quickly.
   `GITHUB_TOKEN`, even when the same-SHA `workflow_dispatch` CI/Security/
   Risk trio is green — see section 5's correction. The zero-manual-
   approval acceptance criterion is not yet satisfied.
-- **Actual next technical frontier**: TASK-T16 Phase 2C (real provider registry wiring/opt-in selection) —
-  `build_registry()` is still mock/noop-only (verified directly against
-  `registry.py`, section 6) while the Marzban accounting adapter and
-  `ProviderRegistry` lifecycle/close() foundations already exist. Do not
-  assume any real provider is live-selectable regardless of environment
-  variables (see section 6).
+- **TASK-T16 Phase 2C1 (Issue #97) is implemented, pending human
+  review/merge — `build_registry()` is no longer mock-gateway-only.**
+  `GATEWAY_PROVIDER=xray_file` now selects a real `XrayFileProvider`
+  backed by a `LocalXrayRuntime` constructed from 5 new `Settings`
+  fields (`xray_config_path`/`xray_backup_dir`/`xray_binary_path`/
+  `xray_asset_dir`/`xray_reload_command`); construction performs no
+  filesystem/network/subprocess/socket/reload IO (verified by a
+  monkeypatch-based regression test). Default `Settings()` /
+  `GATEWAY_PROVIDER=mock` is unchanged; no deployment default was
+  switched. Unknown gateway values still fail closed. Every other
+  provider category (egress/accounting/forwarder/payment/notify/email/
+  captcha/storage/transport) is untouched — still exactly the
+  mock/noop-only state described below. See
+  `docs/82-tasks/TASK-T16-real-provider-registry-wiring.md`'s "阶段二
+  C1" section for full detail. **This is registry wiring only, not
+  production activation**: no server's real `GATEWAY_PROVIDER` has been
+  changed, and the Phase 2B-scope orchestration/DTO/renderer work that
+  Decision 3 (ADR-016, now `SELECTED`) unblocked is still a separate,
+  unimplemented next step before Xray is actually production-usable
+  end-to-end.
+- **Actual next technical frontier after Phase 2C1 merges**: either a
+  further Phase 2C slice (e.g. wiring another already-implemented real
+  provider the same explicit-opt-in way) or resuming the Phase 2B
+  implementation work that ADR-016's Decision 3 unblock made possible
+  (real Marzban accounting adapter, `AccountUserDTO`/orchestration data
+  flow, `routing_principal` reconciliation tool — see this document's
+  Phase 2B implementation matrix pointer above). `build_registry()`'s
+  other 9 provider categories remain mock/noop-only (verified directly
+  against `registry.py`, section 6). Do not assume any provider besides
+  the Xray gateway (and even that only when explicitly opted in) is
+  live-selectable regardless of environment variables.
 - **Issue #87 / TASK-T23 replaces the abandoned custom-App proposal.**
   The minimal workflow is implemented in PR #88 and needs post-merge
   live validation with a new Issue comment. TASK-T22 is retained only as

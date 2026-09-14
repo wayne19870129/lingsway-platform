@@ -1,5 +1,8 @@
 import socket
+import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import pytest
 
@@ -10,6 +13,7 @@ from backend.app.providers.egress.mock import MockEgressProvider
 from backend.app.providers.email.noop import NoopEmailProvider
 from backend.app.providers.forwarder.mock import MockForwarderProvider
 from backend.app.providers.gateway.mock import MockGatewayProvider
+from backend.app.providers.gateway.xray_file import LocalXrayRuntime, XrayFileProvider
 from backend.app.providers.notify.noop import NoopNotifyProvider
 from backend.app.providers.payment.mock import MockPaymentProvider
 from backend.app.providers.registry import (
@@ -65,6 +69,122 @@ def test_registry_rejects_unimplemented_selection() -> None:
 def test_registry_rejects_unimplemented_transport_selection() -> None:
     with pytest.raises(ProviderConfigurationError, match="TRANSPORT_PROVIDER_MODE"):
         build_registry(Settings(transport_provider_mode="subscription"))
+
+
+# ---------------------------------------------------------------------------
+# TASK-T16 Phase 2C1: explicit opt-in Xray gateway registry wiring.
+# ---------------------------------------------------------------------------
+
+
+def _reject_side_effect(name: str) -> Callable[..., None]:
+    def _raise(*args: object, **kwargs: object) -> None:
+        raise AssertionError(f"build_registry() attempted {name} during construction")
+
+    return _raise
+
+
+def _xray_runtime(gateway: object) -> LocalXrayRuntime:
+    assert isinstance(gateway, XrayFileProvider)
+    runtime = gateway._runtime  # noqa: SLF001 -- test-only introspection
+    assert isinstance(runtime, LocalXrayRuntime)
+    return runtime
+
+
+def test_default_settings_still_select_the_mock_gateway() -> None:
+    """Default Settings() (no GATEWAY_PROVIDER override) must keep
+    building the same all-mock/noop registry as before this change."""
+    registry = build_registry(Settings())
+
+    assert isinstance(registry.gateway, MockGatewayProvider)
+
+
+def test_explicit_xray_file_gateway_selection_returns_xray_file_provider() -> None:
+    settings = Settings(gateway_provider="xray_file")
+
+    registry = build_registry(settings)
+
+    assert isinstance(registry.gateway, XrayFileProvider)
+    assert isinstance(_xray_runtime(registry.gateway), LocalXrayRuntime)
+
+
+def test_settings_runtime_paths_and_command_propagate_exactly_into_local_xray_runtime() -> None:
+    settings = Settings(
+        gateway_provider="xray_file",
+        xray_config_path="/opt/lingsway/xray/config.json",
+        xray_backup_dir="/opt/lingsway/xray/backups",
+        xray_binary_path="/opt/xray/bin/xray",
+        xray_asset_dir="/opt/xray/share",
+        xray_reload_command="systemctl reload xray-custom",
+    )
+
+    registry = build_registry(settings)
+
+    runtime = _xray_runtime(registry.gateway)
+    assert runtime.config_path == Path("/opt/lingsway/xray/config.json")
+    assert runtime.backup_dir == Path("/opt/lingsway/xray/backups")
+    assert runtime.xray_binary == Path("/opt/xray/bin/xray")
+    assert runtime.asset_dir == Path("/opt/xray/share")
+    assert runtime.reload_command == ("systemctl", "reload", "xray-custom")
+
+
+def test_xray_file_gateway_defaults_match_local_xray_runtime_own_defaults() -> None:
+    """Opting in without overriding any of the new xray_* fields must
+    produce the exact same LocalXrayRuntime a caller would get by
+    constructing it directly with only config_path/backup_dir set."""
+    settings = Settings(gateway_provider="xray_file")
+    direct = LocalXrayRuntime(
+        config_path=Path(settings.xray_config_path),
+        backup_dir=Path(settings.xray_backup_dir),
+    )
+
+    runtime = _xray_runtime(build_registry(settings).gateway)
+
+    assert runtime.xray_binary == direct.xray_binary
+    assert runtime.asset_dir == direct.asset_dir
+    assert runtime.reload_command == direct.reload_command
+
+
+def test_build_registry_performs_no_io_or_subprocess_when_selecting_xray(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Constructing the Xray gateway provider must be pure object assembly:
+    no filesystem reads/writes, no subprocess, no socket, no reload."""
+    monkeypatch.setattr(subprocess, "run", _reject_side_effect("subprocess.run"))
+    monkeypatch.setattr(socket, "socket", _reject_side_effect("socket.socket"))
+    monkeypatch.setattr(
+        socket, "create_connection", _reject_side_effect("socket.create_connection")
+    )
+    monkeypatch.setattr(Path, "read_text", _reject_side_effect("Path.read_text"))
+    monkeypatch.setattr(Path, "write_text", _reject_side_effect("Path.write_text"))
+    monkeypatch.setattr(Path, "mkdir", _reject_side_effect("Path.mkdir"))
+    monkeypatch.setattr(Path, "open", _reject_side_effect("Path.open"))
+
+    settings = Settings(gateway_provider="xray_file")
+    registry = build_registry(settings)
+
+    assert isinstance(registry.gateway, XrayFileProvider)
+
+
+def test_registry_rejects_unknown_gateway_selection() -> None:
+    with pytest.raises(ProviderConfigurationError, match="GATEWAY_PROVIDER"):
+        build_registry(Settings(gateway_provider="mihomo"))
+
+
+def test_xray_gateway_selection_does_not_wire_any_other_real_provider() -> None:
+    """Selecting the Xray gateway must not accidentally change any other
+    provider category away from its mock/noop default -- Phase 2C1 wires
+    exactly one category, nothing else."""
+    registry = build_registry(Settings(gateway_provider="xray_file"))
+
+    assert isinstance(registry.egress, MockEgressProvider)
+    assert isinstance(registry.accounting, MockAccountingProvider)
+    assert isinstance(registry.forwarder, MockForwarderProvider)
+    assert isinstance(registry.payment, MockPaymentProvider)
+    assert isinstance(registry.notify, NoopNotifyProvider)
+    assert isinstance(registry.email, NoopEmailProvider)
+    assert isinstance(registry.captcha, NoopCaptchaProvider)
+    assert isinstance(registry.storage, MockBlobStorage)
+    assert isinstance(registry.transport, MockTransportProvider)
 
 
 # ---------------------------------------------------------------------------

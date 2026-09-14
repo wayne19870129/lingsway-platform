@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import TracebackType
 
 from backend.app.core.config import Settings
@@ -24,10 +25,17 @@ from backend.app.providers.egress.mock import MockEgressProvider
 from backend.app.providers.email.noop import NoopEmailProvider
 from backend.app.providers.forwarder.mock import MockForwarderProvider
 from backend.app.providers.gateway.mock import MockGatewayProvider
+from backend.app.providers.gateway.xray_file import LocalXrayRuntime, XrayFileProvider
 from backend.app.providers.notify.noop import NoopNotifyProvider
 from backend.app.providers.payment.mock import MockPaymentProvider
 from backend.app.providers.storage.mock import MockBlobStorage
 from backend.app.providers.transport.mock import MockTransportProvider
+
+#: TASK-T16 Phase 2C1: the only non-mock gateway selection accepted by
+#: build_registry() so far. Any other value still fails closed via
+#: _unsupported() below -- adding a new real provider elsewhere must not
+#: silently start being accepted here.
+_SUPPORTED_GATEWAY_PROVIDERS = frozenset({"mock", "xray_file"})
 
 
 class ProviderConfigurationError(ValueError):
@@ -160,7 +168,7 @@ def build_registry(settings: Settings) -> ProviderRegistry:
         raise _unsupported("EGRESS_PROVIDER", settings.egress_provider)
     if settings.accounting_provider != "mock":
         raise _unsupported("ACCOUNTING_PROVIDER", settings.accounting_provider)
-    if settings.gateway_provider != "mock":
+    if settings.gateway_provider not in _SUPPORTED_GATEWAY_PROVIDERS:
         raise _unsupported("GATEWAY_PROVIDER", settings.gateway_provider)
     if settings.forwarder_provider != "mock":
         raise _unsupported("FORWARDER_PROVIDER", settings.forwarder_provider)
@@ -180,7 +188,7 @@ def build_registry(settings: Settings) -> ProviderRegistry:
     return ProviderRegistry(
         egress=MockEgressProvider(),
         accounting=MockAccountingProvider(),
-        gateway=MockGatewayProvider(),
+        gateway=_build_gateway(settings),
         forwarder=MockForwarderProvider(),
         payment=MockPaymentProvider(),
         notify=NoopNotifyProvider(),
@@ -189,6 +197,30 @@ def build_registry(settings: Settings) -> ProviderRegistry:
         storage=MockBlobStorage(),
         transport=MockTransportProvider(),
     )
+
+
+def _build_gateway(settings: Settings) -> GatewayProvider:
+    """Assemble the selected gateway provider from parsed Settings values only.
+
+    TASK-T16 Phase 2C1: this must never perform real filesystem, network,
+    subprocess, or reload IO. ``Path(...)`` below only wraps a string (no
+    filesystem access), and ``LocalXrayRuntime``/``XrayFileProvider``
+    construction is pure attribute assignment (see
+    docs/82-tasks/TASK-T16-real-provider-registry-wiring.md's "构造 vs.
+    组装 vs. 运行期" section) -- every IO-performing method on the
+    resulting runtime/provider is only ever invoked later, by a caller
+    that explicitly chooses to call ``apply()``/``reload()``/etc.
+    """
+    if settings.gateway_provider == "mock":
+        return MockGatewayProvider()
+    runtime = LocalXrayRuntime(
+        config_path=Path(settings.xray_config_path),
+        backup_dir=Path(settings.xray_backup_dir),
+        xray_binary=Path(settings.xray_binary_path),
+        asset_dir=Path(settings.xray_asset_dir),
+        reload_command=tuple(settings.xray_reload_command.split()),
+    )
+    return XrayFileProvider(runtime)
 
 
 def _unsupported(variable: str, value: str) -> ProviderConfigurationError:
