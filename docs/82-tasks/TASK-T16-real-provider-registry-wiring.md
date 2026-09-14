@@ -1995,10 +1995,10 @@ opt-in 选中，默认行为（`GATEWAY_PROVIDER=mock`、全 mock/noop registry�
 ### 实现
 
 - `backend/app/core/config.py`：新增 5 个 `Settings` 字段
-  （`xray_config_path`/`xray_backup_dir`/`xray_binary_path`/
+  （`xray_runtime_config_path`/`xray_backup_dir`/`xray_binary_path`/
   `xray_asset_dir`/`xray_reload_command`），默认值分别镜像
   `LocalXrayRuntime` 自己的 dataclass 默认值（除
-  `xray_config_path`/`xray_backup_dir`——`LocalXrayRuntime` 这两个字段
+  `xray_runtime_config_path`/`xray_backup_dir`——`LocalXrayRuntime` 这两个字段
   没有默认值，本轮给了一个占位路径,只有在真正选中 `xray_file` 且真的
   调用 runtime 的 IO 方法时才会被访问）。全部是普通 `str` 字段，
   `Settings.from_env()` 现有的"未在特殊列表里的字段一律按大写字段名读取
@@ -2116,3 +2116,90 @@ opt-in 选中，默认行为（`GATEWAY_PROVIDER=mock`、全 mock/noop registry�
   （ADR-016 现已 `SELECTED`）解锁但尚未实现的编排/DTO/renderer 改动
   （见上方"Phase 2B implementation matrix"），这些仍然独立于本次
   registry wiring 之外。
+
+### Round 2（ChatGPT 独立审查，PR #98 head `b5ec5c843f240f76e2a114a2abb54674ccc46efb`，
+1 个 Major，已修复）
+
+**Major 1（新增的 Xray runtime config path 与仓库既有 canonical path
+分裂）**：独立验证后确认 **VALID**——round 1 把新 `Settings` 字段命名为
+`xray_config_path`（对应环境变量 `XRAY_CONFIG_PATH`），默认值给了一个
+和仓库其它任何地方都无关的占位路径 `/etc/lingsway/xray_config.json`。
+但仓库早已存在并且**真正在用**的 canonical 约定是
+`ops/gateway/render_xray_routes.py`：
+
+```python
+OUTPUT_CONFIG = Path(
+    os.getenv("XRAY_RUNTIME_CONFIG_PATH", "/app/data/marzban/xray_config.json")
+)
+```
+
+且部署拓扑已经证实这个路径就是 renderer 和 Marzban 之间共享的那份真实
+运行时配置：`infrastructure/compose/compose.base.yml` 里 `backend-api`
+容器把宿主机的 `../../data/marzban` 挂载到 `/app/data/marzban`（`ops/`
+目录也挂载进同一个容器,`render_xray_routes.py` 就在这个容器进程里
+运行）；`compose.transport.yml` 里 `marzban` 容器把同一个宿主机文件
+`../../data/marzban/xray_config.json` 挂载为它自己的 `/code/xray_config.json`。
+`deploy/inventory.example.yml` 的 `verification.xray_config_file` 也
+指向这条链路对应的宿主机路径。round 1 新增的
+`xray_config_path`/`XRAY_CONFIG_PATH` 是一个**完全独立、没有任何代码或
+部署拓扑与之对应的第二个路径来源**——一旦有人显式设置
+`GATEWAY_PROVIDER=xray_file` 却没有额外手动同步这个新变量，
+`XrayFileProvider` 实际读写的文件和 renderer/Marzban 共享的真实文件
+就会是两个不同的文件,产生静默的配置分裂。Issue #97 明确要求"如果
+ADR/TASK/repository context 已经确定 exact path/config boundary，应
+使用该 authoritative design"，round 1 没有遵守这一条。
+
+**修复**：不新增第二个平行的路径变量，而是让 `Settings` 直接复用同一个
+环境变量名和默认值：
+
+- `backend/app/core/config.py`：字段改名为 `xray_runtime_config_path`
+  （`Settings.from_env()` 现有的"大写字段名即环境变量名"规则据此自动
+  产出 `XRAY_RUNTIME_CONFIG_PATH`，和 `render_xray_routes.py` 读的是
+  同一个环境变量名，不需要在 `from_env()` 里加特殊映射），默认值改成
+  `/app/data/marzban/xray_config.json`，逐字节对应
+  `render_xray_routes.py` 的 `OUTPUT_CONFIG` 默认值——两者运行在同一个
+  `backend-api` 容器里，共享同一份挂载,这不是巧合而是刻意收敛成
+  同一个 canonical source。
+- 顺带把 `xray_backup_dir` 的默认值从同样无关的
+  `/etc/lingsway/xray_backups` 改成 `/app/data/marzban/xray_backups`
+  （canonical 目录下的兄弟目录）——仓库里没有为 Xray backup 目录定义过
+  任何既有环境变量约定，但 `backend/app/providers/forwarder/mihomo.py`
+  的 `local_runtime_from_env()` 对 `MIHOMO_BACKUP_DIR` 就是用"默认为
+  config 文件同目录下的 backups 子目录"这个先例，本次按同一模式收敛，
+  避免留下另一个不知道该指向哪里的占位路径。
+- `xray_binary_path`/`xray_asset_dir`/`xray_reload_command` 未改动——
+  ChatGPT 的审查明确没有把这三项归为 Major（`xray_binary_path`/
+  `xray_asset_dir` 的默认值已经和 `.github/workflows/ci.yml` 的
+  `backend-image` job 验证的 Docker 镜像内 Xray 安装路径一致；
+  `reload_command` 的简单空格切分在默认值 `"systemctl reload xray"`
+  下没有问题，且 Phase 2C1 明确不执行真实 reload）。
+- `backend/app/providers/registry.py`：`_build_gateway()` 里的引用
+  同步改名。
+- 新增回归测试（不是重复硬编码同一个字面量，而是**直接对照
+  `ops/gateway/render_xray_routes.py` 自己计算出的 `OUTPUT_CONFIG`**）：
+  `test_default_xray_runtime_config_path_matches_the_canonical_renderer_path`
+  （`test_core_merge.py`）、
+  `test_default_xray_selection_targets_the_canonical_shared_runtime_config`
+  （`test_registry.py`）——两者都 `import
+  ops.gateway.render_xray_routes as renderer` 并断言
+  `Settings().xray_runtime_config_path == str(renderer.OUTPUT_CONFIG)`
+  / `runtime.config_path == renderer.OUTPUT_CONFIG`，这样如果未来任何一
+  方的默认值单独改动而没有同步另一方，测试会立即失败，而不是依赖两处
+  各自维护的字面量保持巧合一致。既有
+  `backend/tests/unit/test_xray_render.py` 已经证明 import 这个
+  renderer 模块在测试里是安全的既有模式（它自己 import
+  `backend.app.core.database`，但只是 `create_engine()` 的惰性构造,
+  不产生真实连接）。
+- 同步修正了本文档、`docs/83-project-continuity.md` 里对字段名的引用。
+
+**验证**：`ruff check backend/` 全过；`mypy backend/app backend/tests`
+（strict，`/tmp/venv312`）无问题；
+`pytest backend/tests/unit backend/tests/guards -q`（全 mock 环境变量）
+→ 全部通过，0 回归（round 1 的 8 条 registry 测试 + 2 条 core_merge 测试
+中，2 条因为字段改名同步更新了断言,新增 2 条对照 renderer 的规范性
+测试）。仍未真实调用 Xray/Marzban/网络/subprocess/socket，仍未使用
+真实凭据，仍未部署，仍未真实 reload。
+
+**仍未完成**：与 round 1 完全一致，未扩大 scope——本轮只收敛了
+config/backup path 的 canonical source，没有触碰 domain/base、其它
+provider、workflow、AGENTS.md。

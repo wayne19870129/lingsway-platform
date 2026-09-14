@@ -24,7 +24,7 @@ def test_from_env_reads_xray_runtime_settings_for_phase_2c1() -> None:
     settings = Settings.from_env(
         {
             "GATEWAY_PROVIDER": "xray_file",
-            "XRAY_CONFIG_PATH": "/srv/xray/config.json",
+            "XRAY_RUNTIME_CONFIG_PATH": "/srv/xray/config.json",
             "XRAY_BACKUP_DIR": "/srv/xray/backups",
             "XRAY_BINARY_PATH": "/srv/xray/bin/xray",
             "XRAY_ASSET_DIR": "/srv/xray/assets",
@@ -32,7 +32,7 @@ def test_from_env_reads_xray_runtime_settings_for_phase_2c1() -> None:
         }
     )
     assert settings.gateway_provider == "xray_file"
-    assert settings.xray_config_path == "/srv/xray/config.json"
+    assert settings.xray_runtime_config_path == "/srv/xray/config.json"
     assert settings.xray_backup_dir == "/srv/xray/backups"
     assert settings.xray_binary_path == "/srv/xray/bin/xray"
     assert settings.xray_asset_dir == "/srv/xray/assets"
@@ -43,6 +43,19 @@ def test_default_settings_keep_gateway_provider_mock() -> None:
     """Default Settings() (no env at all) must not silently switch away
     from the mock gateway -- TASK-T16 Phase 2C1 acceptance criterion."""
     assert Settings().gateway_provider == "mock"
+
+
+def test_default_xray_runtime_config_path_matches_the_canonical_renderer_path() -> None:
+    """Independent-review finding (PR #98 round 1, Major 1): a second,
+    differently-named default path here would let an opted-in
+    XrayFileProvider operate on a file the real renderer/Marzban never
+    write to or read from. XRAY_RUNTIME_CONFIG_PATH's env var name and
+    default must be the exact same setting ops/gateway/render_xray_routes.py
+    already uses -- verified here against that module's own computed
+    default, not a hand-copied duplicate literal."""
+    import ops.gateway.render_xray_routes as renderer
+
+    assert Settings().xray_runtime_config_path == str(renderer.OUTPUT_CONFIG)
 
 
 def test_merged_logging_redacts_credentials_and_subscription_tokens() -> None:

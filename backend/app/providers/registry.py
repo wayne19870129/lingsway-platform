@@ -214,7 +214,7 @@ def _build_gateway(settings: Settings) -> GatewayProvider:
     if settings.gateway_provider == "mock":
         return MockGatewayProvider()
     runtime = LocalXrayRuntime(
-        config_path=Path(settings.xray_config_path),
+        config_path=Path(settings.xray_runtime_config_path),
         backup_dir=Path(settings.xray_backup_dir),
         xray_binary=Path(settings.xray_binary_path),
         asset_dir=Path(settings.xray_asset_dir),

@@ -455,7 +455,7 @@ decays quickly.
   review/merge — `build_registry()` is no longer mock-gateway-only.**
   `GATEWAY_PROVIDER=xray_file` now selects a real `XrayFileProvider`
   backed by a `LocalXrayRuntime` constructed from 5 new `Settings`
-  fields (`xray_config_path`/`xray_backup_dir`/`xray_binary_path`/
+  fields (`xray_runtime_config_path`/`xray_backup_dir`/`xray_binary_path`/
   `xray_asset_dir`/`xray_reload_command`); construction performs no
   filesystem/network/subprocess/socket/reload IO (verified by a
   monkeypatch-based regression test). Default `Settings()` /
@@ -463,10 +463,17 @@ decays quickly.
   switched. Unknown gateway values still fail closed. Every other
   provider category (egress/accounting/forwarder/payment/notify/email/
   captcha/storage/transport) is untouched — still exactly the
-  mock/noop-only state described below. See
-  `docs/82-tasks/TASK-T16-real-provider-registry-wiring.md`'s "阶段二
-  C1" section for full detail. **This is registry wiring only, not
-  production activation**: no server's real `GATEWAY_PROVIDER` has been
+  mock/noop-only state described below. **Round 2 fix (PR #98 review):**
+  `xray_runtime_config_path`'s env var name and default
+  (`XRAY_RUNTIME_CONFIG_PATH` / `/app/data/marzban/xray_config.json`)
+  were made identical to `ops/gateway/render_xray_routes.py`'s own
+  canonical `OUTPUT_CONFIG` setting after independent review found
+  round 1's original `xray_config_path`/`/etc/lingsway/xray_config.json`
+  was a second, disconnected path an opted-in `XrayFileProvider` would
+  have operated on instead of the file the renderer/Marzban container
+  topology actually share — see TASK-T16's "阶段二 C1" section (including
+  its "Round 2" subsection) for full detail. **This is registry wiring
+  only, not production activation**: no server's real `GATEWAY_PROVIDER` has been
   changed, and the Phase 2B-scope orchestration/DTO/renderer work that
   Decision 3 (ADR-016, now `SELECTED`) unblocked is still a separate,
   unimplemented next step before Xray is actually production-usable

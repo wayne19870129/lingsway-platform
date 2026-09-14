@@ -107,10 +107,24 @@ def test_explicit_xray_file_gateway_selection_returns_xray_file_provider() -> No
     assert isinstance(_xray_runtime(registry.gateway), LocalXrayRuntime)
 
 
+def test_default_xray_selection_targets_the_canonical_shared_runtime_config() -> None:
+    """Independent-review finding (PR #98 round 1, Major 1): explicit
+    xray_file selection without an override must operate on the exact
+    same file ops/gateway/render_xray_routes.py renders to and the
+    Marzban container shares (infrastructure/compose/compose.base.yml
+    mounts .../data/marzban at /app/data/marzban in this same backend-api
+    container) -- not a second, unrelated placeholder path."""
+    import ops.gateway.render_xray_routes as renderer
+
+    runtime = _xray_runtime(build_registry(Settings(gateway_provider="xray_file")).gateway)
+
+    assert runtime.config_path == renderer.OUTPUT_CONFIG
+
+
 def test_settings_runtime_paths_and_command_propagate_exactly_into_local_xray_runtime() -> None:
     settings = Settings(
         gateway_provider="xray_file",
-        xray_config_path="/opt/lingsway/xray/config.json",
+        xray_runtime_config_path="/opt/lingsway/xray/config.json",
         xray_backup_dir="/opt/lingsway/xray/backups",
         xray_binary_path="/opt/xray/bin/xray",
         xray_asset_dir="/opt/xray/share",
@@ -133,7 +147,7 @@ def test_xray_file_gateway_defaults_match_local_xray_runtime_own_defaults() -> N
     constructing it directly with only config_path/backup_dir set."""
     settings = Settings(gateway_provider="xray_file")
     direct = LocalXrayRuntime(
-        config_path=Path(settings.xray_config_path),
+        config_path=Path(settings.xray_runtime_config_path),
         backup_dir=Path(settings.xray_backup_dir),
     )
 

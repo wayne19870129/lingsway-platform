@@ -32,11 +32,28 @@ class Settings:
     # TASK-T16 Phase 2C1: only read/constructed into a LocalXrayRuntime when
     # gateway_provider == "xray_file" (build_registry() never touches the
     # filesystem while doing so -- see backend/app/providers/registry.py).
-    # Defaults intentionally mirror LocalXrayRuntime's own dataclass
-    # defaults so opting in without overriding every field still behaves
-    # the same as constructing LocalXrayRuntime directly.
-    xray_config_path: str = "/etc/lingsway/xray_config.json"
-    xray_backup_dir: str = "/etc/lingsway/xray_backups"
+    # xray_runtime_config_path's field name (-> XRAY_RUNTIME_CONFIG_PATH via
+    # Settings.from_env()'s uppercase-field-name convention) and default are
+    # deliberately identical to ops/gateway/render_xray_routes.py's own
+    # OUTPUT_CONFIG (os.getenv("XRAY_RUNTIME_CONFIG_PATH",
+    # "/app/data/marzban/xray_config.json")) -- both that renderer and this
+    # registry-wired runtime execute inside the same backend-api container,
+    # which mounts the host's shared Marzban data directory at
+    # /app/data/marzban (infrastructure/compose/compose.base.yml). A second,
+    # differently-named path setting here would let XrayFileProvider operate
+    # on a file the renderer/Marzban never write to or read from -- see
+    # TASK-T16's Phase 2C1 "round 2" note for the independent-review finding
+    # this fixed. xray_backup_dir defaults to a sibling directory under that
+    # same shared data path for the same reason, mirroring the established
+    # MIHOMO_BACKUP_DIR convention (backend/app/providers/forwarder/mihomo.py)
+    # of defaulting a provider's backup directory relative to its own config
+    # file's directory rather than an unrelated absolute path.
+    # xray_binary_path/xray_asset_dir mirror LocalXrayRuntime's own dataclass
+    # defaults, which already match the paths the backend Docker image
+    # installs Xray to (verified by .github/workflows/ci.yml's backend-image
+    # job); xray_reload_command mirrors LocalXrayRuntime's own default too.
+    xray_runtime_config_path: str = "/app/data/marzban/xray_config.json"
+    xray_backup_dir: str = "/app/data/marzban/xray_backups"
     xray_binary_path: str = "/usr/local/bin/xray"
     xray_asset_dir: str = "/usr/local/share/xray"
     xray_reload_command: str = "systemctl reload xray"
