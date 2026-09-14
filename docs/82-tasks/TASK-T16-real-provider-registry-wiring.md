@@ -1978,3 +1978,23 @@ adapter、DTO/编排改动、独立的 reconciliation 工具/作业、
 
 本项完成不等于 Phase 2B 完成。PR #98 / Issue #97 仍保持 OPEN/PAUSED，不能恢复；
 Xray gateway 接线及其余 Phase 2B 工作仍需独立审查和人工合并。
+
+
+## Phase 2B-remain-1A — Finalize Xray desired-state / credential boundary
+
+本阶段是 docs-only 架构阶段，依据新增的
+`docs/80-decisions/ADR-019-xray-desired-state-credential-boundary.md`
+定义后续实现契约：
+
+- architecture contract 已定义：完整 `XrayOutboundDTO`、full DB snapshot、
+  operation-scoped `CredentialResolver`、明文生命周期、`CandidateConfig`
+  脱敏和 credential precedence。
+- 本阶段尚未实施任何业务代码、provider/base DTO、secret resolver、renderer、
+  schema、migration 或 Xray registry wiring；remain-1B 代码实现尚未开始。
+- `DesiredRoutingState` 后续必须由完整 active DB snapshot 驱动，不能只传入新增
+  subscription，也不能读取运行时文件增量拼接。
+- 当前 binding override 的非空 malformed ref 必须 fail closed；仅 NULL/空字符串
+  才允许回退 endpoint-level ref。Gateway provider/renderer 不得依赖 SQLAlchemy
+  Session。
+- Phase 2B 仍未 COMPLETE。Issue #97 与 PR #98 继续保持 OPEN/PAUSED，Phase 2C
+  与 `GATEWAY_PROVIDER=xray_file` registry wiring 不得恢复。
