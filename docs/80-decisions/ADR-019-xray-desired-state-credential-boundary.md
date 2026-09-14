@@ -1,7 +1,7 @@
 # ADR-019：Xray desired state 与 credential boundary
 
-- Status: Accepted candidate（待独立审查与人工合并）
-- 状态：Accepted candidate（待独立审查与人工合并）
+- Status: Accepted
+- 状态：已接受
 - 日期：2026-09-14
 - 范围：TASK-T16 Phase 2B-remain-1A（架构与契约，仅文档）
 - 执行者：本 exact task 由 Codex 唯一写入；Claude Code 不参与本任务。此任务级指派不改写仓库级协作规则。

@@ -2011,7 +2011,9 @@ Phase 2C attempt，现均已关闭；PR #98 从未 merge，不能恢复。Xray g
 
 ## Phase 2B-remain-1B — Dormant credential-boundary infrastructure
 
-本阶段在候选 PR 中已实现，等待独立审查和人工合并：
+本阶段的实现载体是 PR #103。验收门槛是：只有 PR #103 经独立审查
+通过并人工合并，remain-1B 才算完成；当本变更位于 `main` 时，remain-1B
+即视为完成，后续技术 frontier 为 remain-3：
 
 - 新增 dormant `XrayOutboundDTO`、严格的 `CredentialResolver` 协议、稳定且不泄露
   Secret 内容的 `CredentialResolutionError`，以及 `SqlAlchemyCredentialResolver`。
@@ -2027,4 +2029,5 @@ Phase 2C attempt，现均已关闭；PR #98 从未 merge，不能恢复。Xray g
   `outbound_tags -> outbounds` 展开、registry Xray wiring、migration、deploy 或 reload 变更。
 
 本 PR 不创建 Issue、不自动合并，也不重新打开 #97/#98。Phase 2B 仍未 COMPLETE；remain-3
-仍未开始，Phase 2C 继续 BLOCKED。`main` 在人工合并前仍以 ADR-019 已合并的基线为准。
+仍未开始，Phase 2C 继续 BLOCKED。ADR-019 已接受；live `DesiredRoutingState`
+仍保持 `user_routes` / `outbound_tags` 旧形状。

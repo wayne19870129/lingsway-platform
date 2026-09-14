@@ -214,6 +214,8 @@ class CredentialResolutionError(RuntimeError):
 
 
 class CredentialResolver(Protocol):
+    """ADR-019 operation-scoped credential boundary for provider rendering."""
+
     def resolve(self, secret_ref: str) -> CredentialDTO: ...
 
 
@@ -329,6 +331,8 @@ class TransportProvider(Protocol):
 
 
 class GatewayProvider(Protocol):
+    """Provider contract whose resolver argument is required by ADR-019."""
+
     def render(
         self, desired: DesiredRoutingState, resolver: CredentialResolver
     ) -> CandidateConfig: ...

@@ -269,6 +269,8 @@ class ProvisioningState(Protocol):
 
 @dataclass(slots=True)
 class ProvisioningService:
+    """Provisioning orchestration with ADR-019's resolver dependency."""
+
     egress: EgressProvider
     accounting: AccountingProvider
     gateway: GatewayProvider

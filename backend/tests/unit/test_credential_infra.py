@@ -124,8 +124,18 @@ def test_resolver_refreshes_stale_identity_map_from_latest_commit(engine: Engine
             "CREDENTIAL_MALFORMED",
         ),
         (
+            "credential/non-string-username",
+            json.dumps({"username": 123, "password": "pw"}),
+            "CREDENTIAL_MALFORMED",
+        ),
+        (
             "credential/non-string",
             json.dumps({"username": "alice", "password": 123}),
+            "CREDENTIAL_MALFORMED",
+        ),
+        (
+            "credential/blank-password",
+            json.dumps({"username": "alice", "password": " "}),
             "CREDENTIAL_MALFORMED",
         ),
     ],
