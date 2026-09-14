@@ -38,7 +38,9 @@ secret resolver、Session 生命周期和明文泄露边界，容易产生不可
    查询排除。当前脚本使用 Python truthiness 实现这一点；本 ADR 收紧
    malformed 非空 ref 的行为，见“Credential precedence”。
 5. `backend/app/core/secrets.py::reveal_secret(db, secret_ref)` 直接需要
-   SQLAlchemy `Session`，并从 encrypted Secret row 返回 plaintext。
+   SQLAlchemy `Session`，并从 encrypted Secret row 返回 plaintext；当前实现使用
+   普通 `select(Secret).where(...)`，属于 consistent read，不能直接满足本 ADR
+   为 candidate 规定的 current-read freshness。
 6. 当前 `ops/gateway/render_xray_routes.py` 是带 DB Session 的入口/查询层：
    它查询 active route，选择 secret ref，调用 `reveal_secret()`，解析 JSON，
    最终把 username/password 写进 Xray `outbounds[].settings.servers[].users`。
@@ -56,7 +58,8 @@ secret resolver、Session 生命周期和明文泄露边界，容易产生不可
 
 ### 1. Desired-state DTO boundary
 
-Phase 2B-remain-1B 应在 provider contracts 中新增：
+Phase 2B-remain-1B 应在 provider contracts 中新增（示例省略已有的
+`dataclasses.field` import）：
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -65,7 +68,7 @@ class XrayOutboundDTO:
     host: str
     port: int
     protocol: str
-    credential_secret_ref: str
+    credential_secret_ref: str = field(repr=False)
 ```
 
 字段语义：
@@ -95,8 +98,10 @@ class XrayOutboundDTO:
 
 ### 2. Full-snapshot invariant
 
-`DesiredRoutingState` 的唯一语义是“当前完整 DB desired snapshot”，不是
-一次 provisioning 新增的一条 delta route。
+在 live cutover 完成后，`DesiredRoutingState` 的唯一语义是“当前完整 DB
+desired snapshot”，不是一次 provisioning 新增的一条 delta route。当前 main
+仍有 route-only 的 legacy producer；它是本 ADR 已知的实现缺口，不得在任何
+中间 PR 中被误当作已经满足最终 contract。
 
 后续 remain-3 查询层必须：
 
@@ -121,33 +126,69 @@ class XrayOutboundDTO:
    → apply
    → `db.commit()` 或 `db.rollback()`
    → `RELEASE_LOCK`。render/apply 前不得为了制造 snapshot 而提前 commit；
-   snapshot 可以包含当前 transaction 自己已经 flush 但尚未 commit 的 route/
-   credential mutation。
+   snapshot 可以包含当前 transaction 自己已经 flush 但尚未 commit 的 route、
+   binding 和 Secret mutation。
 
    “同一个 Session 再普通 SELECT 一遍”不是 freshness contract。生产 MySQL 8.4
    的 InnoDB 默认是 `REPEATABLE READ`；Phase A 较早的普通 consistent read
    可能已经建立旧 read view，使后续普通 SELECT 看不到另一个 writer 在本操作
-   等待 named lock 期间已经 commit 的 route。remain-3 必须让 full-snapshot
-   查询使用 MySQL current/latest-committed read semantics，即采用
+   等待 named lock 期间已经 commit 的 route。remain-3 的 full-snapshot 查询、
+   egress endpoint/binding 选择和 credential Secret lookup 必须统一使用
+   MySQL current/latest-committed read semantics，即采用
    `SELECT ... FOR UPDATE` 的 locking-read 语义或 SQLAlchemy 中明确等价的
-   current-read 形式，且在与 route mutation 相同的 Session/transaction 中执行。
-   该 current read 必须同时可见当前 transaction 自己的 flushed/uncommitted
-   writes；精确 JOIN、`with_for_update()` 作用范围和索引留给 remain-3，
-   但 correctness semantics 在本 ADR 中已经固定。
+   current-read 形式，并在与 route mutation 相同的 Session/transaction 中执行。
+   对 ORM identity map 中可能已由旧 read view 加载的对象，current read 必须强制
+   refresh/populate-existing 或使用等价的不会复用旧对象状态的机制。
+
+   本 ADR 选择“保持 REPEATABLE READ + 对 candidate 所有 DB reads 使用
+   current/locking read”的方案，而不是全局或隐式切换 isolation level。因而
+   `SqlAlchemyCredentialResolver` 不得把当前普通
+   `reveal_secret(db, secret_ref)` 原样用于 candidate path；它必须通过显式
+   current-read Secret lookup（例如 `FOR UPDATE` 加 ORM refresh，或严格等价
+   的 infra helper）读取 encrypted Secret row，再解密并校验。current read
+   必须同时可见当前 transaction 自己的 flushed/uncommitted writes；精确 JOIN、
+   `with_for_update()` 作用范围、refresh 选项和索引留给 remain-3，但
+   correctness semantics 在本 ADR 中已经固定。
 
    named lock 仍是 `GatewayRouteBinding` writer serialization mechanism；
    current/locking read 只解决 freshness，不替代 ADR-016/017 的 named-lock
    写者串行化，也不得擅自全局修改 isolation level。典型 A/B 交错中，A 在
-   Phase A 建立旧 snapshot，B 在 named lock 内完成并 commit route 后释放锁，
-   A 获锁后执行上述 fresh current read，最终 snapshot 必须同时包含 B 已提交
-   的 route 与 A 自己的 pending route。若 current read、preflight、resolve
-   或 render 任一步失败，必须在同一 lock span 内 fail closed 并 rollback，
+   Phase A 建立旧 snapshot，B 在 named lock 内完成并 commit route、binding 和
+   Secret 后释放锁，A 获锁后执行上述 fresh current reads，最终 candidate 必须
+   同时包含 B 已提交的 route、B 选中的 `credential_secret_ref`、B 的 Secret
+   plaintext，以及 A 自己 pending 的 route 和 Secret。若 current read、preflight、
+   resolve 或 render 任一步失败，必须在同一 lock span 内 fail closed 并 rollback，
    然后才 release lock。
 
 本 ADR 不决定具体 JOIN、索引或 transaction 代码；这些是 remain-3 的实现细节，
 但不得削弱这里规定的 current-read、own-write visibility、lock-span 或
 no-pre-apply-commit correctness contract。
 
+### 2A. remain-1B / remain-3 sequencing
+
+本 ADR 选择“先安全基础设施、后一次性 live cutover”的方案，以避免出现
+“最终 DesiredRoutingState contract 已合并，但生产 producer 仍只返回 delta”
+的中间 main：
+
+- remain-1B 只允许落地 dormant `XrayOutboundDTO`、`CredentialResolver` /
+  stable error contract、CredentialDTO/CandidateConfig safe repr、credential
+  redaction 和 operation dependency wiring。它不得替换 live
+  `DesiredRoutingState.outbound_tags`，不得把当前
+  `SqlAlchemyProvisioningState.desired_routing_state()` 改成宣称 full snapshot，
+  也不得迁移依赖旧 route-only producer 的 live caller。
+- remain-3 必须是一个连贯的 cutover PR，先实现 deterministic full-snapshot
+  query、route/endpoint/binding/Secret current-read freshness、credential precedence
+  和全量 preflight，再在同一 PR 中把 `DesiredRoutingState` 的 live producer、
+  `outbound_tags -> outbounds`、GatewayProvider caller 和全部测试/调用方一起切换。
+  这些变更不得拆成会在 main 上留下不一致 contract 的可合并中间阶段。
+- `GatewayProvider.render(desired, resolver)` 的 operation API 可以在 remain-1B
+  作为安全边界落地，但在 remain-3 cutover 前，desired 参数仍必须保持旧
+  route-only representation；Xray registry 继续不可选。任何 PR 都不得让
+  `outbounds` final shape 与 route-only producer 同时成为可合并的 live source
+  of truth。
+- 若未来某个 PR 选择把基础设施与 full snapshot 合并实施，也必须作为一个
+  原子 cutover 满足 remain-3 的全部条件；不得把本节的依赖顺序解释成允许提前
+  合并不完整的 live contract。
 ### 3. Credential resolver boundary
 
 选择一个 typed resolver Protocol，放在
@@ -189,10 +230,10 @@ class CredentialResolver(Protocol):
   `CredentialResolver`；`build_services()` 的 wiring test 也必须显式传入
   fake。没有 implicit resolver、全局 singleton 或测试专用旁路。
 - `SqlAlchemyCredentialResolver` 是 `backend/app/infra/` 的唯一实现，
-  持有同一个 Session，仅在这里调用 `reveal_secret()`。此前
-  `save_credentials()` 已在该 Session 上 flush；因此本 operation 刚写入的
-  Secret row 对 resolver 可见，不需要提前 commit。current read 同样必须保留
-  当前 transaction 自己的 writes。
+  持有同一个 Session，并在 candidate path 使用显式 current-read Secret lookup；
+  不得原样调用当前普通-read `reveal_secret()`。此前 `save_credentials()` 已在
+  该 Session 上 flush；因此本 operation 刚写入的 Secret row 对 resolver 可见，
+  不需要提前 commit。current read 同样必须保留当前 transaction 自己的 writes。
 - 纯 Xray renderer 只接收已解析的 transient credential/route value；它不能
   看到 Session。带 Session 的脚本入口只能是 orchestration/infra 层，必须在
   调用纯 renderer 前完成查询和 resolver 组装。
@@ -257,6 +298,15 @@ CandidateConfig(version='...', content=<redacted>)
 - Xray runtime file 的内容只允许在受控的 install/backup/reload 路径中处理；
   不能把 candidate content 作为普通诊断输出。
 
+- `XrayOutboundDTO.credential_secret_ref` 必须声明为
+  `field(repr=False)`（或严格等价的安全实现）；raw ref 不得出现在
+  `repr(XrayOutboundDTO)`。未来的 `CredentialDTO` 必须同时把
+  `username` 与 `password` 从默认 repr 排除，并提供安全 custom repr；
+  只把 password 标成 `repr=False` 不足以满足本 ADR。
+- `DesiredRoutingState` 必须提供安全 repr contract：它不能通过嵌套
+  `XrayOutboundDTO` 间接展示 raw ref，也不能展示任何 CredentialDTO
+  plaintext。实现可以使用安全 custom repr，或证明所有嵌套字段均为安全 repr；
+  remain-1B 测试必须锁定该行为。
 ### 6. Secret payload format and fail-closed semantics
 
 现有 `save_credentials()` 写入的 plaintext payload 规范化为严格 JSON object：
@@ -368,11 +418,20 @@ explicit task. No fallback or silent coercion is allowed.
 
 The future implementation must add offline deterministic tests for:
 
-- DTO contains refs and connection details but never plaintext.
+- DTO contains refs and connection details but never plaintext; its repr does not
+  expose raw `credential_secret_ref`.
 - full snapshot includes all active bindings and rejects partial/orphan/duplicate state.
-- a real MySQL 8.4 concurrency test covers the A/B interleaving and proves the
-  fresh snapshot contains B's committed route plus A's own pending route; it also
-  proves no pre-apply commit is used.
+- a real MySQL 8.4 concurrency test covers the A/B interleaving and proves one
+  candidate sees B's committed route, B's selected ref, B's resolved Secret
+  plaintext, and A's own pending route and Secret; it also proves no pre-apply
+  commit is used and that no old Secret read view is reused.
+- sentinel redaction tests use `sentinel_username`, `sentinel_password`, and
+  `sentinel_secret_ref`: applicable `repr(XrayOutboundDTO)`,
+  `repr(DesiredRoutingState)`, `repr(CredentialDTO)`,
+  `repr(CandidateConfig)`, error text, structured logs, and audit payloads
+  must not expose the relevant sentinel values; CredentialDTO tests cover both
+  plaintext fields, while outbound/state/candidate and operational-output tests
+  cover the secret ref and any plaintext that can reach them.
 - resolver success, missing ref, decrypt failure, invalid JSON, wrong top-level type,
   unknown keys, missing fields, blank fields and non-string fields.
 - resolver/provider boundary proves no Session or ORM import in gateway provider/renderer.
@@ -385,16 +444,22 @@ The future implementation must add offline deterministic tests for:
 ## Downstream implementation requirements
 
 1. Do not begin remain-1B until this ADR is independently reviewed and manually merged.
-2. Implement DTO changes in provider contracts first, then adapt all callers/tests in
-   one coherent PR; do not leave two competing outbound representations.
+2. In remain-1B, add only the dormant DTO/security infrastructure and operation
+   dependency described in section 2A; do not cut over the live desired-state producer
+   or `outbound_tags`.
 3. Fix the operation API exactly as `GatewayProvider.render(desired, resolver)`;
    create the resolver at the application boundary from the same Session used by
    provisioning state, pass it through required `build_services()` /
    `ProvisioningService` dependencies, and never store it in the registry/provider.
-4. Translate current `SecretStoreError`/JSON parser failures at the infra boundary into
-   redacted stable `CredentialResolutionError` codes.
-5. Implement full-snapshot query/preflight before any Xray render/apply path can be
-   selected. Preserve ADR-014 ownership and ADR-016 route identity.
+4. Implement `XrayOutboundDTO`, CredentialDTO safe repr, CandidateConfig safe repr,
+   stable resolver errors and current-read Secret lookup without exposing Session to
+   gateway providers/renderers. The current plain-read `reveal_secret()` helper
+   is not sufficient for the candidate path until adapted or bypassed by the infra
+   current-read helper.
+5. In remain-3, implement deterministic full-snapshot query/preflight, route/endpoint/
+   binding/Secret freshness, precedence, and the live `outbound_tags -> outbounds`
+   cutover together in one coherent PR. Preserve ADR-014 ownership and ADR-016 route
+   identity; no mergeable intermediate may claim full snapshot while producing a delta.
 6. Treat existing `ops/gateway/render_xray_routes.py` coupling as an explicit
    refactor requirement; do not bypass this ADR by passing a Session into providers.
 7. Keep Phase 2C and `GATEWAY_PROVIDER=xray_file` registry wiring paused until Phase
