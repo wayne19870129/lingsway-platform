@@ -1976,8 +1976,9 @@ adapter、DTO/编排改动、独立的 reconciliation 工具/作业、
 - 新增离线确定性测试，覆盖 mock 健康状态、admin accounting/transport 分派、
   Marzban 认证成功、认证失败、传输失败、异常响应和凭据/token 脱敏。
 
-本项完成不等于 Phase 2B 完成。PR #98 / Issue #97 仍保持 OPEN/PAUSED，不能恢复；
-Xray gateway 接线及其余 Phase 2B 工作仍需独立审查和人工合并。
+本项完成不等于 Phase 2B 完成。Issue #97 与 PR #98 是历史上提前启动的
+Phase 2C attempt，现均已关闭；PR #98 从未 merge，不能恢复。Xray gateway 接线
+及其余 Phase 2B 工作仍需独立审查和人工合并。
 
 
 ## Phase 2B-remain-1A — Finalize Xray desired-state / credential boundary
@@ -1996,5 +1997,8 @@ Xray gateway 接线及其余 Phase 2B 工作仍需独立审查和人工合并。
 - 当前 binding override 的非空 malformed ref 必须 fail closed；仅 NULL/空字符串
   才允许回退 endpoint-level ref。Gateway provider/renderer 不得依赖 SQLAlchemy
   Session。
-- Phase 2B 仍未 COMPLETE。Issue #97 与 PR #98 继续保持 OPEN/PAUSED，Phase 2C
-  与 `GATEWAY_PROVIDER=xray_file` registry wiring 不得恢复。
+- Phase 2B 仍未 COMPLETE。Issue #97 与 PR #98 是历史上提前启动的 Phase 2C
+  attempt，现均已关闭且 PR #98 从未 merge；Phase 2C 这个技术阶段仍为
+  BLOCKED，与 `GATEWAY_PROVIDER=xray_file` registry wiring 不得恢复。
+- Issue #101（本阶段早期 tracking artifact）已按 Not planned 关闭。以后本系列
+  小阶段不再新建 Issue，以 TASK-T16 与对应 PR 作为需求、验收和交接记录。
