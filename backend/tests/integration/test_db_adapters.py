@@ -45,6 +45,7 @@ from backend.app.providers.base import (
     CredentialDTO,
     DesiredForwarderState,
     EgressEndpointDTO,
+    HealthReport,
     TenantDTO,
 )
 from backend.app.providers.forwarder.mihomo import MihomoForwarderProvider, MihomoRuntimeError
@@ -380,6 +381,7 @@ class FailingMihomoRuntime:
     path: Path
     events: list[str] = field(default_factory=list)
     fail_reload_count: int = 1
+    health_values: list[bool] = field(default_factory=lambda: [True])
 
     def backup(self) -> Path:
         backup = self.path.with_suffix(".before-test")
@@ -400,6 +402,11 @@ class FailingMihomoRuntime:
     def restore(self, backup: Path) -> None:
         shutil.copy2(backup, self.path)
         self.events.append("restore")
+
+    def health(self) -> HealthReport:
+        self.events.append("health")
+        healthy = self.health_values.pop(0) if self.health_values else True
+        return HealthReport(healthy)
 
 
 def test_mihomo_render_failure_restores_exact_pre_operation_state(
@@ -452,4 +459,77 @@ def test_mihomo_render_failure_restores_exact_pre_operation_state(
         provider.apply(candidate)
 
     assert config_path.read_bytes() == original
-    assert runtime.events == ["backup", "install", "reload", "restore", "reload"]
+    assert runtime.events == [
+        "backup",
+        "install",
+        "reload",
+        "restore",
+        "reload",
+        "health",
+    ]
+
+
+def test_mihomo_unhealthy_post_reload_restores_exact_pre_operation_state(
+    state_fixture: tuple[Session, SqlAlchemyProvisioningState, EgressEndpoint],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A reload that returns without error but leaves Mihomo unhealthy must
+    still be treated as a failed apply -- the previous config is restored
+    and the call fails closed, exactly like a raised reload exception."""
+    db, state, endpoint = state_fixture
+    provider_record = TransportProviderRecord(
+        code="AIRPORT_ADAPTER",
+        slug="airport-adapter",
+        name="Adapter Airport",
+        kind=TransportProviderKind.SUBSCRIPTION,
+        secret_ref="transport/provider/adapter",
+    )
+    route_group = RouteGroup(code="RG_ADAPTER", name="Adapter Route")
+    traffic_rule = TrafficRule(
+        rule_set="default",
+        match_type="MATCH",
+        match_value="",
+        target_egress="RESIDENTIAL",
+        priority=100,
+    )
+    db.add_all([provider_record, route_group, traffic_rule])
+    db.flush()
+    db.add(
+        RouteBinding(
+            route_group_id=route_group.id,
+            provider_id=provider_record.id,
+            role=BindingRole.PRIMARY,
+            priority=1,
+        )
+    )
+    state.save_credentials(
+        TenantDTO("tenant-1", "SUB-ADAPTER-001", 50, 100),
+        EgressEndpointDTO(str(endpoint.id), endpoint.host, endpoint.port),
+        CredentialDTO("proxy-user", "proxy-password"),
+    )
+    db.commit()
+    monkeypatch.setenv("MIHOMO_API_SECRET", "test-api-secret")
+    document = render_mihomo_document(db)
+    original = b"rules:\n  - MATCH,OLD\n"
+    config_path = tmp_path / "config.yaml"
+    config_path.write_bytes(original)
+    runtime = FailingMihomoRuntime(
+        config_path, fail_reload_count=0, health_values=[False, True]
+    )
+    provider = MihomoForwarderProvider(lambda: document, runtime)
+    candidate = provider.render(DesiredForwarderState({}))
+
+    with pytest.raises(MihomoRuntimeError, match="unhealthy"):
+        provider.apply(candidate)
+
+    assert config_path.read_bytes() == original
+    assert runtime.events == [
+        "backup",
+        "install",
+        "reload",
+        "health",
+        "restore",
+        "reload",
+        "health",
+    ]

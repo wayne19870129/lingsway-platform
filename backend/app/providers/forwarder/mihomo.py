@@ -10,7 +10,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import NoReturn, Protocol
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -39,6 +39,8 @@ class MihomoRuntime(Protocol):
     def reload(self) -> None: ...
 
     def restore(self, backup: Path) -> None: ...
+
+    def health(self) -> HealthReport: ...
 
 
 @dataclass(slots=True)
@@ -92,6 +94,20 @@ class LocalMihomoRuntime:
     def restore(self, backup: Path) -> None:
         shutil.copy2(backup, self.config_path)
 
+    def health(self) -> HealthReport:
+        api = self.api_url.rstrip("/") + "/version"
+        request = Request(
+            api,
+            headers={"Authorization": f"Bearer {self.api_secret}"},
+            method="GET",
+        )
+        try:
+            with urlopen(request, timeout=10.0) as response:
+                healthy = 200 <= response.status < 300
+        except OSError:
+            healthy = False
+        return HealthReport(healthy, {"mihomo_api": str(healthy)})
+
 
 RenderDocument = Callable[[], bytes]
 
@@ -120,22 +136,56 @@ class MihomoForwarderProvider(ForwarderProvider):
     def apply(self, candidate: CandidateConfig) -> ApplyResult:
         backup = self._runtime.backup()
         document = yaml.safe_dump(candidate.content, sort_keys=False).encode()
+
+        # `install()`/`reload()` succeeding without raising is not the same
+        # as the reload having actually taken effect -- a reload command
+        # can return cleanly while Mihomo's API is unreachable or the new
+        # config left it in a broken state. `report` is only trusted once
+        # `health()` has been called against the *post-reload* runtime.
         try:
             self._runtime.install(document)
             self._runtime.reload()
+            report = self._runtime.health()
         except Exception as exc:
-            try:
-                self._runtime.restore(backup)
-                self._runtime.reload()
-            except Exception as rollback_exc:
-                raise MihomoRuntimeError(
-                    "Mihomo activation failed and rollback failed"
-                ) from rollback_exc
-            raise MihomoRuntimeError("Mihomo activation failed; configuration restored") from exc
+            self._rollback(backup, failure_summary="Mihomo activation failed", cause=exc)
+
+        if not report.healthy:
+            self._rollback(
+                backup,
+                failure_summary="Mihomo post-reload health check reported unhealthy",
+                cause=None,
+            )
+
         return ApplyResult(True, candidate.version)
 
+    def _rollback(
+        self, backup: Path, *, failure_summary: str, cause: Exception | None
+    ) -> NoReturn:
+        """Restore the previous config and re-verify health; always raises.
+
+        A restored file plus a reload command that returns cleanly is not
+        proof of recovery -- this only reports the rollback itself as safe
+        once `health()` confirms it, and otherwise fails closed rather than
+        silently claiming the previous known-good config is running again.
+        """
+        try:
+            self._runtime.restore(backup)
+            self._runtime.reload()
+            rollback_report = self._runtime.health()
+        except Exception as rollback_exc:
+            raise MihomoRuntimeError(
+                f"{failure_summary} and rollback failed; configuration "
+                "state is unknown"
+            ) from rollback_exc
+        if not rollback_report.healthy:
+            raise MihomoRuntimeError(
+                f"{failure_summary}; rollback restored the previous config "
+                "but the runtime is unhealthy afterwards"
+            ) from cause
+        raise MihomoRuntimeError(f"{failure_summary}; configuration restored") from cause
+
     def health(self) -> HealthReport:
-        return HealthReport(True, {"provider": "mihomo"})
+        return self._runtime.health()
 
 
 def local_runtime_from_env() -> LocalMihomoRuntime:
