@@ -206,6 +206,19 @@ Revoking that access remains an open GitHub Settings action for
 `wayne19870129` to take directly; Issue #92 stays open until it's done,
 and no closing keyword was used in PR #93.
 
+**Post-#91 live-acceptance checkpoint (2026-09-14, same Issue #92):**
+after PR #91 and PR #93 merged, `wayne19870129` requested a second,
+docs-only `@claude` run on Issue #92 (branch
+`claude/issue-92-20260914-0518`) specifically to exercise the merged
+Issue → Claude → branch → automatic-PR path end to end. See the "Post-
+#91 live-acceptance checkpoint" section added to
+`docs/82-tasks/TASK-T25-remove-legacy-identity-audit.md` for what that
+run could and could not observe from inside its own job (it cannot see
+whether the separate `create-pr` job it depends on actually opened a PR
+— check the Issue/PR timeline directly for that). This checkpoint is
+still partial for the same reason as PR #93: `arrickcherney-ops`
+collaborator access has not been revoked, so no closing keyword is used.
+
 **This Issue (#74) is itself the first real post-merge live validation of
 the TASK-T21 configuration** (rolling `sonnet` + `medium` effort). Do not
 change that configuration as part of unrelated work; if this run's own

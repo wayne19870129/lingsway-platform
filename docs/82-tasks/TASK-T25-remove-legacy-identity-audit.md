@@ -127,3 +127,51 @@ workflow's identity/token design.
   identified above is outside this repository's version-controlled
   files and therefore outside what a code PR can close out — see the
   PR description for the explicit statement of what remains.
+
+## Post-#91 live-acceptance checkpoint (this run)
+
+PR #91 and PR #93 (this task's own audit PR) are both now merged. This
+checkpoint records a second, deliberately small, docs-only run
+requested directly by `wayne19870129` via an `@claude` comment on Issue
+#92, whose explicit purpose is to exercise the now-merged Issue → Claude
+→ branch → automatic-PR path end to end and confirm it does not depend
+on the legacy `arrickcherney-ops` identity.
+
+What this run itself can directly observe from inside the Claude Code
+Action job:
+- It is executing because `.github/workflows/claude.yml`'s job-level
+  gate matched `github.event.comment.user.login == 'wayne19870129'` —
+  i.e. the trigger path that started this run is already owner-only, not
+  dependent on any other account.
+- The branch it is committing to is `claude/issue-92-20260914-0518`,
+  created fresh for this Issue by the standard Claude Code Action step
+  (not by, or on behalf of, `arrickcherney-ops`).
+- This edit and the resulting commit(s) are the full extent of what this
+  job does; per `claude.yml`'s `create-pr` job (a separate job keyed on
+  `needs.claude.outputs.branch != ''`), PR creation itself happens in a
+  **later, separate job** using `CLAUDE_PR_TOKEN` — a token this
+  interactive Claude step never holds (see `docs/83-project-continuity.md`
+  §5 and `CLAUDE.md`'s trusted-post-Claude-token boundary).
+
+What this run explicitly does **not** claim, because it cannot observe
+it from inside this job:
+- Whether the `create-pr` job actually ran and successfully opened a PR
+  automatically. That job runs after this one and its result is not
+  visible from here — it must be checked afterward from the Issue/PR
+  timeline (a PR appearing under this Issue with no manual "Create a PR"
+  link having been used), not asserted by this comment.
+- Any change to `arrickcherney-ops`'s collaborator access. Per the
+  existing Findings above, that account was owner-confirmed to still
+  hold `write` access as of PR #93's review, and revoking it is a GitHub
+  Settings action for `wayne19870129` to take directly — this run does
+  not touch it and cannot verify a state change either way.
+
+**This remains a partial acceptance of Issue #92 for the same reason PR
+#93 was partial**: the legacy account's collaborator access has not yet
+been revoked. This PR/commit therefore does not carry a `Closes #92` (or
+`Fixes`/`Resolves`) line. Remaining human action before Issue #92 can
+close: (1) `wayne19870129` revokes `arrickcherney-ops`'s repository
+collaborator access in GitHub Settings, and (2) confirmation, from the
+Issue/PR timeline produced by *this* run, that the `create-pr` job
+created a PR automatically without a manually-pasted "Create a PR" link
+being needed.
