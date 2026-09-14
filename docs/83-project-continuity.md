@@ -219,6 +219,27 @@ whether the separate `create-pr` job it depends on actually opened a PR
 still partial for the same reason as PR #93: `arrickcherney-ops`
 collaborator access has not been revoked, so no closing keyword is used.
 
+**Post-#91 live-acceptance result confirmed (2026-09-14, this round —
+PR #94):** after `wayne19870129` configured `CLAUDE_PR_TOKEN`, the
+previously-failed `create-pr` job in Actions run `34809127882` was
+rerun and succeeded, automatically opening PR #94 from branch
+`claude/issue-92-20260914-0518`. Independently verified via this
+session's CI-status/workflow-run/job-log tooling (still no `gh`/GitHub
+API network access): both jobs of that run (`claude`, `create-pr`) show
+`conclusion: success`; the `create-pr` log ends `Created PR; normal
+pull_request workflows will evaluate it`; and PR #94's three
+automatically-triggered checks — Risk classification (`34810950593`),
+Security (`34810950585`), CI (`34810950604`) — all completed `success`
+with no `action_required` state, seconds after PR creation. This
+confirms the Issue → Claude → branch → automatic-PR path (TASK-T24/T25)
+works end to end without depending on `arrickcherney-ops` and without a
+manual approval gate on this SHA. See TASK-T25's "Post-#91
+live-acceptance result (externally verified, this round)" section for
+the full evidence trail. Still open: `arrickcherney-ops` collaborator
+`write` access (unchanged from above), and TASK-T24's later same-Issue
+branch-to-existing-PR-head validation, which this run did not exercise.
+This checkpoint therefore remains partial and Issue #92 stays open.
+
 **This Issue (#74) is itself the first real post-merge live validation of
 the TASK-T21 configuration** (rolling `sonnet` + `medium` effort). Do not
 change that configuration as part of unrelated work; if this run's own

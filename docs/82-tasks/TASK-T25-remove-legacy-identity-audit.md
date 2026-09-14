@@ -175,3 +175,53 @@ collaborator access in GitHub Settings, and (2) confirmation, from the
 Issue/PR timeline produced by *this* run, that the `create-pr` job
 created a PR automatically without a manually-pasted "Create a PR" link
 being needed.
+
+## Post-#91 live-acceptance result (externally verified, this round)
+
+Item (2) above is now resolved. After `wayne19870129` configured
+`CLAUDE_PR_TOKEN`, the previously-failed `create-pr` job in Actions run
+`34809127882` (the same run as this task's Claude job) was rerun and
+completed successfully. This session independently verified the
+following, using the CI-status/workflow-run-details/job-log tooling
+available here (this sandbox still has no `gh`/raw GitHub API network
+access, so nothing below relies on that):
+
+- Both jobs of run `34809127882` — `claude` and `create-pr` — show
+  `conclusion: success`.
+- The `create-pr` job's log records `CLAUDE_BRANCH:
+  claude/issue-92-20260914-0518`, `PR_TOKEN_CONFIGURED: true`, and ends
+  with `Created PR; normal pull_request workflows will evaluate it` at
+  `2026-09-14T05:48:05Z`.
+- PR #94 exists, is open, and was created from branch
+  `claude/issue-92-20260914-0518` into `main` — the same branch this run
+  pushed to, carrying exactly the two docs files this run touched.
+- On PR #94's head SHA, all three automatically-triggered checks
+  completed successfully with no `action_required` state observed:
+  Risk classification (run `34810950593`), Security (run
+  `34810950585`), and CI (run `34810950604`), all created
+  `2026-09-14T05:48:07Z` — seconds after `create-pr` logged success,
+  consistent with the `pull_request` event firing them automatically
+  rather than a manual dispatch or an approval gate.
+
+This confirms, as an observed fact rather than something a future
+session needs to re-derive from the Actions timeline, that the
+`create-pr` job did run and did open a PR automatically, and that its
+resulting `pull_request`-triggered checks ran without a maintainer-
+approval gate on this SHA.
+
+What remains unresolved is unchanged from the checkpoint above: per
+independent review of this PR, `arrickcherney-ops` still holds `write`
+collaborator access on this repository; this session still has no
+`gh`/GitHub API network access to re-query that permission directly, so
+it continues to be recorded as reviewer/owner-observed current state,
+not something this audit confirms itself (same limitation already
+described in Findings above). Revoking it remains a GitHub Settings
+action only `wayne19870129` can take directly, so Issue #92 stays open
+and no closing keyword is used in this PR.
+
+Also still pending: TASK-T24's later same-Issue branch → existing
+automation-owned PR-head validation (landing a later same-Issue branch's
+commits onto an already-open PR's own head/CI). This round pushed the
+first commit to a brand-new branch/PR pair, not a second branch onto an
+already-existing PR, so that specific path remains unexercised and is
+explicitly left pending here.
