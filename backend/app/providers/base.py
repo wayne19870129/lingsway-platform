@@ -248,6 +248,10 @@ class AccountingCreateUserError(RuntimeError):
 
 
 class AccountingProvider(Protocol):
+    def health_check(self) -> bool:
+        """Check whether the accounting backend is reachable and usable."""
+        ...
+
     def create_user(
         self, username: str, quota_bytes: int, expire_at: datetime | None
     ) -> AccountUserDTO:
