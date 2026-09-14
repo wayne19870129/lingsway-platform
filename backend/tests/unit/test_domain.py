@@ -35,6 +35,7 @@ from backend.app.providers.base import (
     DesiredRoutingState,
     EgressEndpointDTO,
     TenantDTO,
+    XrayOutboundDTO,
 )
 from backend.app.providers.egress.mock import MockEgressProvider
 from backend.app.providers.forwarder.mock import MockForwarderProvider
@@ -98,7 +99,16 @@ class FakeState:
         del request
         self.routing_principals_received.append(routing_principal)
         return DesiredRoutingState(
-            {routing_principal: endpoint.endpoint_id}, (endpoint.endpoint_id,)
+            user_routes={routing_principal: endpoint.endpoint_id},
+            outbounds=(
+                XrayOutboundDTO(
+                    endpoint.endpoint_id,
+                    endpoint.host,
+                    endpoint.port,
+                    endpoint.protocol,
+                    "secret/mock-credential",
+                ),
+            ),
         )
 
     def store_subscription_token(self, customer_id: str, raw_token: str) -> None:

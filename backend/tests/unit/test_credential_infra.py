@@ -28,7 +28,7 @@ from backend.app.providers.base import (
     XrayOutboundDTO,
 )
 from backend.app.providers.gateway.mock import MockGatewayProvider
-from backend.app.providers.gateway.xray_file import XrayFileProvider
+from backend.app.providers.gateway.xray_file import XrayFileProvider, XrayValidationError
 
 
 @pytest.fixture
@@ -217,10 +217,122 @@ def test_gateway_providers_accept_operation_scoped_resolver() -> None:
             return CredentialDTO("resolver-user", "resolver-password")
 
     resolver = Resolver()
-    desired = DesiredRoutingState({"user": "egress"}, ("egress", "BLOCK"))
+    desired = DesiredRoutingState(
+        user_routes={"user": "egress"},
+        outbounds=(
+            XrayOutboundDTO(
+                "egress", "proxy.example.invalid", 1080, "socks5", "secret/ref"
+            ),
+        ),
+    )
 
     mock_candidate = MockGatewayProvider().render(desired, resolver)
     xray_candidate = XrayFileProvider(runtime=None).render(desired, resolver)  # type: ignore[arg-type]
 
     assert mock_candidate.version == "gateway-mock-v1"
     assert xray_candidate.version
+    assert xray_candidate.content["outbounds"] == [
+        {
+            "tag": "BLOCK",
+            "protocol": "blackhole",
+        },
+        {
+            "tag": "egress",
+            "protocol": "socks",
+            "settings": {
+                "servers": [
+                    {
+                        "address": "proxy.example.invalid",
+                        "port": 1080,
+                        "users": [{"username": "resolver-user", "password": "resolver-password"}],
+                    }
+                ]
+            },
+        },
+    ]
+
+
+def test_xray_renderer_resolves_each_full_outbound_and_keeps_block_fixed() -> None:
+    class RecordingResolver:
+        def __init__(self) -> None:
+            self.refs: list[str] = []
+
+        def resolve(self, secret_ref: str) -> CredentialDTO:
+            self.refs.append(secret_ref)
+            return CredentialDTO(f"user-{secret_ref}", f"password-{secret_ref}")
+
+    resolver = RecordingResolver()
+    desired = DesiredRoutingState(
+        user_routes={"principal-b": "egress-b", "principal-a": "egress-a"},
+        outbounds=(
+            XrayOutboundDTO("egress-a", "a.example.invalid", 1001, "socks", "ref-a"),
+            XrayOutboundDTO("egress-b", "b.example.invalid", 1002, "socks5", "ref-b"),
+        ),
+    )
+
+    candidate = XrayFileProvider(runtime=None).render(desired, resolver)  # type: ignore[arg-type]
+
+    assert resolver.refs == ["ref-a", "ref-b"]
+    assert candidate.content["outbounds"] == [
+        {"tag": "BLOCK", "protocol": "blackhole"},
+        {
+            "tag": "egress-a",
+            "protocol": "socks",
+            "settings": {
+                "servers": [
+                    {
+                        "address": "a.example.invalid",
+                        "port": 1001,
+                        "users": [{"username": "user-ref-a", "password": "password-ref-a"}],
+                    }
+                ]
+            },
+        },
+        {
+            "tag": "egress-b",
+            "protocol": "socks",
+            "settings": {
+                "servers": [
+                    {
+                        "address": "b.example.invalid",
+                        "port": 1002,
+                        "users": [{"username": "user-ref-b", "password": "password-ref-b"}],
+                    }
+                ]
+            },
+        },
+    ]
+    assert candidate.content["routing"]["rules"] == [  # type: ignore[index]
+        {"type": "field", "ip": ["geoip:private"], "outboundTag": "BLOCK"},
+        {"type": "field", "user": ["principal-a"], "outboundTag": "egress-a"},
+        {"type": "field", "user": ["principal-b"], "outboundTag": "egress-b"},
+        {"type": "field", "network": "tcp,udp", "outboundTag": "BLOCK"},
+    ]
+
+
+def test_desired_routing_state_has_no_legacy_outbound_tags_field() -> None:
+    desired = DesiredRoutingState()
+
+    assert not hasattr(desired, "outbound_tags")
+
+
+@pytest.mark.parametrize(
+    "outbound",
+    [
+        XrayOutboundDTO("egress", "proxy.example.invalid", 1080, "http", "secret/ref"),
+        XrayOutboundDTO("egress", "proxy.example.invalid", 0, "socks5", "secret/ref"),
+        XrayOutboundDTO("egress", "proxy.example.invalid", 1080, "socks5", " "),
+    ],
+)
+def test_xray_renderer_fails_closed_for_invalid_outbound_inputs(
+    outbound: XrayOutboundDTO,
+) -> None:
+    class Resolver:
+        def resolve(self, secret_ref: str) -> CredentialDTO:
+            raise CredentialResolutionError("CREDENTIAL_REF_INVALID")
+
+    desired = DesiredRoutingState(user_routes={"principal": outbound.tag}, outbounds=(outbound,))
+    with pytest.raises((XrayValidationError, CredentialResolutionError)) as raised:
+        XrayFileProvider(runtime=None).render(desired, Resolver())  # type: ignore[arg-type]
+
+    assert "secret/ref" not in str(raised.value)

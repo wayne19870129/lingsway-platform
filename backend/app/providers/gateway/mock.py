@@ -23,7 +23,7 @@ class MockGatewayProvider:
         del resolver
         raise_injected(self.failures, "render")
         return CandidateConfig(
-            {"user_routes": dict(desired.user_routes), "outbound_tags": desired.outbound_tags},
+            {"user_routes": dict(desired.user_routes), "outbounds": desired.outbounds},
             "gateway-mock-v1",
         )
 

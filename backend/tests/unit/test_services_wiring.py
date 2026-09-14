@@ -26,6 +26,7 @@ from backend.app.providers.base import (
     EgressEndpointDTO,
     PaymentProvider,
     TenantDTO,
+    XrayOutboundDTO,
 )
 from backend.app.providers.captcha.noop import NoopCaptchaProvider
 from backend.app.providers.egress.mock import MockEgressProvider
@@ -103,7 +104,16 @@ class State:
         del request
         self.events.append(f"desired-routing-state:{routing_principal}")
         return DesiredRoutingState(
-            {routing_principal: endpoint.endpoint_id}, (endpoint.endpoint_id,)
+            user_routes={routing_principal: endpoint.endpoint_id},
+            outbounds=(
+                XrayOutboundDTO(
+                    endpoint.endpoint_id,
+                    endpoint.host,
+                    endpoint.port,
+                    endpoint.protocol,
+                    "secret/mock",
+                ),
+            ),
         )
 
     def store_subscription_token(self, customer_id: str, raw_token: str) -> None:

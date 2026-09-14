@@ -219,7 +219,7 @@ class AccountUserDTO:
 @dataclass(frozen=True, slots=True)
 class DesiredRoutingState:
     user_routes: Mapping[str, str] = field(default_factory=dict)
-    outbound_tags: tuple[str, ...] = ()
+    outbounds: tuple[XrayOutboundDTO, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

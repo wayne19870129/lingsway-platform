@@ -62,7 +62,66 @@ class XrayFileProvider:
     def render(
         self, desired: DesiredRoutingState, resolver: CredentialResolver
     ) -> CandidateConfig:
-        del resolver
+        outbound_tag_set: set[str] = set()
+        rendered_outbounds: list[dict[str, object]] = [
+            {"tag": "BLOCK", "protocol": "blackhole"}
+        ]
+        for outbound in desired.outbounds:
+            if (
+                not isinstance(outbound.tag, str)
+                or not outbound.tag.strip()
+                or outbound.tag == "BLOCK"
+            ):
+                raise XrayValidationError("invalid desired outbound tag")
+            if outbound.tag in outbound_tag_set:
+                raise XrayValidationError("duplicate desired outbound tag")
+            if not isinstance(outbound.host, str) or not outbound.host.strip():
+                raise XrayValidationError("invalid desired outbound host")
+            if not isinstance(outbound.port, int) or isinstance(outbound.port, bool):
+                raise XrayValidationError("invalid desired outbound port")
+            if (
+                not isinstance(outbound.protocol, str)
+                or not isinstance(outbound.port, int)
+                or isinstance(outbound.port, bool)
+                or not 1 <= outbound.port <= 65535
+            ):
+                raise XrayValidationError("invalid desired outbound connection")
+            protocol = outbound.protocol.lower()
+            if protocol not in {"socks", "socks5"}:
+                raise XrayValidationError("unsupported desired outbound protocol")
+            credential = resolver.resolve(outbound.credential_secret_ref)
+            outbound_tag_set.add(outbound.tag)
+            rendered_outbounds.append(
+                {
+                    "tag": outbound.tag,
+                    "protocol": "socks",
+                    "settings": {
+                        "servers": [
+                            {
+                                "address": outbound.host,
+                                "port": outbound.port,
+                                "users": [
+                                    {
+                                        "username": credential.username,
+                                        "password": credential.password,
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                }
+            )
+
+        if any(
+            not isinstance(principal, str)
+            or not principal.strip()
+            or not isinstance(target, str)
+            or not target.strip()
+            or target == "BLOCK"
+            or target not in outbound_tag_set
+            for principal, target in desired.user_routes.items()
+        ):
+            raise XrayValidationError("desired route references missing outbound")
         rules: list[dict[str, object]] = [
             {"type": "field", "ip": ["geoip:private"], "outboundTag": "BLOCK"}
         ]
@@ -76,10 +135,7 @@ class XrayFileProvider:
         return CandidateConfig(
             content={
                 "routing": {"rules": rules},
-                "outbounds": [
-                    {"tag": tag, "protocol": "blackhole" if tag == "BLOCK" else "socks"}
-                    for tag in desired.outbound_tags
-                ],
+                "outbounds": rendered_outbounds,
             },
             version=datetime.now(UTC).strftime("%Y%m%d%H%M%S%f"),
         )
