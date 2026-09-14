@@ -136,6 +136,24 @@ Issue #87 / TASK-T23 restores the minimal design:
 Historical TASK-T19/T20/T21 documents explain the superseded complex
 design. TASK-T23 is the current workflow definition and safety boundary.
 
+**Issue #92 — legacy `arrickcherney-ops` identity audit (TASK-T24):** a
+full case-insensitive search of the working tree found **zero**
+references to `arrickcherney-ops` anywhere in workflows, config, docs,
+or code. `.github/workflows/claude.yml`'s job-level gate already checks
+`github.event.comment.user.login == 'wayne19870129'` only,
+`.github/CODEOWNERS` already lists only `@wayne19870129`, and this
+document's collaboration model (§3) already names only `wayne19870129`
+as the owner. The only remaining link to that identity is that GitHub
+recorded PR #91 as authored by it (a historical fact, not reproducible
+from any file here) and gated its `pull_request`-triggered checks behind
+maintainer approval — a repository/Actions **setting**, not a
+version-controlled value, and outside what a code PR can change. See
+`docs/82-tasks/TASK-T24-remove-legacy-identity-audit.md` for the full
+audit trail. Whether `arrickcherney-ops` still holds collaborator access
+on GitHub and whether to revoke it remains an open action for
+`wayne19870129` to take directly in GitHub Settings — Issue #92 stays
+open on that basis, no closing keyword was used in that PR.
+
 **This Issue (#74) is itself the first real post-merge live validation of
 the TASK-T21 configuration** (rolling `sonnet` + `medium` effort). Do not
 change that configuration as part of unrelated work; if this run's own
