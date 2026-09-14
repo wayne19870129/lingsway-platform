@@ -11,6 +11,7 @@ permissions:
   issues: write
   # Required by Claude Code Action's standard GitHub App authentication.
   id-token: write
+  actions: read
 
 jobs:
   claude:
@@ -18,13 +19,64 @@ jobs:
       github.event.comment.user.login == 'wayne19870129' &&
       contains(github.event.comment.body, '@claude')
     runs-on: ubuntu-latest
+    outputs:
+      branch: ${{ steps.claude.outputs.branch_name }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+      - name: Install verification dependencies from trusted default-branch checkout
+        run: |
+          python -m pip install -e '.[dev]'
+          npm ci --prefix frontend
 
       - name: Run Claude Code
+        id: claude
         uses: anthropics/claude-code-action@0a8d3c9443bbff909ab973b6a17a340b913f229f # v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          additional_permissions: |
+            actions: read
           claude_args: |
-            --append-system-prompt "Create or update a pull request for the requested changes. Never merge or approve pull requests, close issues, delete branches, or trigger deployments. A human must review and merge the pull request."
+            --max-turns 30
+            --allowedTools "Bash(pytest:*),Bash(python -m pytest:*),Bash(python3 -m pytest:*),Bash(ruff check:*),Bash(python -m ruff check:*),Bash(python3 -m ruff check:*),Bash(mypy:*),Bash(python -m mypy:*),Bash(python3 -m mypy:*),Bash(make test-unit),Bash(make lint),Bash(npm --prefix frontend run lint),Bash(npm --prefix frontend run typecheck),Bash(npm --prefix frontend run build),Bash(cd frontend),Bash(npm run lint),Bash(npm run typecheck),Bash(npm run build)"
+            --disallowedTools "Bash(gh:*),Bash(curl:*),Bash(ssh:*),Bash(git push:*),Bash(git reset:*),Bash(git branch:*),Bash(git clean:*)"
+            --append-system-prompt "Implement and verify the request, then commit and push using the Action's git push tool. Use make test-unit, pytest backend/tests/unit backend/tests/guards, make lint, or npm --prefix frontend run lint/typecheck/build as separate commands. Dependencies are preinstalled. Do not retry denied commands; report the exact missing permission. For Issue runs a separate job creates the PR after success; do not create it yourself. Include an implementation and actual verification summary in your final comment. Never merge or approve PRs, close issues, delete branches, or deploy. Human review and merge are mandatory."
+
+  create-pr:
+    needs: claude
+    if: >-
+      github.event.comment.user.login == 'wayne19870129' &&
+      contains(github.event.comment.body, '@claude') &&
+      !github.event.issue.pull_request && needs.claude.outputs.branch != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    # Only serialize the small check/create transaction, not Claude's turns.
+    concurrency:
+      group: claude-pr-${{ github.repository }}-${{ github.event.issue.number }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          CLAUDE_BRANCH: ${{ needs.claude.outputs.branch }}
+          PR_TOKEN_CONFIGURED: ${{ secrets.CLAUDE_PR_TOKEN != '' }}
+        with:
+          github-token: ${{ secrets.CLAUDE_PR_TOKEN }}
+          script: |
+            if (process.env.PR_TOKEN_CONFIGURED !== 'true') {
+              throw new Error('Configure CLAUDE_PR_TOKEN as documented in TASK-T24; no GITHUB_TOKEN fallback.');
+            }
+            await require('./scripts/claude-create-pr.cjs')({github, context, core, branch: process.env.CLAUDE_BRANCH});

@@ -49,6 +49,8 @@ jobs:
       - run: npm ci
         working-directory: frontend
       - run: make lint
+      - name: Test Claude PR creation decisions
+        run: node --test scripts/tests/claude-create-pr.test.cjs
 
   shellcheck:
     runs-on: ubuntu-latest

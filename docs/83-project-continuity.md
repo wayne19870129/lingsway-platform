@@ -60,9 +60,9 @@ from anything a prior conversation "remembers."
   tests/lint/build, creates branches, commits, and pushes; reads and
   judges review feedback and pushes fixes. Never merges, never deploys,
   never closes another party's PR/Issue. On the Issue-first background
-  path (section 5), the standard Claude Code Action handles the branch
-  and PR workflow. Normal `pull_request` events then run CI; no custom
-  PR-creation or workflow-dispatch helper sits between Claude and CI.
+  path (section 5), the standard Claude Code Action pushes the branch.
+  TASK-T24 adds a small isolated PAT-backed PR-creation job; normal
+  `pull_request` events then run CI.
 - **ChatGPT / ChatGPT Work**: requirements/acceptance-criteria
   orchestration and independent review of a PR at an exact commit SHA.
   Work is an **event-triggered reviewer**, not a continuous background
@@ -108,7 +108,7 @@ from anything a prior conversation "remembers."
 
 ## 5. Background Claude Code automation baseline
 
-Issue #87 / TASK-T23 restores the minimal design:
+TASK-T24 completes the minimal design after PR #88's live test:
 
 - Only newly-created Issue comments are observed.
 - Only `wayne19870129` can start a run, and the comment must contain
@@ -117,24 +117,27 @@ Issue #87 / TASK-T23 restores the minimal design:
 - The workflow grants repository contents, pull requests, and issues
   write access, plus the OIDC permission required by the standard Claude
   Code GitHub App authentication path.
-- `CLAUDE_CODE_OAUTH_TOKEN` is the only repository secret used.
-- Claude Code Action owns its normal branch and PR flow. CI, Security,
-  and Risk classification respond to the resulting PR normally.
+- Claude uses `CLAUDE_CODE_OAUTH_TOKEN` and standard OIDC authentication.
+- A separate trusted runner uses `CLAUDE_PR_TOKEN` only to compare/list/
+  create a PR after successful Issue implementation. Same-Issue creation
+  jobs serialize without cancelling the running job; existing PRs or
+  no diff mean no new PR. No workflow dispatch is involved.
+- Scoped verification tools, preinstalled dependencies, Actions read
+  permissions and a 30-turn limit replace the previous unbounded run.
 - There is no custom App token, manual workflow dispatch, dedup job,
   completion marker, recovery job, automatic approval, automatic merge,
   automatic close, or deployment step.
-- **Known regression, unresolved as of PR #88 round 2:** the
-  actor-scoped `concurrency:` block (`claude-<number>-<actor>`,
-  `cancel-in-progress: true`) is currently **missing** from the live
-  `.github/workflows/claude.yml`, verified directly against that file's
-  current content. Independent review already confirmed this reopens a
-  TOCTOU duplicate-PR race for two concurrent Issue-first owner triggers
-  (see `docs/82-tasks/TASK-T23-simplify-claude-workflow.md` "KNOWN
-  DRIFT"). This session cannot edit `.github/workflows/`, so
-  `wayne19870129` needs to add that block back manually.
+- The earlier request to restore workflow-wide cancellation is superseded
+  by the small serialized creation job in TASK-T24. No manual concurrency
+  patch or old helper framework should be restored.
 
 Historical TASK-T19/T20/T21 documents explain the superseded complex
-design. TASK-T23 is the current workflow definition and safety boundary.
+design. TASK-T24 is the current workflow definition and setup guide.
+Run 34792595873 (Issue #89) disproved the earlier claim that the standard
+Action creates PRs: it pushed a branch and only supplied a Create PR link,
+with 84 turns and 15 permission denials. New PAT setup and post-merge live
+acceptance remain required; green CI on this repair PR does not prove
+that the Issue-to-PR flow has been exercised.
 
 **This Issue (#74) is itself the first real post-merge live validation of
 the TASK-T21 configuration** (rolling `sonnet` + `medium` effort). Do not
