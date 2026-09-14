@@ -7,9 +7,10 @@ module.exports = async function createClaudePR({ github, context, core, branch }
   if (!branch.startsWith(prefix) || !/^[A-Za-z0-9/_-]+$/.test(branch)) {
     throw new Error('Unexpected Claude branch for this Issue');
   }
+  const fullRepo = `${owner}/${repo}`.toLowerCase();
+  const isOwnHead = (pr) => pr.head.repo?.full_name?.toLowerCase() === fullRepo;
   const sameIssue = (pr) => {
-    const ownBranch = pr.head.repo?.full_name?.toLowerCase() === `${owner}/${repo}`.toLowerCase();
-    return (ownBranch && pr.head.ref.startsWith(prefix)) ||
+    return (isOwnHead(pr) && pr.head.ref.startsWith(prefix)) ||
       new RegExp(`(?:^|[^A-Za-z0-9_/])#${issue.number}(?![0-9])`).test(pr.body || '') ||
       (pr.body || '').split(issue.html_url).slice(1).some((tail) => !/^[0-9]/.test(tail));
   };
@@ -18,16 +19,11 @@ module.exports = async function createClaudePR({ github, context, core, branch }
     owner, repo, head: `${owner}:${branch}`, state: 'all', per_page: 100,
   });
   if (headPRs.length) return core.info(`Head already has PR #${headPRs[0].number}`);
-  const openPRs = await github.paginate(github.rest.pulls.list, {
-    owner, repo, state: 'open', per_page: 100,
-  });
-  const existing = openPRs.find(sameIssue);
-  if (existing) return core.info(`Issue already has PR #${existing.number}`);
 
   let diff;
   try {
     ({ data: diff } = await github.rest.repos.compareCommitsWithBasehead({
-      owner, repo, basehead: `main...${branch}`, per_page: 1,
+      owner, repo, basehead: `main...${branch}`, per_page: 100,
     }));
   } catch (error) {
     // Question-only tag runs can report a local branch that was never pushed.
@@ -37,16 +33,65 @@ module.exports = async function createClaudePR({ github, context, core, branch }
   if (diff.ahead_by < 1 || !diff.files?.length) {
     return core.info('No changes ahead of main; no PR created');
   }
+
+  const openPRs = await github.paginate(github.rest.pulls.list, {
+    owner, repo, state: 'open', per_page: 100,
+  });
+  const existing = openPRs.find(sameIssue);
+  // Sanitized, data-only summary: no shell evaluation of Issue/commit text.
+  const summary = [
+    'Commits from this Issue run:',
+    ...(diff.commits || []).slice(-20).map((c) =>
+      `- ${c.commit.message.split('\n')[0].replace(/[\r\n]/g, ' ').slice(0, 200)}`),
+    '', 'Files touched:',
+    ...diff.files.slice(0, 50).map((f) => `- \`${f.filename}\``),
+  ].join('\n');
+
+  if (existing) {
+    if (existing.head.ref === branch) {
+      return core.info(`PR #${existing.number} already tracks ${branch}`);
+    }
+    // Same-Issue follow-up work must reach the existing PR, not a second one.
+    // Consolidate by merging the new branch into the existing PR's own-repo
+    // head; a fork head or a merge conflict falls back to recording a
+    // pointer so the later implementation is never silently lost.
+    if (isOwnHead(existing)) {
+      try {
+        await github.rest.repos.merge({
+          owner, repo, base: existing.head.ref, head: branch,
+          commit_message: `Merge ${branch} into ${existing.head.ref} for Issue #${issue.number}`,
+        });
+        return core.info(`Merged ${branch} into existing PR #${existing.number}`);
+      } catch (error) {
+        if (error.status !== 409 && error.status !== 404) throw error;
+        core.warning(`Could not auto-merge ${branch} into PR #${existing.number} (${error.status})`);
+      }
+    }
+    const marker = `<!-- claude-pending-branch:${branch} -->`;
+    if ((existing.body || '').includes(marker)) {
+      return core.info(`PR #${existing.number} already references pending branch ${branch}`);
+    }
+    await github.rest.pulls.update({
+      owner, repo, pull_number: existing.number,
+      body: [existing.body || '', marker,
+        `Additional Issue #${issue.number} work was pushed to \`${branch}\` and could not be merged ` +
+        'into this PR automatically (cross-repository head or a merge conflict). ' +
+        'It is not lost: a maintainer must merge or rebase it into this PR manually.',
+        summary].join('\n\n'),
+    });
+    return core.info(`Recorded pending branch ${branch} on existing PR #${existing.number}`);
+  }
+
   const runURL = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
   // Fixed template and API JSON fields: no shell evaluation of Issue/commit text.
   await github.rest.pulls.create({
     owner, repo, base: 'main', head: branch,
     title: `Issue #${issue.number}: ${issue.title}`.replace(/[\r\n]/g, ' ').slice(0, 240),
     body: [
-      '## Summary', `Implementation for ${issue.html_url}.`,
-      'See the diff and Claude response on the Issue for the implementation details.',
+      '## Summary', `Implementation for ${issue.html_url}.`, summary,
+      'See the Claude response on the Issue for the full implementation rationale.',
       '## Verification', `Claude execution: ${runURL}.`,
-      'See the Claude response for commands and results; a successful run alone does not prove tests passed.',
+      'See the Claude response for the exact commands run and their results; a successful run alone does not prove tests passed.',
       'Normal PR CI/Security/Risk checks must pass before human review and merge.',
       '## Existing-customer impact', 'Review the diff and Issue acceptance criteria before merging.',
       '## Rollback plan', 'If merged, revert through a separately reviewed PR.',
