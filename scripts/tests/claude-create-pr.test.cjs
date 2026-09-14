@@ -55,6 +55,18 @@ test('API failures fail closed instead of creating', async () => {
   const f = fixture(); f.github.paginate = async () => { throw new Error('403'); };
   await assert.rejects(createPR(f), /403/); assert.equal(f.calls.length, 0);
 });
+test('local branch never pushed creates no PR', async () => {
+  const f = fixture(); f.github.rest.repos.compareCommitsWithBasehead = async () => {
+    throw Object.assign(new Error('Not Found'), { status: 404 });
+  };
+  await createPR(f); assert.equal(f.calls.length, 0);
+});
+test('comparison authorization failure is not treated as empty branch', async () => {
+  const f = fixture(); f.github.rest.repos.compareCommitsWithBasehead = async () => {
+    throw Object.assign(new Error('Forbidden'), { status: 403 });
+  };
+  await assert.rejects(createPR(f), /Forbidden/); assert.equal(f.calls.length, 0);
+});
 test('serialized second Issue branch observes the first PR', async () => {
   const f = fixture(); await createPR(f);
   const next = fixture({ open: [{ number: 91, head: { ref: f.branch,

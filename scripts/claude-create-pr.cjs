@@ -24,9 +24,16 @@ module.exports = async function createClaudePR({ github, context, core, branch }
   const existing = openPRs.find(sameIssue);
   if (existing) return core.info(`Issue already has PR #${existing.number}`);
 
-  const { data: diff } = await github.rest.repos.compareCommitsWithBasehead({
-    owner, repo, basehead: `main...${branch}`, per_page: 1,
-  });
+  let diff;
+  try {
+    ({ data: diff } = await github.rest.repos.compareCommitsWithBasehead({
+      owner, repo, basehead: `main...${branch}`, per_page: 1,
+    }));
+  } catch (error) {
+    // Question-only tag runs can report a local branch that was never pushed.
+    if (error.status === 404) return core.info('No remotely comparable branch; no PR created');
+    throw error;
+  }
   if (diff.ahead_by < 1 || !diff.files?.length) {
     return core.info('No changes ahead of main; no PR created');
   }
