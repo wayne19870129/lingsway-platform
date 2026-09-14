@@ -76,8 +76,10 @@ class XrayOutboundDTO:
 - `credential_secret_ref` 是经过 precedence 选择的 opaque secret handle，
   不是 secret plaintext。
 - DTO 不包含 plaintext username、plaintext password，也不包含
-  `CredentialDTO`。它可以安全地在 DB desired snapshot、domain/provider
-  contract、审计摘要和测试 fixture 中流转。
+  `CredentialDTO`。它可以在 DB desired snapshot、domain/provider contract
+  和测试 fixture 中流转；这不授权把 raw `credential_secret_ref` 写入普通
+  logs、exceptions、metrics 或 audit serialization。需要安全审计关联时，
+  只记录不可逆 fingerprint 与非 secret entity identifier。
 - `DesiredRoutingState` 应以 `outbounds: tuple[XrayOutboundDTO, ...]`
   替换 `outbound_tags`。本仓库的 Xray registry 仍未激活，因此不保留长期
   compatibility 字段；remain-1B 应一次性迁移内部调用方与测试。
@@ -109,12 +111,42 @@ class XrayOutboundDTO:
    保留旧客户。新增订阅的 provisioning 只负责提交其 DB 状态；随后用于
    rendering 的输入必须重新构造完整 snapshot，从而不会因只传入新客户而删除
    其它 active 客户。
-5. 明确 snapshot 与 DB transaction 的顺序：所有影响 active route 的 DB
-   mutation 必须在可被查询的提交/一致性边界之后，才允许执行该 snapshot 的
-   render/apply；若处于 pending/未提交状态，不得假装是完整 desired state。
+5. 明确 snapshot 与 DB transaction 的顺序，并保持 ADR-017 的既有事务边界：
+   `GET_LOCK`
+   → `GatewayRouteBinding` mutate/flush
+   → construct fresh full desired snapshot
+   → resolve credentials
+   → render
+   → validate
+   → apply
+   → `db.commit()` 或 `db.rollback()`
+   → `RELEASE_LOCK`。render/apply 前不得为了制造 snapshot 而提前 commit；
+   snapshot 可以包含当前 transaction 自己已经 flush 但尚未 commit 的 route/
+   credential mutation。
 
-本 ADR 不决定具体 JOIN、索引或 transaction 实现；这些是 remain-3 的 acceptance
-requirement，不是实现 PR 临场可变更的契约。
+   “同一个 Session 再普通 SELECT 一遍”不是 freshness contract。生产 MySQL 8.4
+   的 InnoDB 默认是 `REPEATABLE READ`；Phase A 较早的普通 consistent read
+   可能已经建立旧 read view，使后续普通 SELECT 看不到另一个 writer 在本操作
+   等待 named lock 期间已经 commit 的 route。remain-3 必须让 full-snapshot
+   查询使用 MySQL current/latest-committed read semantics，即采用
+   `SELECT ... FOR UPDATE` 的 locking-read 语义或 SQLAlchemy 中明确等价的
+   current-read 形式，且在与 route mutation 相同的 Session/transaction 中执行。
+   该 current read 必须同时可见当前 transaction 自己的 flushed/uncommitted
+   writes；精确 JOIN、`with_for_update()` 作用范围和索引留给 remain-3，
+   但 correctness semantics 在本 ADR 中已经固定。
+
+   named lock 仍是 `GatewayRouteBinding` writer serialization mechanism；
+   current/locking read 只解决 freshness，不替代 ADR-016/017 的 named-lock
+   写者串行化，也不得擅自全局修改 isolation level。典型 A/B 交错中，A 在
+   Phase A 建立旧 snapshot，B 在 named lock 内完成并 commit route 后释放锁，
+   A 获锁后执行上述 fresh current read，最终 snapshot 必须同时包含 B 已提交
+   的 route 与 A 自己的 pending route。若 current read、preflight、resolve
+   或 render 任一步失败，必须在同一 lock span 内 fail closed 并 rollback，
+   然后才 release lock。
+
+本 ADR 不决定具体 JOIN、索引或 transaction 代码；这些是 remain-3 的实现细节，
+但不得削弱这里规定的 current-read、own-write visibility、lock-span 或
+no-pre-apply-commit correctness contract。
 
 ### 3. Credential resolver boundary
 
@@ -131,16 +163,40 @@ class CredentialResolver(Protocol):
 - `SqlAlchemyCredentialResolver`（名称可在实现时调整）属于
   `backend/app/infra/`。它是唯一允许直接持有 SQLAlchemy `Session`、ORM
   `Secret` model 并调用 `reveal_secret()` 的适配器。
-- Session 由当前 application/provisioning operation 持有。resolver 的实例
-  必须不超过该 Session 的生命周期；不能把 request/session-bound resolver
-  放进 process-lifetime registry。
-- `XrayFileProvider` 通过构造注入或 operation-scoped binding 获得
-  `CredentialResolver`，只依赖 Protocol；它不能 import
-  `sqlalchemy.orm.Session` 或 ORM models。
+- application boundary 创建 `SqlAlchemyCredentialResolver(db)`，其中
+  `db` 必须是当前 provisioning operation 同时传给
+  `SqlAlchemyProvisioningState`（或其 `_OrderProvisioningState` 包装层）的
+  同一个 SQLAlchemy Session。它只创建一次、只服务这一 operation，并由
+  application/session owner 随 Session 一起结束；`build_services()` 不创建
+  resolver，也不接受 factory 或 fallback。
+- `build_services(..., credential_resolver: CredentialResolver)` 将这个必需的
+  operation dependency 传给 `ProvisioningService`；`ProvisioningService`
+  只在 operation 生命周期内持有它，并在
+  `provision_apply_gateway()` 中调用
+  `self.gateway.render(desired_routing, self.credential_resolver)`。
+  application-level `provision()` 与 `confirm_payment_and_provision()` 也必须
+  要求并透传该 resolver。domain 不执行解密，只传递 provider contract capability。
+- `GatewayProvider` 的最终签名固定为
+  `render(desired: DesiredRoutingState, resolver: CredentialResolver) ->
+  CandidateConfig`。`XrayFileProvider` 不在构造函数或实例字段中保存 resolver；
+  它仅从 render 参数使用 operation-scoped resolver，然后把得到的 transient
+  `CredentialDTO` 交给纯 renderer。
+- `ProviderRegistry.gateway` 继续是 process/application-lifetime 的
+  stateless provider owner；registry 不持有 resolver，`XrayFileProvider`
+  也不持有 Session、ORM 或 resolver state。这样 process-lifetime registry
+  与 operation-lifetime secret/session 生命周期不会冲突。
+- 直接构造 `ProvisioningService` 的单元/集成测试必须传入 fake
+  `CredentialResolver`；`build_services()` 的 wiring test 也必须显式传入
+  fake。没有 implicit resolver、全局 singleton 或测试专用旁路。
+- `SqlAlchemyCredentialResolver` 是 `backend/app/infra/` 的唯一实现，
+  持有同一个 Session，仅在这里调用 `reveal_secret()`。此前
+  `save_credentials()` 已在该 Session 上 flush；因此本 operation 刚写入的
+  Secret row 对 resolver 可见，不需要提前 commit。current read 同样必须保留
+  当前 transaction 自己的 writes。
 - 纯 Xray renderer 只接收已解析的 transient credential/route value；它不能
   看到 Session。带 Session 的脚本入口只能是 orchestration/infra 层，必须在
   调用纯 renderer 前完成查询和 resolver 组装。
-- domain 层不解密、不解析 secret JSON、不持有 `CredentialDTO`；它只组织
+- domain 层不解密、不解析 secret JSON、不保存 `CredentialDTO`；它只组织
   route identity、state contract 和 provisioning outcome。
 - resolver 不允许缓存 plaintext。每次 render/apply operation 按需 resolve，
   operation 结束即释放所有 resolver/credential 引用；如未来必须缓存，必须
@@ -257,7 +313,7 @@ active EgressEndpoint.credential_secret_ref
 | Domain | provisioning orchestration, route identity contract, full-snapshot request boundary, fail-closed outcome mapping | SQLAlchemy, Secret decryption, raw credential JSON |
 | Provider base DTO/contracts | `DesiredRoutingState`, `XrayOutboundDTO`, `CredentialDTO`, `CredentialResolver`, stable cross-layer error contract | ORM queries, Session lifecycle |
 | Infra adapter | DB joins, Session-scoped resolver, encrypted Secret access, ref precedence materialization | Xray reload policy, business route decisions |
-| Gateway provider | consume desired snapshot, invoke injected resolver, render/validate/apply through safe runtime boundary | Session/ORM imports, DB queries, secret logging |
+| Gateway provider | consume desired snapshot; receive the operation-scoped resolver only as the render argument; render/validate/apply through safe runtime boundary | Session/ORM imports, DB queries, resolver fields, secret logging |
 | Pure Xray renderer | deterministic config transformation from resolved transient inputs; fixed BLOCK invariant | Session, DB, `reveal_secret()`, live fallback, logging plaintext |
 | Runtime/deployment layer | restricted file install/backup/reload and artifact permissions | changing DB desired state or silently repairing missing data |
 
@@ -314,6 +370,9 @@ The future implementation must add offline deterministic tests for:
 
 - DTO contains refs and connection details but never plaintext.
 - full snapshot includes all active bindings and rejects partial/orphan/duplicate state.
+- a real MySQL 8.4 concurrency test covers the A/B interleaving and proves the
+  fresh snapshot contains B's committed route plus A's own pending route; it also
+  proves no pre-apply commit is used.
 - resolver success, missing ref, decrypt failure, invalid JSON, wrong top-level type,
   unknown keys, missing fields, blank fields and non-string fields.
 - resolver/provider boundary proves no Session or ORM import in gateway provider/renderer.
@@ -328,7 +387,10 @@ The future implementation must add offline deterministic tests for:
 1. Do not begin remain-1B until this ADR is independently reviewed and manually merged.
 2. Implement DTO changes in provider contracts first, then adapt all callers/tests in
    one coherent PR; do not leave two competing outbound representations.
-3. Keep `CredentialResolver` operation-scoped and inject it without exposing Session.
+3. Fix the operation API exactly as `GatewayProvider.render(desired, resolver)`;
+   create the resolver at the application boundary from the same Session used by
+   provisioning state, pass it through required `build_services()` /
+   `ProvisioningService` dependencies, and never store it in the registry/provider.
 4. Translate current `SecretStoreError`/JSON parser failures at the infra boundary into
    redacted stable `CredentialResolutionError` codes.
 5. Implement full-snapshot query/preflight before any Xray render/apply path can be
@@ -337,8 +399,10 @@ The future implementation must add offline deterministic tests for:
    refactor requirement; do not bypass this ADR by passing a Session into providers.
 7. Keep Phase 2C and `GATEWAY_PROVIDER=xray_file` registry wiring paused until Phase
    2B is complete and independently reviewed.
-8. Do not change production deployment, credentials, workflows, #97 or #98 in the
-   remain-1A/1B work unless a later task explicitly authorizes it.
+8. Historical Issue #97 and PR #98 are closed artifacts; PR #98 was never merged.
+   Do not reopen or modify them in remain-1A/1B. Do not change production
+   deployment, credentials, workflows, or other historical tracking artifacts
+   unless a later task explicitly authorizes it.
 
 ## Re-evaluation conditions
 
