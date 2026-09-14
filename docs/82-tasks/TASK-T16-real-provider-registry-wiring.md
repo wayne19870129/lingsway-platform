@@ -2203,3 +2203,69 @@ ADR/TASK/repository context 已经确定 exact path/config boundary，应
 **仍未完成**：与 round 1 完全一致，未扩大 scope——本轮只收敛了
 config/backup path 的 canonical source，没有触碰 domain/base、其它
 provider、workflow、AGENTS.md。
+
+### Round 3（ChatGPT 独立审查，PR #98，架构 blocker，**PR 已暂停，
+不再推送代码**）
+
+**Major 1（`XrayFileProvider` 在其 ADR-014 记录的 render() 完整性缺口
+被补上之前就被 `build_registry()` 暴露为可选值）**：独立验证后确认
+**VALID**，且是一个架构顺序冲突，不是可以在这个 PR 里顺手修掉的
+review comment。证据：
+
+- `ADR-014-xray-desired-state-ownership.md`（"事实一"，第 78-86 行）
+  明确记录：`XrayFileProvider.render()` 目前只产出
+  `{"tag": tag, "protocol": "blackhole"|"socks"}`，没有
+  `settings.servers`/host/port/凭据，也没有 `inbounds`；"TASK-T16
+  后续任何'接入 XrayFileProvider'的工作，事实上需要先把
+  `render_xray_routes.py` 里已经验证过的数据流程...迁移或复用到
+  provider 抽象层，而不是从零设计"。
+- 本文档自己在"Phase 2C（本阶段不讨论细节，只记录顺序）"一节
+  （第 558-560 行）明确写着：**"只有 Phase 2B 完成并独立审查通过之后，
+  才讨论显式 opt-in 的 Xray registry wiring。2A/2B/2C 不合并成一个
+  阶段。"**
+- 核实 Phase 2B2 ~ 2B8 的实际实现范围（见上文"Phase 2B 实现进度"
+  一节）：2B2 是 `apply()` 异常兜底，2B3 是命名锁，2B4/2B6/2B7 是
+  Marzban accounting adapter/route identity 数据流，2B8 是
+  `ProviderRegistry` lifecycle/close()——**没有一个触碰
+  `DesiredRoutingState`/`XrayFileProvider.render()` 本身**。2B3 自己
+  的状态记录写得很清楚："仍未开始：...**DTO/编排改动**...均为后续
+  独立 PR。"
+
+也就是说，本文档自己设定的 Phase 2C 前置门槛（Phase 2B 完成）从未被
+满足，PR #98 却已经让 `GATEWAY_PROVIDER=xray_file` 成为
+`build_registry()` 的合法取值。这正是 Issue #97 自己文本里预先设好
+的场景："如果发现必须修改 `backend/app/domain/**` 或
+`backend/app/providers/base.py` 才能完成，停止实施并报告架构
+blocker，不要自行扩大范围"——补完 `render()` 的 outbound 连接细节
+必须扩展 `backend/app/providers/base.py` 的 `DesiredRoutingState`，
+正是这个条款描述的情形。
+
+**处理方式**：没有在 PR #98 里自动展开 Phase 2B 的实现（那会违反
+Issue #97"不要自行扩大范围"的明确要求，也会绕过"ADR 已经排定的顺序
+不能被一个 Issue 悄悄覆盖"这条规则）。已把这个发现和两个选项摆到
+仓库所有者面前决定：
+
+1. 暂停 PR #98，不在这个 PR 里实现 Phase 2B——留到专门的后续任务，
+   按原计划顺序（Phase 2B 完成 → 独立审查通过 → 才讨论 Phase 2C）
+   推进。
+2. 修改 TASK-T16 的排期，显式记录一个例外：只做 registry-only 的
+   opt-in（默认仍是 mock，不产生真实 IO）可以先于完整 Phase 2B 落地，
+   并把 render() 的不完整性记录成一个"生产环境不得启用"的已知限制。
+
+**所有者已决定：选项 1——暂停 PR #98，不在这个 PR 里实现 Phase 2B。**
+PR #98 保持 open、不 merge、不再推送新 commit；Issue #97 保持 open，
+本 blocker 记录在此，作为下一次拿起这个方向时的起点。真正的下一步是
+一个独立的、专门解决 Phase 2B render()/DTO 完整性（`DesiredRoutingState`
+扩展 + `render()` 产出完整 outbound + inbounds 归属问题）的新任务，
+完成并独立审查通过之后，再回到"Xray registry wiring"这个方向——
+和本文档"Phase 2C"一节原本设定的顺序一致，没有被这次 Issue #97 悄悄
+绕过。
+
+### 本阶段（2C1）最终状态
+
+**PR #98 暂停，未 merge。** 上面"本阶段（2C1）验收"一节列出的技术
+验收项（默认行为不变、显式 opt-in 构造零 IO、未知取值 fail closed、
+其它 provider 未受影响、`ProviderRegistry`/九步安全重载契约未改动）
+在代码层面全部成立且有测试覆盖，但**这些验收标准本身不足以满足本文档
+自己"Phase 2B 完成之后才能讨论 Phase 2C"的排期门槛**——round 3 的
+发现和上面记录的所有者决定优先于本阶段更早版本的"下一步"结论。

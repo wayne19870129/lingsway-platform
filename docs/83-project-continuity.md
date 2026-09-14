@@ -331,22 +331,19 @@ provider-pluggable architecture behind explicit boundaries
 `ARCHITECTURE.md` and `README.md` for the full picture — not repeated
 here.
 
-- **ProviderRegistry is mock/noop-only for 9 of its 10 provider
-  categories — updated after TASK-T16 Phase 2C1 (Issue #97, pending
-  merge), verified directly against `backend/app/providers/registry.py`.**
-  `build_registry()` still raises `_unsupported(...)` for any
+- **ProviderRegistry is mock/noop-only for all 10 provider categories on
+  `main` today — MERGED fact, unaffected by the still-unmerged, now
+  paused PR #98.** `build_registry()` raises `_unsupported(...)` for any
   non-`mock`/`noop` value of `egress_provider`, `accounting_provider`,
-  `forwarder_provider`, `payment_provider`, `notify_provider`,
-  `email_provider`, `captcha_provider`, `storage_provider`, and
-  `transport_provider_mode`. **`gateway_provider` is the one exception**:
-  `"mock"` (default, unchanged) and `"xray_file"` (new explicit opt-in)
-  are both accepted; any other value still fails closed the same way.
-  No other real provider (Webshare, Mihomo, Marzban) is imported or
-  wired into the registry — real-provider wiring for those remains
-  **PLANNED**, not started. Do not assume any live accounting/egress
-  selection works today, and do not assume Xray is live-selectable in
-  any actual deployment just because the registry can now construct it
-  when explicitly configured to.
+  `gateway_provider`, `forwarder_provider`, `payment_provider`,
+  `notify_provider`, `email_provider`, `captcha_provider`,
+  `storage_provider`, and `transport_provider_mode`. **PR #98 (TASK-T16
+  Phase 2C1 / Issue #97) would have added `gateway_provider="xray_file"`
+  as a second accepted value, but is now paused, not merged, pending a
+  separate prerequisite task** — see below and TASK-T16's "Round 3"
+  section. No real provider (Webshare, Xray, Mihomo, Marzban) is
+  imported or wired into the registry on `main`. Do not assume any live
+  accounting/egress/gateway selection works today.
 - Real provider implementations exist in partial form
   (`backend/app/providers/egress/webshare.py`,
   `backend/app/providers/gateway/xray_file.py`,
@@ -451,44 +448,51 @@ decays quickly.
   `GITHUB_TOKEN`, even when the same-SHA `workflow_dispatch` CI/Security/
   Risk trio is green — see section 5's correction. The zero-manual-
   approval acceptance criterion is not yet satisfied.
-- **TASK-T16 Phase 2C1 (Issue #97) is implemented, pending human
-  review/merge — `build_registry()` is no longer mock-gateway-only.**
-  `GATEWAY_PROVIDER=xray_file` now selects a real `XrayFileProvider`
-  backed by a `LocalXrayRuntime` constructed from 5 new `Settings`
-  fields (`xray_runtime_config_path`/`xray_backup_dir`/`xray_binary_path`/
-  `xray_asset_dir`/`xray_reload_command`); construction performs no
-  filesystem/network/subprocess/socket/reload IO (verified by a
-  monkeypatch-based regression test). Default `Settings()` /
-  `GATEWAY_PROVIDER=mock` is unchanged; no deployment default was
-  switched. Unknown gateway values still fail closed. Every other
-  provider category (egress/accounting/forwarder/payment/notify/email/
-  captcha/storage/transport) is untouched — still exactly the
-  mock/noop-only state described below. **Round 2 fix (PR #98 review):**
-  `xray_runtime_config_path`'s env var name and default
-  (`XRAY_RUNTIME_CONFIG_PATH` / `/app/data/marzban/xray_config.json`)
-  were made identical to `ops/gateway/render_xray_routes.py`'s own
-  canonical `OUTPUT_CONFIG` setting after independent review found
-  round 1's original `xray_config_path`/`/etc/lingsway/xray_config.json`
-  was a second, disconnected path an opted-in `XrayFileProvider` would
-  have operated on instead of the file the renderer/Marzban container
-  topology actually share — see TASK-T16's "阶段二 C1" section (including
-  its "Round 2" subsection) for full detail. **This is registry wiring
-  only, not production activation**: no server's real `GATEWAY_PROVIDER` has been
-  changed, and the Phase 2B-scope orchestration/DTO/renderer work that
-  Decision 3 (ADR-016, now `SELECTED`) unblocked is still a separate,
-  unimplemented next step before Xray is actually production-usable
-  end-to-end.
-- **Actual next technical frontier after Phase 2C1 merges**: either a
-  further Phase 2C slice (e.g. wiring another already-implemented real
-  provider the same explicit-opt-in way) or resuming the Phase 2B
-  implementation work that ADR-016's Decision 3 unblock made possible
-  (real Marzban accounting adapter, `AccountUserDTO`/orchestration data
-  flow, `routing_principal` reconciliation tool — see this document's
-  Phase 2B implementation matrix pointer above). `build_registry()`'s
-  other 9 provider categories remain mock/noop-only (verified directly
-  against `registry.py`, section 6). Do not assume any provider besides
-  the Xray gateway (and even that only when explicitly opted in) is
-  live-selectable regardless of environment variables.
+- **TASK-T16 Phase 2C1 (Issue #97 / PR #98) is implemented but PAUSED,
+  not merged — a genuine architecture-sequencing conflict was found and
+  the repository owner chose not to proceed with this PR.**
+  `build_registry()` on `main` is still exactly as described above
+  (all 10 categories mock/noop-only). PR #98 would have added
+  `GATEWAY_PROVIDER=xray_file` as an explicit opt-in, constructing a
+  real `XrayFileProvider`/`LocalXrayRuntime` from 5 new `Settings`
+  fields with zero filesystem/network/subprocess/socket/reload IO
+  during construction (verified by tests), and a round-2 fix converged
+  its runtime config path onto `ops/gateway/render_xray_routes.py`'s own
+  canonical `XRAY_RUNTIME_CONFIG_PATH`/`OUTPUT_CONFIG` setting after an
+  independent review caught the original PR inventing a second,
+  disconnected path. **A round-3 independent review then found a more
+  fundamental blocker, verified directly against the ADR/TASK text**:
+  `ADR-014-xray-desired-state-ownership.md` documents that
+  `XrayFileProvider.render()` is still functionally behind
+  `ops/gateway/render_xray_routes.py` (no `settings.servers`/host/port/
+  credentials, no `inbounds`), and TASK-T16's own document explicitly
+  states "只有 Phase 2B 完成并独立审查通过之后，才讨论显式 opt-in 的
+  Xray registry wiring" (Phase 2C should only be discussed once Phase 2B
+  — the `DesiredRoutingState`/`render()` completeness work — is done).
+  Phase 2B2 through 2B8 (Marzban accounting adapter, lock-span
+  narrowing, `ProviderRegistry` lifecycle/close()) never did that DTO/
+  render work; Phase 2B3's own status note says plainly it "仍未开始".
+  Making `render()` produce real outbound connection details would
+  require expanding `DesiredRoutingState` in
+  `backend/app/providers/base.py` — exactly the case Issue #97's own
+  text says to stop and report as a blocker for, rather than silently
+  implement. **The repository owner's decision (recorded here and in
+  TASK-T16's "Round 3" section): pause PR #98 as-is (open, unmerged, no
+  further commits), do not implement Phase 2B inside it.** Issue #97
+  stays open with this blocker as its recorded state.
+- **Actual next technical frontier**: a new, separate task to complete
+  Phase 2B's render()/DTO work (expand `DesiredRoutingState` to carry
+  real outbound connection details, resolve the inbound/client ownership
+  question ADR-014 left `UNVERIFIED`, rewrite preservation/validation
+  per ADR-014's "合法删除语义") — see this document's Phase 2B
+  implementation matrix pointer above and TASK-T16's "Phase 2B 最小范围"
+  section for the bounded scope. Only after that lands and is
+  independently reviewed should Xray registry wiring (PR #98's direction,
+  or a fresh PR) be revisited, per TASK-T16's own original sequencing.
+  `build_registry()` remains mock/noop-only for all 10 categories in the
+  meantime (verified directly against `registry.py`, section 6). Do not
+  assume any provider is live-selectable regardless of environment
+  variables.
 - **Issue #87 / TASK-T23 replaces the abandoned custom-App proposal.**
   The minimal workflow is implemented in PR #88 and needs post-merge
   live validation with a new Issue comment. TASK-T22 is retained only as
