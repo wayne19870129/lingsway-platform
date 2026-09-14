@@ -134,7 +134,67 @@ def test_cached_token_is_reused_across_multiple_calls() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 4-5: 401 handling.
+# 4-7: AccountingProvider health contract.
+# ---------------------------------------------------------------------------
+
+
+def test_health_check_success_uses_only_the_pinned_admin_auth_contract() -> None:
+    requests: list[httpx.Request] = []
+    provider = _provider(_recording_handler(requests))
+    try:
+        assert provider.health_check() is True
+        assert [request.url.path for request in requests] == ["/api/admin/token"]
+        assert "token-1" not in repr(provider)
+    finally:
+        provider.close()
+
+
+def test_health_check_authentication_failure_is_false_and_redacts_credentials() -> None:
+    requests: list[httpx.Request] = []
+
+    def token_response(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401)
+
+    provider = _provider(_recording_handler(requests, token_response=token_response))
+    try:
+        assert provider.health_check() is False
+        assert [request.url.path for request in requests] == ["/api/admin/token"]
+        assert _ADMIN_PASSWORD not in repr(provider)
+    finally:
+        provider.close()
+
+
+def test_health_check_transport_failure_is_false() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        raise httpx.ConnectError("offline test transport failure", request=request)
+
+    provider = _provider(handler)
+    try:
+        assert provider.health_check() is False
+        assert [request.url.path for request in requests] == ["/api/admin/token"]
+    finally:
+        provider.close()
+
+
+def test_health_check_malformed_auth_response_is_false() -> None:
+    requests: list[httpx.Request] = []
+
+    def token_response(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"token_type": "bearer"})
+
+    provider = _provider(_recording_handler(requests, token_response=token_response))
+    try:
+        assert provider.health_check() is False
+        assert [request.url.path for request in requests] == ["/api/admin/token"]
+    finally:
+        provider.close()
+
+
+# ---------------------------------------------------------------------------
+# 8-9: 401 handling.
 # ---------------------------------------------------------------------------
 
 

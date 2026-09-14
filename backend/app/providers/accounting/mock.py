@@ -14,6 +14,10 @@ class MockAccountingProvider:
     disabled_users: set[str] = field(default_factory=set)
     usage_bytes: dict[str, int] = field(default_factory=dict)
 
+    def health_check(self) -> bool:
+        raise_injected(self.failures, "health_check")
+        return True
+
     def create_user(
         self, username: str, quota_bytes: int, expire_at: datetime | None
     ) -> AccountUserDTO:

@@ -740,7 +740,7 @@ def admin_confirm_payment(
 
 @router.get("/admin/accounting/health")
 def admin_accounting_health(_: AdminCustomer, registry: ManagedRegistry) -> dict[str, str]:
-    healthy = registry.transport.health_check()
+    healthy = registry.accounting.health_check()
     return {"status": "ok" if healthy else "unavailable"}
 
 

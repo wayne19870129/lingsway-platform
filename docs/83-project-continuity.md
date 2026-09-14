@@ -1,7 +1,7 @@
 # Project Continuity / Handoff
 
-**Last reconciled with main:** `94258d4da6ef0477104df0671202e6501f2b9b94`
-(committed 2026-09-13 01:11 UTC / 2026-09-12 18:11 -07:00 — dates in
+**Last reconciled with main baseline:** `fd77541f208b345c04bca6edacaf8fa30f3e0c90`
+(verified 2026-09-14 UTC before Phase 2B-remain-0 implementation — dates in
 this document are UTC unless stated otherwise, so a local-time reading
 of a commit's own timestamp can legitimately differ by a day), during
 Issue #74; corrected 2026-09-13 on this same PR (#75) after independent
@@ -446,12 +446,15 @@ decays quickly.
   `GITHUB_TOKEN`, even when the same-SHA `workflow_dispatch` CI/Security/
   Risk trio is green — see section 5's correction. The zero-manual-
   approval acceptance criterion is not yet satisfied.
-- **Actual next technical frontier**: TASK-T16 Phase 2C (real provider registry wiring/opt-in selection) —
-  `build_registry()` is still mock/noop-only (verified directly against
-  `registry.py`, section 6) while the Marzban accounting adapter and
-  `ProviderRegistry` lifecycle/close() foundations already exist. Do not
-  assume any real provider is live-selectable regardless of environment
-  variables (see section 6).
+- **Current technical frontier**: TASK-T16 Phase 2B remaining work. The
+  Phase 2B-remain-0 AccountingProvider health_check contract is implemented
+  in this PR: the admin health endpoint dispatches to accounting and the
+  Marzban adapter probes its existing pinned admin authentication contract.
+  Phase 2B is still **not COMPLETE** because the other explicitly scoped
+  items have not landed. Issue #97 and PR #98 remain OPEN/PAUSED; do not
+  resume them or treat Phase 2C as the next step until Phase 2B is complete
+  and independently reviewed/approved for manual merge. Real providers
+  remain non-selectable in `build_registry()` (see section 6).
 - **Issue #87 / TASK-T23 replaces the abandoned custom-App proposal.**
   The minimal workflow is implemented in PR #88 and needs post-merge
   live validation with a new Issue comment. TASK-T22 is retained only as

@@ -1962,3 +1962,19 @@ adapter、DTO/编排改动、独立的 reconciliation 工具/作业、
   验证**，最终以 GitHub CI 的真实 MySQL 8.4 backend job 为准）。
 
   **仍未完成**：与前几轮完全一致，未扩大 scope。
+
+
+## Phase 2B-remain-0 — AccountingProvider health_check contract
+
+本阶段已在本 PR 中按 ADR-015 Part B/H1 落地：
+
+- `AccountingProvider` 新增 `health_check() -> bool`；`MockAccountingProvider` 和
+  `MarzbanAccountingProvider` 均提供实现。
+- `/admin/accounting/health` 现在调用 accounting provider，而不是 transport provider。
+- Marzban 探针复用现有、已固定并已有测试覆盖的 `POST /api/admin/token` 管理员认证契约；
+  不新增未经核验的 `/health` 路由，不执行用户创建、更新、删除，也不接触真实网络或凭据。
+- 新增离线确定性测试，覆盖 mock 健康状态、admin accounting/transport 分派、
+  Marzban 认证成功、认证失败、传输失败、异常响应和凭据/token 脱敏。
+
+本项完成不等于 Phase 2B 完成。PR #98 / Issue #97 仍保持 OPEN/PAUSED，不能恢复；
+Xray gateway 接线及其余 Phase 2B 工作仍需独立审查和人工合并。

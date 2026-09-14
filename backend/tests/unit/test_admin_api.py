@@ -4,6 +4,7 @@ import importlib
 import socket
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -31,6 +32,7 @@ from backend.app.models import (
     Subscription,
     SubscriptionStatus,
 )
+from backend.app.providers.accounting.mock import MockAccountingProvider
 from backend.app.providers.base import CapacityDTO
 from backend.app.providers.registry import build_registry
 from backend.app.schemas.admin import PaymentConfirmation
@@ -45,6 +47,36 @@ ADMIN_ENDPOINTS = [
     ("get", "/api/v1/admin/accounting/health"),
     ("post", "/api/v1/admin/subscriptions/1/sync-usage"),
 ]
+
+
+class _AccountingHealthProbe:
+    def __init__(self, healthy: bool) -> None:
+        self.healthy = healthy
+        self.calls = 0
+
+    def health_check(self) -> bool:
+        self.calls += 1
+        return self.healthy
+
+
+class _TransportHealthProbe:
+    def health_check(self) -> bool:
+        raise AssertionError("accounting health must not call transport health")
+
+
+def test_mock_accounting_health_check_is_healthy_by_default() -> None:
+    assert MockAccountingProvider().health_check() is True
+
+
+def test_admin_accounting_health_dispatches_to_accounting_provider() -> None:
+    accounting = _AccountingHealthProbe(healthy=True)
+    transport = _TransportHealthProbe()
+    registry = SimpleNamespace(accounting=accounting, transport=transport)
+
+    result = admin_api.admin_accounting_health(cast(Any, None), cast(Any, registry))
+
+    assert result == {"status": "ok"}
+    assert accounting.calls == 1
 
 
 def _request(client: TestClient, method: str, path: str) -> Any:
