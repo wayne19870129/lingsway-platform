@@ -3,8 +3,8 @@ from __future__ import annotations
 import importlib
 import socket
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
