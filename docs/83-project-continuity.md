@@ -491,6 +491,9 @@ decays quickly.
   runtime-only dynamic membership remains outside repo-owned equality. Phase 2B
   remains **NOT COMPLETE**; Phase 2C remains **BLOCKED**; no registry wiring is
   permitted.
+  The Xray applied-state sidecar is part of the persistent VPS migration,
+  backup, and restore set alongside the database, Secrets/Reality identity, and
+  `xray_config.json`.
 - **Issue #87 / TASK-T23 replaces the abandoned custom-App proposal.**
   The minimal workflow is implemented in PR #88 and needs post-merge
   live validation with a new Issue comment. TASK-T22 is retained only as
@@ -525,3 +528,4 @@ does not pre-commit to an ordering the user hasn't set.
 - If a future agent detects drift between this document and the
   authoritative source (ADR, `AGENTS.md`, current code, or a merged PR),
   fix this document in the same PR that notices the drift.
+

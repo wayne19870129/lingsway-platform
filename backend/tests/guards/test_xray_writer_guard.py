@@ -30,6 +30,7 @@ from backend.app.providers.gateway.xray_file import (
     XrayReloadError,
     XrayValidationError,
 )
+from ops.gateway.promote_xray_baseline import promote_applied_baseline
 from ops.gateway.render_xray_routes import XrayRenderError, write_rendered_config
 
 
@@ -230,9 +231,16 @@ def test_missing_baseline_and_missing_file_allows_first_apply(tmp_path: Path) ->
     "baseline_text",
     [
         "not json",
-        '{"schema_version": 2, "projection_version": "xray-full-v1", "sha256": "' + "0" * 64 + '"}',
-        '{"schema_version": 1, "projection_version": "xray-full-v1", "sha256": "bad"}',
-        '{"schema_version": 1, "projection_version": "xray-full-v1", "sha256": "'
+        '{"schema_version": 2, "projection_version": "xray-full-v1", '
+        '"state": "applied", "sha256": "'
+        + "0" * 64
+        + '"}',
+        '{"schema_version": 1, "projection_version": "xray-full-v1", '
+        '"state": "applied", "sha256": "bad"}',
+        '{"schema_version": 1, "projection_version": "xray-full-v1", '
+        '"state": "unknown", "sha256": null}',
+        '{"schema_version": 1, "projection_version": "xray-full-v1", '
+        '"state": "applied", "sha256": "'
         + "0" * 64
         + '", "extra": 1}',
     ],
@@ -342,7 +350,69 @@ def test_rollback_failure_does_not_advance_baseline(tmp_path: Path) -> None:
         make_provider(runtime, path).apply(
             CandidateConfig(config(routes=(("route-a", "egress-b"),)), "B")
         )
-    assert XrayAppliedStateStore(path).load() == repo_owned_xray_fingerprint(initial)
+    record = XrayAppliedStateStore(path).load_state()
+    assert record is not None
+    assert record.state == "degraded"
+
+
+@pytest.mark.parametrize(
+    ("runtime_kwargs", "health_values"),
+    [
+        ({"restore_error": RuntimeError("restore failed")}, [False]),
+        ({"reload_errors": {2: RuntimeError("rollback reload failed")}}, [False, True]),
+        ({}, [False, RuntimeError("rollback health failed")]),
+        ({}, [False, False]),
+    ],
+)
+def test_every_unverified_rollback_is_marked_degraded(
+    tmp_path: Path,
+    runtime_kwargs: dict[str, object],
+    health_values: list[bool | Exception],
+) -> None:
+    path = tmp_path / "baseline.json"
+    initial = config()
+    seed_baseline(path, initial)
+    runtime = Runtime(initial, health=health_values, **runtime_kwargs)
+
+    with pytest.raises(XrayReloadError):
+        make_provider(runtime, path).apply(
+            CandidateConfig(config(routes=(("route-a", "egress-b"),)), "B")
+        )
+
+    record = XrayAppliedStateStore(path).load_state()
+    assert record is not None and record.state == "degraded"
+
+
+def test_degraded_baseline_rejects_matching_old_disk_before_install(tmp_path: Path) -> None:
+    path = tmp_path / "baseline.json"
+    initial = config()
+    seed_baseline(path, initial)
+    XrayAppliedStateStore(path).mark_degraded()
+    runtime = Runtime(initial)
+
+    with pytest.raises(XrayValidationError, match="degraded"):
+        XrayFileProvider(runtime, baseline_store=XrayAppliedStateStore(path)).apply(
+            CandidateConfig(config(routes=(("route-a", "egress-c"),)), "C")
+        )
+    assert runtime.install_calls == 0
+
+
+def test_first_apply_rollback_failure_persists_degraded_and_blocks_fresh_install(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "baseline.json"
+    runtime = Runtime(None, health=[False], restore_error=RuntimeError("restore failed"))
+
+    with pytest.raises(XrayReloadError):
+        make_provider(runtime, path).apply(CandidateConfig(config(), "B"))
+
+    record = XrayAppliedStateStore(path).load_state()
+    assert record is not None and record.state == "degraded" and record.sha256 is None
+
+    next_runtime = Runtime(config())
+    with pytest.raises(XrayValidationError, match="degraded"):
+        make_provider(next_runtime, path).apply(CandidateConfig(config(), "C"))
+    assert next_runtime.install_calls == 0
 
 
 def test_post_reload_mismatch_does_not_advance_baseline(tmp_path: Path) -> None:
@@ -383,6 +453,42 @@ def test_baseline_persistence_failure_rolls_runtime_back_and_keeps_old_baseline(
     assert XrayAppliedStateStore(path).load() == repo_owned_xray_fingerprint(initial)
 
 
+def test_baseline_persistence_failure_and_rollback_failure_marks_degraded(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "baseline.json"
+    initial = config()
+    seed_baseline(path, initial)
+    runtime = Runtime(initial, health=[True], restore_error=RuntimeError("restore failed"))
+
+    with pytest.raises(XrayReloadError, match="unknown"):
+        XrayFileProvider(runtime, baseline_store=FailingStore(path)).apply(
+            CandidateConfig(config(routes=(("route-a", "egress-b"),)), "B")
+        )
+    record = XrayAppliedStateStore(path).load_state()
+    assert record is not None and record.state == "degraded"
+
+
+def test_degraded_marker_persistence_failure_is_not_swallowed(tmp_path: Path) -> None:
+    path = tmp_path / "baseline.json"
+    initial = config()
+    seed_baseline(path, initial)
+
+    class MarkerFailingStore(XrayAppliedStateStore):
+        def mark_degraded(self, _previous_digest: str | None = None) -> None:
+            raise XrayBaselineError("simulated marker failure")
+
+    alerts: list[str] = []
+    runtime = Runtime(initial, health=[False], restore_error=RuntimeError("restore failed"))
+    with pytest.raises(XrayReloadError, match="marker"):
+        XrayFileProvider(
+            runtime,
+            baseline_store=MarkerFailingStore(path),
+            alert=alerts.append,
+        ).apply(CandidateConfig(config(), "B"))
+    assert alerts and "marker" in alerts[-1]
+
+
 def test_external_writer_simulation_is_caught_before_install(tmp_path: Path) -> None:
     path = tmp_path / "baseline.json"
     initial = config()
@@ -405,23 +511,46 @@ def test_baseline_contains_only_non_secret_metadata(tmp_path: Path) -> None:
     XrayAppliedStateStore(path).save(value)
     text = path.read_text(encoding="utf-8")
 
-    assert set(json.loads(text)) == {"schema_version", "projection_version", "sha256"}
+    assert set(json.loads(text)) == {
+        "schema_version",
+        "projection_version",
+        "state",
+        "sha256",
+    }
     assert "private-key" not in text
     assert "short-id" not in text
     assert "password-egress-a" not in text
 
 
-def test_standalone_writer_uses_the_same_guard_and_advances_baseline(tmp_path: Path) -> None:
+def test_standalone_writer_does_not_advance_applied_baseline(tmp_path: Path) -> None:
     output = tmp_path / "xray_config.json"
     baseline = tmp_path / "xray_config.last_applied.json"
     initial = config()
 
     write_rendered_config(initial, output_config=output, baseline_path=baseline)
+    assert not baseline.exists()
     candidate = config(routes=(("route-a", "egress-b"),))
-    write_rendered_config(candidate, output_config=output, baseline_path=baseline)
 
-    assert json.loads(output.read_text(encoding="utf-8")) == candidate
-    assert XrayAppliedStateStore(baseline).load() == repo_owned_xray_fingerprint(candidate)
+    with pytest.raises(XrayRenderError, match="writer guard"):
+        write_rendered_config(candidate, output_config=output, baseline_path=baseline)
+    assert json.loads(output.read_text(encoding="utf-8")) == initial
+    assert not baseline.exists()
+
+
+def test_deployment_promotion_requires_expected_verified_file(tmp_path: Path) -> None:
+    output = tmp_path / "xray_config.json"
+    baseline = tmp_path / "xray_config.last_applied.json"
+    candidate = config(routes=(("route-a", "egress-b"),))
+    output.write_text(json.dumps(candidate), encoding="utf-8")
+
+    expected = repo_owned_xray_fingerprint(candidate)
+    assert promote_applied_baseline(
+        expected,
+        config_path=output,
+        baseline_path=baseline,
+    ) == expected
+    record = XrayAppliedStateStore(baseline).load_state()
+    assert record is not None and record.state == "applied" and record.sha256 == expected
 
 
 def test_standalone_writer_blocks_external_writer_before_overwrite(tmp_path: Path) -> None:
@@ -440,7 +569,27 @@ def test_standalone_writer_blocks_external_writer_before_overwrite(tmp_path: Pat
     assert XrayAppliedStateStore(baseline).load() == repo_owned_xray_fingerprint(initial)
 
 
-def test_standalone_baseline_persistence_failure_restores_old_file(
+def test_deployment_external_writer_between_render_and_verify_is_rejected(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "xray_config.json"
+    baseline = tmp_path / "xray_config.last_applied.json"
+    initial = config()
+    seed_baseline(baseline, initial)
+    candidate = config(routes=(("route-a", "egress-b"),))
+    output.write_text(json.dumps(candidate), encoding="utf-8")
+    expected = repo_owned_xray_fingerprint(candidate)
+    output.write_text(
+        json.dumps(config(routes=(("route-a", "egress-c"),))),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(XrayBaselineError, match="differs"):
+        promote_applied_baseline(expected, config_path=output, baseline_path=baseline)
+    assert XrayAppliedStateStore(baseline).load() == repo_owned_xray_fingerprint(initial)
+
+
+def test_standalone_atomic_write_failure_leaves_previous_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     output = tmp_path / "xray_config.json"
@@ -449,13 +598,14 @@ def test_standalone_baseline_persistence_failure_restores_old_file(
     seed_baseline(baseline, initial)
     output.write_text(json.dumps(initial), encoding="utf-8")
 
-    def fail_save(_self: XrayAppliedStateStore, _value: Mapping[str, object]) -> None:
-        raise XrayBaselineError("simulated persistence failure")
+    def fail_replace(_source: Path, _destination: Path) -> None:
+        raise OSError("simulated atomic write failure")
 
-    monkeypatch.setattr(XrayAppliedStateStore, "save", fail_save)
+    monkeypatch.setattr("ops.gateway.render_xray_routes.os.replace", fail_replace)
     candidate = config(routes=(("route-a", "egress-b"),))
 
-    with pytest.raises(XrayRenderError, match="rolled back"):
+    with pytest.raises(XrayRenderError, match="atomically write"):
         write_rendered_config(candidate, output_config=output, baseline_path=baseline)
 
     assert json.loads(output.read_text(encoding="utf-8")) == initial
+

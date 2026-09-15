@@ -2221,19 +2221,40 @@ fingerprint，覆盖完整 repo-owned Xray object；Marzban 动态 clients 不�
 磁盘 `settings.clients=[]` skeleton 仍纳入。
 
 本实现使用 concrete Xray sidecar baseline store（默认
-`xray_config.last_applied.json`，可由 `XRAY_APPLIED_STATE_PATH` 指定），只保存
-`schema_version`、`projection_version` 和 `sha256`。文件通过同目录临时文件、
-flush/fsync、replace 原子更新，不保存 Reality privateKey、shortIds、Socks
-password 或 ciphertext 的副本。baseline malformed/unreadable、disk malformed/
-unreadable、已有 disk 但 baseline 缺失，均 fail closed；不自动 adopt。只有文件
-缺失且 baseline 缺失时允许首次 apply，完整成功后建立 baseline。
+`xray_config.last_applied.json`）。当前 `XRAY_APPLIED_STATE_PATH` 只由
+standalone renderer 读取；`LocalXrayRuntime` 从 `config_path` 派生默认路径，
+或由 caller 显式传入 `baseline_path`。deployment promotion 使用同一个
+container-side baseline path。sidecar 只保存严格 schema 的
+`schema_version`、`projection_version`、`state` 和 `sha256` 元数据：
+`state=applied` 表示已验证的 fingerprint，`state=degraded` 表示后续 writer
+无条件 fail closed。它不保存 Reality privateKey、shortIds、Socks password、
+ciphertext 或 raw Secret ref。文件通过同目录临时文件、flush/fsync、replace
+原子更新。
 
-writer guard 在 install 前执行；baseline 只在 install、reload、health 和
-post-reload exact projection 全部成功后推进。baseline 持久化失败选择立即按
-既有安全 rollback 恢复旧运行态；rollback 或其健康复核失败时保持旧 baseline
-不变并 fail closed。standalone `ops/gateway/render_xray_routes.py` 写入同一
-共享文件时复用同一 guard/store/atomic writer contract。
+baseline malformed/unreadable、disk malformed/unreadable、已有 disk 但 baseline
+缺失，均 fail closed；不自动 adopt。只有文件缺失且 baseline 缺失时允许首次
+render。standalone `ops/gateway/render_xray_routes.py` 只执行 guard、backup 和
+atomic file write，不推进 `last_applied_state`。
 
-本 PR 不开始 existing-data reconciliation、registry wiring、deployment 或
+真正的 deployment owner 是 `deploy/lib/40_stack_up.sh`：renderer 输出本次
+candidate 的 `EXPECTED_SHA`，随后 `compose up`；只有 Marzban healthy、8443
+ready、`xray run -test` 成功且当前共享文件 fingerprint 与 `EXPECTED_SHA` 完全
+一致时，concrete `ops/gateway/promote_xray_baseline.py` 才写入
+`state=applied`。因此 file write 不会冒充 apply/health evidence。deployment
+失败时不推进 candidate baseline；已有 APPLIED baseline 也不会被未经验证的
+当前文件自动 adopt。
+
+writer guard 在 provider install 前执行；provider baseline 只在 install、reload、
+health 和 post-reload exact projection 全部成功后推进。baseline 持久化失败
+继续按既有策略 rollback；rollback 完整成功时旧 APPLIED baseline 保持不变，
+rollback 任一环节无法验证时写入 DEGRADED。DEGRADED 即使磁盘恰好等于旧 hash
+也拒绝后续 writer。首次 apply 的 rollback 无法验证时同样持久化 DEGRADED，
+避免下次被当作全新机器。
+
+该 sidecar 属于后续 VPS migration / backup / restore 必须携带的 persistent
+state，与 DB、Secrets/Reality identity、Xray config 一起处理；本 PR 不实现
+Vultr → 搬瓦工迁移。当前 PR 不开始 existing-data reconciliation、registry
+wiring、provider default changes、deployment automation 之外的真实部署或
 真实 Xray reload；不创建 Issue、不自动 merge。即使本 PR 合并，Phase 2B 仍为
 **NOT COMPLETE**，Phase 2C 仍为 **BLOCKED**。
+

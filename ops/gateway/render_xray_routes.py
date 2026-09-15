@@ -28,6 +28,7 @@ from backend.app.providers.gateway.xray_composition import (
     XrayRealityConfig,
     XrayStaticSkeleton,
     compose_xray_config,
+    repo_owned_xray_fingerprint,
 )
 
 
@@ -113,6 +114,14 @@ def render_config(
 
 
 def render_from_database() -> Path:
+    return _render_from_database_with_fingerprint()[0]
+
+
+def render_from_database_with_fingerprint() -> tuple[Path, str]:
+    return _render_from_database_with_fingerprint()
+
+
+def _render_from_database_with_fingerprint() -> tuple[Path, str]:
     try:
         base_config = json.loads(BASE_CONFIG.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
@@ -139,7 +148,7 @@ def render_from_database() -> Path:
             reality_server_name=settings.xray_reality_server_name,
             reality_identity=reality,
         )
-    return write_rendered_config(rendered)
+    return write_rendered_config(rendered), repo_owned_xray_fingerprint(rendered)
 
 
 def write_rendered_config(
@@ -190,21 +199,6 @@ def write_rendered_config(
         temporary.chmod(0o600)
         os.replace(temporary, output_config)
         temporary = None
-        try:
-            store.save(rendered)
-        except XrayBaselineError as exc:
-            try:
-                if backup is None:
-                    output_config.unlink(missing_ok=True)
-                else:
-                    shutil.copy2(backup, output_config)
-            except OSError as rollback_exc:
-                raise XrayRenderError(
-                    "Xray baseline persistence failed and config rollback is unverified"
-                ) from rollback_exc
-            raise XrayRenderError(
-                "Xray baseline persistence failed; config write was rolled back"
-            ) from exc
         return output_config
     except OSError as exc:
         raise XrayRenderError("cannot atomically write Xray runtime config") from exc
@@ -241,10 +235,14 @@ def main() -> None:
             db,
             xray_binary=os.getenv("XRAY_BINARY", "/usr/local/bin/xray"),
         )
-    output = render_from_database()
+    output, expected_sha = render_from_database_with_fingerprint()
     settings = get_settings()
-    print(f"rendered Xray config to {output} using {settings.app_env} settings")
+    print(
+        f"rendered Xray config to {output} using {settings.app_env} settings; "
+        f"expected_repo_owned_sha={expected_sha}"
+    )
 
 
 if __name__ == "__main__":
     main()
+

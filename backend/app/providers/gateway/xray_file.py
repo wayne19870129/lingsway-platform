@@ -265,59 +265,96 @@ class XrayFileProvider:
             self._audit("backup_restored", {})
         except Exception as restore_exc:
             self._audit("rollback_restore_failed", {"error": str(restore_exc)})
-            self._finish_with_alert(
+            self._fail_after_rollback_failure(
                 new_username,
-                "Xray rollback failed: could not restore the previous "
-                "config; system state is unknown",
+                alert_message=(
+                    "Xray rollback failed: could not restore the previous "
+                    "config; system state is unknown"
+                ),
+                error_message=(
+                    "rollback failed: restore() raised; system state is "
+                    "unknown and unverified"
+                ),
+                cause=restore_exc,
             )
-            raise XrayReloadError(
-                "rollback failed: restore() raised; system state is "
-                "unknown and unverified"
-            ) from restore_exc
 
         try:
             self._runtime.reload()
             self._audit("rollback_reload", {})
         except Exception as reload_exc:
             self._audit("rollback_reload_failed", {"error": str(reload_exc)})
-            self._finish_with_alert(
+            self._fail_after_rollback_failure(
                 new_username,
-                "Xray rollback failed: reload after restore raised; "
-                "runtime state is unknown",
+                alert_message=(
+                    "Xray rollback failed: reload after restore raised; "
+                    "runtime state is unknown"
+                ),
+                error_message=(
+                    "rollback failed: reload() after restore raised; runtime "
+                    "state is unknown and unverified"
+                ),
+                cause=reload_exc,
             )
-            raise XrayReloadError(
-                "rollback failed: reload() after restore raised; runtime "
-                "state is unknown and unverified"
-            ) from reload_exc
 
         try:
             rollback_health = self._runtime.health()
         except Exception as health_exc:
             self._audit("rollback_health_check_failed", {"error": str(health_exc)})
-            self._finish_with_alert(
+            self._fail_after_rollback_failure(
                 new_username,
-                "Xray rollback failed: health check after restore raised; "
-                "runtime state is unknown",
+                alert_message=(
+                    "Xray rollback failed: health check after restore raised; "
+                    "runtime state is unknown"
+                ),
+                error_message=(
+                    "rollback failed: health() after restore raised; runtime "
+                    "state is unknown and unverified"
+                ),
+                cause=health_exc,
             )
-            raise XrayReloadError(
-                "rollback failed: health() after restore raised; runtime "
-                "state is unknown and unverified"
-            ) from health_exc
 
         self._audit("rollback_reverified", {"healthy": rollback_health.healthy})
         if not rollback_health.healthy:
-            self._finish_with_alert(
+            self._fail_after_rollback_failure(
                 new_username,
-                "Xray rollback restored the previous config but the "
-                "runtime is unhealthy afterwards",
-            )
-            raise XrayReloadError(
-                "rollback restore succeeded but post-rollback health "
-                "check reported unhealthy"
+                alert_message=(
+                    "Xray rollback restored the previous config but the "
+                    "runtime is unhealthy afterwards"
+                ),
+                error_message=(
+                    "rollback restore succeeded but post-rollback health "
+                    "check reported unhealthy"
+                ),
+                cause=RuntimeError("post-rollback health reported unhealthy"),
             )
 
         self._finish_with_alert(new_username, failure_summary)
         raise XrayReloadError(reload_error_message)
+
+    def _fail_after_rollback_failure(
+        self,
+        new_username: str | None,
+        *,
+        alert_message: str,
+        error_message: str,
+        cause: BaseException,
+    ) -> NoReturn:
+        if self._baseline_store is not None:
+            try:
+                self._baseline_store.mark_degraded()
+            except Exception as marker_exc:
+                self._audit("baseline_degraded_marker_failed", {})
+                self._finish_with_alert(
+                    new_username,
+                    "Xray rollback state is unknown and the degraded baseline "
+                    "marker could not be persisted; manual intervention required",
+                )
+                raise XrayReloadError(
+                    "rollback failed and degraded baseline marker could not be persisted"
+                ) from marker_exc
+            self._audit("baseline_degraded", {})
+        self._finish_with_alert(new_username, alert_message)
+        raise XrayReloadError(error_message) from cause
 
     def _finish_with_alert(self, new_username: str | None, message: str) -> None:
         if new_username is not None:
@@ -435,3 +472,4 @@ def _baseline_store_for_runtime(runtime: XrayRuntime) -> XrayAppliedStateStore |
             raise XrayValidationError("Xray baseline path is not configured")
         return XrayAppliedStateStore(runtime.baseline_path)
     return None
+
