@@ -544,3 +544,9 @@ PR 是 explicit existing-data reconciliation 的当前 vehicle，目标是把 ac
 属于 startup/Alembic/deploy/scheduler，也不做真实 Marzban/Xray side effect。
 审计只保留安全计数与 reason code。迁移/备份持久态清单为
 `docs/90-migration/persistent-state-manifest.md`。
+
+本轮审查补充：Compose 的 `marzban_data` 与
+`${MARZBAN_DB_FILE}` / `data/marzban/db.sqlite3` 必须作为两个独立持久态
+迁移。reconciliation 若 commit 已成功但 named-lock release 未确认，必须
+报告 `committed_with_warning / lock_release_unverified` 并保留 committed
+count；不得返回普通 aborted/rollback 叙述，CLI 以 non-zero 要求人工确认。

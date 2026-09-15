@@ -178,6 +178,37 @@ def test_conditional_update_rowcount_failure_rolls_back_everything(
     assert session.rollback_calls >= 1
 
 
+def test_commit_then_lock_release_failure_reports_durable_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    first = (_row(1, "principal-a"),)
+    _sequence(monkeypatch, first, first)
+
+    @contextmanager
+    def fail_release(_session: Any) -> Iterator[None]:
+        yield
+        raise RuntimeError("release unavailable")
+
+    monkeypatch.setattr(reconciliation, "gateway_route_binding_write", fail_release)
+    session = _Session(rowcounts=[1])
+
+    with caplog.at_level("INFO"):
+        result = reconciliation.reconcile_gateway_principals(
+            cast(Session, session), lambda _username: "principal-new", confirm=True
+    )
+
+    assert session.commit_calls == 1
+    # The one rollback is the intentional Phase A read-transaction close;
+    # no post-commit compensation rollback was attempted.
+    assert session.rollback_calls == 1
+    assert result.status == "committed_with_warning"
+    assert result.reason_code == "lock_release_unverified"
+    assert result.updated_count == 1
+    assert "committed_with_warning" in caplog.text
+    assert "lock_release_unverified" in caplog.text
+
+
 def test_lock_acquisition_failure_causes_zero_writes(monkeypatch: pytest.MonkeyPatch) -> None:
     first = (_row(1, "principal-a"),)
     monkeypatch.setattr(reconciliation, "_active_snapshot", lambda _session: first)

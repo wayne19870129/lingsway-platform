@@ -2094,6 +2094,13 @@ active Phase 2B frontier 为 preservation/legal-deletion、writer-guard/drift
 baseline、existing-data reconciliation。即使 PR #105 已合并，Phase 2B 仍为
 **NOT COMPLETE**，Phase 2C 仍为 **BLOCKED**。
 
+本轮 reconciliation wording 补充：Compose 中 `marzban_data` volume 与
+`${MARZBAN_DB_FILE}` / `data/marzban/db.sqlite3` 是两个必须分别迁移的
+persistent state；清单已逐项对照 `infrastructure/compose/*.yml`。若 DB
+commit 成功但 named-lock release 未确认，结果必须是
+`committed_with_warning / lock_release_unverified`，保留真实 updated count，
+不得伪称 rollback 或 zero write；CLI 返回 non-zero，供 operator 人工确认。
+
 ## Current Phase 2B — Existing-data reconciliation
 
 PR #109 已人工合并到 `main`；当前基线为

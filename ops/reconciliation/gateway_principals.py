@@ -198,6 +198,7 @@ def reconcile_gateway_principals(
             return result
 
         updated = 0
+        commit_completed = False
         try:
             with gateway_route_binding_write(session):
                 locked_snapshot = _active_snapshot(session)
@@ -210,16 +211,69 @@ def reconcile_gateway_principals(
                         raise ReconciliationError("conditional_update_rowcount")
                     updated += 1
                 session.commit()
+                commit_completed = True
         except IntegrityError:
+            if commit_completed:
+                result = ReconciliationResult(
+                    timestamp,
+                    mode,
+                    len(snapshots),
+                    unchanged,
+                    would_update,
+                    updated,
+                    "committed_with_warning",
+                    "lock_release_unverified",
+                )
+                _audit(result)
+                return result
             session.rollback()
             raise ReconciliationError("unique_conflict") from None
         except GatewayRouteBindingLockError:
+            if commit_completed:
+                result = ReconciliationResult(
+                    timestamp,
+                    mode,
+                    len(snapshots),
+                    unchanged,
+                    would_update,
+                    updated,
+                    "committed_with_warning",
+                    "lock_release_unverified",
+                )
+                _audit(result)
+                return result
             session.rollback()
             raise ReconciliationError("lock_acquisition_failed") from None
         except ReconciliationError:
+            if commit_completed:
+                result = ReconciliationResult(
+                    timestamp,
+                    mode,
+                    len(snapshots),
+                    unchanged,
+                    would_update,
+                    updated,
+                    "committed_with_warning",
+                    "lock_release_unverified",
+                )
+                _audit(result)
+                return result
             session.rollback()
             raise
         except Exception:
+            if commit_completed:
+                result = ReconciliationResult(
+                    timestamp,
+                    mode,
+                    len(snapshots),
+                    unchanged,
+                    would_update,
+                    updated,
+                    "committed_with_warning",
+                    "lock_release_unverified",
+                )
+                _audit(result)
+                return result
             session.rollback()
             raise ReconciliationError("db_write_failed") from None
 
