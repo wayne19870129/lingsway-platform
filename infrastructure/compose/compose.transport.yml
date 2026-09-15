@@ -15,7 +15,12 @@ services:
       - 8.8.8.8
 
   marzban:
-    image: ${MARZBAN_IMAGE:-gozargah/marzban:v0.8.4}
+    # Default is the locally built patched image (TASK-T16 Phase 2C2,
+    # infrastructure/marzban/build_patched_image.sh) -- never the
+    # unpatched upstream gozargah/marzban:v0.8.4. A MARZBAN_IMAGE override
+    # still goes through deploy/lib/40_stack_up.sh's identity verification
+    # before this service is started; there is no way to skip that check.
+    image: ${MARZBAN_IMAGE:-lingsway/marzban:v0.8.4-routing-principal}
     restart: unless-stopped
     ports:
       - "8443:8443/tcp"

@@ -55,6 +55,35 @@ ensure_marzban_internal_tls() {
     die 'Marzban internal TLS files are incomplete; refusing to overwrite an existing half-pair'
 }
 
+resolve_accounting_provider() {
+  local env_file="$1" value=''
+  if [[ -f "$env_file" ]]; then
+    value="$(grep -m1 '^ACCOUNTING_PROVIDER=' "$env_file" 2>/dev/null | cut -d= -f2- || true)"
+  fi
+  printf '%s' "${value:-mock}"
+}
+
+verify_marzban_image_identity() {
+  # TASK-T16 Phase 2C2: before Phase 2C2 this deployment could silently
+  # start the unpatched upstream `gozargah/marzban:v0.8.4` image (or an
+  # arbitrary `MARZBAN_IMAGE` override) while the backend ran
+  # ACCOUNTING_PROVIDER=marzban -- an image *tag* is not proof of what was
+  # actually built. Resolve exactly the image reference Compose will use
+  # (same default/override precedence as compose.transport.yml) and fail
+  # closed via verify_patched_image.py's docker-inspect-based label check
+  # before Marzban is ever started. There is no override that skips this
+  # -- a custom MARZBAN_IMAGE goes through the identical check.
+  local app_env="$1" accounting_provider marzban_image
+  accounting_provider="$(resolve_accounting_provider "$app_env")"
+  if [[ "$accounting_provider" != marzban ]]; then
+    return 0
+  fi
+  marzban_image="${MARZBAN_IMAGE:-lingsway/marzban:v0.8.4-routing-principal}"
+  log "ACCOUNTING_PROVIDER=marzban selected; verifying patched Marzban image identity for $marzban_image"
+  python3 "$DEPLOY_ROOT/infrastructure/marzban/verify_patched_image.py" "$marzban_image" || \
+    die "Marzban image identity verification failed for '$marzban_image'; refusing to start Marzban with ACCOUNTING_PROVIDER=marzban against an image that does not prove it carries the routing_principal patch. Build it with infrastructure/marzban/build_patched_image.sh first."
+}
+
 port_is_listening() {
   local port="$1"
   ss -ltnH | awk -v port=":$port" '$4 ~ port "$" { found = 1 } END { exit !found }'
@@ -142,6 +171,7 @@ main() {
   [[ "$expected_sha" =~ ^[0-9a-f]{64}$ ]] || \
     die 'renderer did not return a valid expected repo-owned Xray fingerprint'
   validate_runtime_files
+  verify_marzban_image_identity "${APP_ENV_FILE:-$DEPLOY_ROOT/.env}"
   compose up --detach
   if is_true "${RESTART_TRANSPORT:-false}"; then
     compose restart marzban mihomo

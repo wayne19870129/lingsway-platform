@@ -91,11 +91,14 @@ changes in a way that no longer matches the patch's context lines (e.g. a
 future `MARZBAN_IMAGE_TAG`/pinned-commit bump), both the check and the
 real apply fail closed with a non-zero exit and a diagnostic — never a
 silent "continue without the patch" fallback, and never a partial apply.
-Neither this script nor anything in this repository builds a Marzban
-Docker image or fetches the pinned commit itself yet; a future PR that
-actually rebuilds/deploys a patched Marzban image is responsible for
-cloning/extracting the pinned commit and invoking this script as a
-fail-closed build step, and must not proceed past a non-zero exit.
+This script itself does not build a Marzban Docker image or fetch the
+pinned commit -- `../build_patched_image.sh` (TASK-T16 Phase 2C2) is the
+caller that does both: it fetches/verifies the pinned commit into a
+temporary directory, invokes `apply_patch.sh --check` then `apply_patch.sh`
+as a fail-closed build step (never proceeding past a non-zero exit), and
+builds the resulting image with immutable identity labels. See
+`../verify_patched_image.py` for the deployment-side counterpart that
+verifies those labels before Marzban is started.
 
 `apply_patch.sh --check` only proves the patch's own context lines still
 apply to whatever source tree it is pointed at — it says nothing about
@@ -150,6 +153,16 @@ layers: upstream **contract** verification (do the files this patch
 depends on still say what we think they say) and patch **applicability**
 verification (does the patch's own diff still apply to the current
 target file). Passing one does not imply the other.
+
+`verify_local_source_tree.py` (TASK-T16 Phase 2C2) checks the identical
+contract against an already-present local checkout instead of fetching
+over the network -- used by `../build_patched_image.sh`, which already
+has a git-verified pinned-commit checkout on disk before it applies the
+patch, so re-fetching the same three files a second time would add
+nothing but a redundant network dependency. Both scripts import their
+checks (`check_pinned_content()`, `check_dependency_versions()`) from
+`pinned_upstream_manifest.py`, so the contract logic itself, not just the
+constants, lives in exactly one place.
 
 ## Upstream source: fetched, not vendored
 
@@ -332,6 +345,47 @@ re-run before treating it as real:
 - A bare network/connection error (fetching from PyPI or
   `raw.githubusercontent.com`) with no such diagnostic at all is
   infrastructure flake — re-run once, and only escalate if it repeats.
+
+## Building and verifying a patched image (TASK-T16 Phase 2C2)
+
+`../build_patched_image.sh` and `../verify_patched_image.py` (siblings of
+this `patches/` directory, not inside it) are the build/deployment
+counterpart this README's earlier sections said was still a future PR's
+responsibility:
+
+- `../build_patched_image.sh [image-tag]` -- fetches the exact pinned
+  commit into a temporary directory (`mktemp -d`, deleted on exit),
+  verifies the checkout's HEAD against `PINNED_COMMIT`, runs
+  `verify_local_source_tree.py`, applies this patch via
+  `apply_patch.sh --check`/`apply_patch.sh`, verifies the patch result
+  actually exposes `routing_principal`, then `docker build`s the
+  unmodified upstream `Dockerfile` with five immutable OCI labels
+  attached (`org.lingsway.marzban.upstream-commit`, `-upstream-tag`,
+  `-routing-principal-patch`, `-patch-id`, `-contract-version` -- see
+  `pinned_upstream_manifest.REQUIRED_IMAGE_LABELS`). Default tag:
+  `lingsway/marzban:v0.8.4-routing-principal`. No Marzban source is
+  committed to Git by this process.
+- `../verify_patched_image.py <image-ref>` -- `docker inspect`s a
+  candidate image's labels and fails closed (non-zero exit) unless every
+  one of `REQUIRED_IMAGE_LABELS` is present with its exact value. Called
+  from `deploy/lib/40_stack_up.sh` before Marzban starts whenever the
+  deployment's `.env` sets `ACCOUNTING_PROVIDER=marzban` -- including
+  against a `MARZBAN_IMAGE` override, which goes through the same check
+  with no bypass. An image tag alone (however it's named) is never
+  treated as proof; only these `docker inspect`-verified labels are.
+
+This closes the `MARZBAN_PATCHED_IMAGE_DEPLOYMENT_PENDING` deployment
+gap this README and `docs/82-tasks/TASK-T16-real-provider-registry-wiring.md`
+previously recorded. It does **not** resolve the separate operational
+AGPL-3.0 question of what running this (modified, AGPL-3.0-licensed)
+image in a real staging/production deployment requires -- see "Upstream
+source: fetched, not vendored" above for the vendoring/licensing position
+this patch set already takes; the *build-time* fetch-and-patch flow this
+section describes stays within that position (nothing is vendored into
+Git), but actually *running* the resulting image is a separate question
+the repository owner or counsel must decide, tracked as
+`MARZBAN_AGPL_DEPLOYMENT_COMPLIANCE_PENDING` in
+`docs/83-project-continuity.md`.
 
 ## Explicitly out of scope here
 

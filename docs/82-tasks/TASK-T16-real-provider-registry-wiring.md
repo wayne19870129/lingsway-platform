@@ -2339,3 +2339,63 @@ still defaults to the unpatched upstream `gozargah/marzban:v0.8.4` image
 Real staging network validation is also pending; tests use offline mocked
 transports only. This PR does not build/deploy a custom image, change defaults,
 modify schema/workflows/AGENTS.md, wire other providers, or start Phase 2C2.
+
+
+## Latest authoritative handoff — Phase 2C2 patched Marzban image path
+
+Base `main` at the start of this slice: `5bdf5655d67da1185686d8560609874e4979f5c5`
+(PR #111 merged: Phase 2C1 Marzban registry wiring). Active vehicle: PR
+`TASK-T16 Phase 2C: build patched Marzban image path` on branch
+`task/t16-2c2-patched-marzban-image`. Full detail (files changed, exact
+build steps, deployment fail-closed wiring, CI job, actual Docker build
+result, and the AGPL/licensing status) is recorded in
+`docs/83-project-continuity.md`'s "Latest authoritative handoff — Phase 2C2
+patched Marzban image path" section; this entry only records the
+authoritative summary for readers of this TASK file.
+
+This slice closes `MARZBAN_PATCHED_IMAGE_DEPLOYMENT_PENDING` by adding a
+reproducible, fail-closed build path
+(`infrastructure/marzban/build_patched_image.sh`): pinned-commit fetch into
+a temporary directory (never vendored into Git) -> exact-commit
+verification -> local source-tree contract verification
+(`infrastructure/marzban/patches/verify_local_source_tree.py`, sharing
+`pinned_upstream_manifest.py`'s constants/check logic with the existing
+network-fetching `verify_pinned_upstream.py`) -> `apply_patch.sh --check`
+-> `apply_patch.sh` -> routing_principal marker verification -> `docker
+build` with five immutable OCI identity labels
+(`org.lingsway.marzban.{upstream-commit,upstream-tag,routing-principal-patch,patch-id,contract-version}`)
+-> temp source tree deleted. Deployment-side,
+`infrastructure/marzban/verify_patched_image.py` (`docker inspect` +
+label match, fail-closed on any mismatch or inspection failure) is now
+called from `deploy/lib/40_stack_up.sh` right before `compose up`
+whenever the deployment `.env`'s `ACCOUNTING_PROVIDER=marzban`, against
+whatever image reference Compose will actually use (default or a
+`MARZBAN_IMAGE` override alike -- no bypass flag exists). Compose
+defaults (`compose.transport.yml`, `compose.probe.yml`) now point at the
+local patched tag `lingsway/marzban:v0.8.4-routing-principal` instead of
+the unpatched upstream image. A new `marzban-image-contract` CI job
+builds the real image and proves both the positive (patched image passes)
+and negative (unpatched upstream image fails closed) verification cases
+on every PR.
+
+This development session's own Docker daemon could build+label+inspect a
+real image (proven with a `FROM scratch` smoke image, since this
+sandboxed session's network policy blocks `docker.io` registry pulls
+entirely, confirmed on unrelated public images too) but could not
+complete the real Marzban base-image pull; record
+`DOCKER_BUILD_ENVIRONMENT_UNAVAILABLE` for this session specifically --
+the new CI job performs the real build on unrestricted GitHub-hosted
+runners. Every step up to the Docker layer pull (pinned fetch, HEAD
+verification, source-tree contract, patch check/apply, patch-result
+verification) was executed for real against the genuine pinned commit
+and passed.
+
+This slice does not resolve the operational AGPL-3.0 source-offer /
+corresponding-source requirement that actually running the patched image
+in staging/production will raise; that decision needs the repository
+owner or counsel. Record: `MARZBAN_AGPL_DEPLOYMENT_COMPLIANCE_PENDING`.
+Real VPS deployment, real Marzban credentials/user creation, Webshare/
+Xray/Mihomo/transport registry wiring, and any `AGENTS.md`/architecture
+change remain out of scope and unstarted. Phase 2B remains **COMPLETE**;
+Phase 2C is **ACTIVE**; Phase 2C1 is **COMPLETE**; Phase 2C2 (this slice)
+awaits independent review with its PR **OPEN**, not merged.
