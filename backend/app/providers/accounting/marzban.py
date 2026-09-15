@@ -721,6 +721,27 @@ class MarzbanAccountingProvider:
             )
         return list(links)
 
+    def get_routing_principal(self, username: str) -> str:
+        """Read Marzban's patched routing identity without computing it locally."""
+
+        response = self._call(
+            "GET", f"/api/user/{_quote_username(username)}", operation="get_routing_principal"
+        )
+        if response.status_code != 200:
+            raise MarzbanApiError(
+                "Marzban rejected get_routing_principal",
+                operation="get_routing_principal",
+                status_code=response.status_code,
+            )
+        payload = _json_object(response, operation="get_routing_principal")
+        response_username = _require_str(payload, "username", operation="get_routing_principal")
+        if response_username != username:
+            raise MarzbanContractError(
+                "Marzban response username did not match the requested username",
+                operation="get_routing_principal",
+            )
+        return _require_str(payload, "routing_principal", operation="get_routing_principal")
+
     def get_usage(self, username: str) -> UsageDTO:
         response = self._call(
             "GET", f"/api/user/{_quote_username(username)}", operation="get_usage"
@@ -741,3 +762,4 @@ class MarzbanAccountingProvider:
             used_bytes=used_bytes,
             status=status,
         )
+

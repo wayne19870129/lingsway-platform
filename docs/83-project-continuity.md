@@ -529,3 +529,20 @@ does not pre-commit to an ordering the user hasn't set.
   authoritative source (ADR, `AGENTS.md`, current code, or a merged PR),
   fix this document in the same PR that notices the drift.
 
+## Current Phase 2B — Existing-data reconciliation
+
+PR #109 已人工合并到 `main`；当前 main 基线为
+`4bbcf585bf0fbfae885bec077645828dc7b58776`，writer-guard/drift 已完成。本
+PR 是 explicit existing-data reconciliation 的当前 vehicle，目标是把 active
+`GatewayRouteBinding` 的旧 `gateway_principal` 与 Marzban 已存在的
+`routing_principal` 对齐；Phase 2B 仍 **NOT COMPLETE**，Phase 2C 仍
+**BLOCKED**。
+
+工具默认 dry-run，只有 `--confirm` 才允许 Phase B 写入。Phase A 全量读取并
+调用 Marzban GET，任何缺失、异常、重复或外部错误整体 fail closed、零 DB
+写入；Phase B 使用既有 `gateway_route_binding_write()` named lock，锁内重读并
+严格比较 snapshot，再执行原值条件 UPDATE、rowcount 检查和单次 commit。它不
+属于 startup/Alembic/deploy/scheduler，也不做真实 Marzban/Xray side effect。
+审计只保留安全计数与 reason code。迁移/备份持久态清单为
+`docs/90-migration/persistent-state-manifest.md`。
+
