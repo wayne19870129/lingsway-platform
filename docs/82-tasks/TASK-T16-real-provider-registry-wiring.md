@@ -2035,8 +2035,8 @@ Phase 2C attempt，现均已关闭；PR #98 从未 merge，不能恢复。Xray g
 
 ## Phase 2B-remain-3 — Atomic full desired-state snapshot and outbound cutover
 
-本阶段的实现载体是当前 PR，基线为已人工合并 PR #103 后的 main
-`2bc58c57de72da16583286c7d507eab882769da0`。本 PR 将 live
+本阶段的实现载体为 PR #104，基线为已人工合并 PR #103 后的 main
+`2bc58c57de72da16583286c7d507eab882769da0`。该变更将 live
 `DesiredRoutingState` 一次性切换为 `user_routes` 与完整
 `tuple[XrayOutboundDTO, ...]`，并在同一 provisioning Session/事务中完成
 active route、endpoint、binding 与 credential ref 的全量 current-read 快照。
@@ -2053,7 +2053,8 @@ active route、endpoint、binding 与 credential ref 的全量 current-read 快�
   wiring、schema/migration、部署或生产 Xray IO。
 - 已新增 unit/provider 覆盖和 `test_mysql_xray_snapshot_concurrency.py` 的
   MySQL-only current-read/concurrency 集成覆盖。
-  本阶段若独立审查 PASS 且人工合并，则 full snapshot/outbound cutover 完成。
+  只有独立审查 PASS 且人工合并后，full snapshot/outbound cutover 才算完成；
+  当该变更位于 `main` 时，即视为 remain-3 完成。
   preservation rewrite、Reality persistence/ownership、writer-guard/drift
   baseline、existing-data reconciliation 仍是后续工作；Phase 2B 仍未
   COMPLETE，Phase 2C 继续 BLOCKED。

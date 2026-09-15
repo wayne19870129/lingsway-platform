@@ -1,9 +1,9 @@
 # Project Continuity / Handoff
 
 **Last reconciled with main baseline:** `2bc58c57de72da16583286c7d507eab882769da0`
-(verified 2026-09-14 UTC after PR #103 was manually merged). The current
-implementation vehicle is TASK-T16 Phase 2B-remain-3; dates in this
-document are UTC unless stated otherwise.
+(verified 2026-09-14 UTC after PR #103 was manually merged). The active
+technical work is TASK-T16 Phase 2B-remain-3; dates in this document are UTC
+unless stated otherwise.
 
 This document is maintained by whichever agent last touched a section
 below; if it looks stale, the next agent should refresh the relevant
@@ -442,13 +442,13 @@ decays quickly.
   `GITHUB_TOKEN`, even when the same-SHA `workflow_dispatch` CI/Security/
   Risk trio is green — see section 5's correction. The zero-manual-
   approval acceptance criterion is not yet satisfied.
-- **Current technical frontier**: TASK-T16 Phase 2B-remain-3, whose
-  implementation vehicle is this PR. PR #103/remain-1B is already merged on
-  main. This PR performs the one coherent full-snapshot and
+- **Current technical frontier**: TASK-T16 Phase 2B-remain-3. PR #103/remain-1B
+  is already merged on main. PR #104 is the remain-3 implementation vehicle
+  and performs the one coherent full-snapshot and
   `outbound_tags -> outbounds` cutover with current-read freshness,
-  credential precedence, and full Xray outbound rendering. If it receives
-  independent PASS and is manually merged, the remain-3 full snapshot/outbound
-  cutover is complete. Preservation-rule rewrite, Reality persistence/
+  credential precedence, and full Xray outbound rendering. Only independent
+  PASS followed by manual merge completes remain-3; once that change is on
+  main, the full snapshot/outbound cutover is complete. Preservation-rule rewrite, Reality persistence/
   ownership, writer-guard/drift baseline, and existing-data reconciliation
   remain outstanding. Phase 2B is still **not COMPLETE**.
   Issue #97 and PR #98 are historical Phase 2C attempt artifacts, both closed;

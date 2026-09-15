@@ -276,16 +276,25 @@ class SqlAlchemyProvisioningState(ProvisioningState):
         )
         rows = self.db.execute(statement).all()
 
-        # Read every active binding as a current row as well.  The joined row
-        # above supplies the selected binding for the normal case; this second
-        # read lets us reject an active subscription whose binding points at a
-        # different egress instead of silently falling back to the endpoint.
-        active_bindings = self.db.scalars(
-            select(EgressBinding)
-            .where(EgressBinding.released_at.is_(None))
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        ).all()
+        # Read only active bindings belonging to subscriptions represented by
+        # the authoritative route set.  This current-read consistency check
+        # catches a same-subscription binding pointing at another egress, but
+        # does not lock unrelated Phase-A bindings for subscriptions that have
+        # no active GatewayRouteBinding yet.
+        route_subscription_ids = {route.subscription_id for route, _, _ in rows}
+        active_bindings = (
+            self.db.scalars(
+                select(EgressBinding)
+                .where(
+                    EgressBinding.released_at.is_(None),
+                    EgressBinding.subscription_id.in_(route_subscription_ids),
+                )
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            ).all()
+            if route_subscription_ids
+            else []
+        )
         bindings_by_subscription: dict[int, list[EgressBinding]] = {}
         for binding in active_bindings:
             bindings_by_subscription.setdefault(binding.subscription_id, []).append(binding)

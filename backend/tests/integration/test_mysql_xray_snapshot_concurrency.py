@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
@@ -230,3 +230,78 @@ def test_mysql_snapshot_sees_b_committed_and_a_uncommitted_with_one_session(
                     )
                 ) is None
             db_a.rollback()
+
+
+def test_mysql_snapshot_does_not_lock_unrelated_phase_a_binding(
+    mysql_engine: Engine,
+) -> None:
+    """Guard the ADR-017 lock order for a binding with no active route yet.
+
+    B holds an uncommitted Phase-A-like endpoint/binding/Secret write but no
+    named lock and no committed route. A then holds the named lock and builds
+    its own snapshot. The snapshot must not lock B's unrelated subscription;
+    after A rolls back and releases the lock, B must still acquire it and
+    commit its route.
+    """
+    sub_a, sub_b, endpoint_a, endpoint_b = _seed(mysql_engine)
+
+    with Session(mysql_engine) as db_b, Session(mysql_engine) as db_a:
+        db_a.execute(text("SET SESSION innodb_lock_wait_timeout = 2"))
+
+        endpoint_b = db_b.get(EgressEndpoint, endpoint_b.id)
+        assert endpoint_b is not None
+        endpoint_b.host = "b-phase-a.example.invalid"
+        put_secret(
+            db_b,
+            "snap/unrelated-phase-a-credential",
+            '{"username":"unrelated-user","password":"unrelated-password"}',
+            "EGRESS_CREDENTIAL",
+        )
+        db_b.add(
+            EgressBinding(
+                subscription_id=sub_b,
+                egress_id=endpoint_b.id,
+                credential_secret_ref="snap/unrelated-phase-a-credential",
+            )
+        )
+        db_b.flush()
+
+        with gateway_route_binding_write(db_a):
+            put_secret(
+                db_a,
+                "snap/own-lock-order-credential",
+                '{"username":"own-user","password":"own-password"}',
+                "EGRESS_CREDENTIAL",
+            )
+            state = SqlAlchemyProvisioningState(db_a, sub_a)
+            desired = state.desired_routing_state(
+                request=None,  # type: ignore[arg-type]
+                endpoint=EgressEndpointDTO(
+                    str(endpoint_a.id), endpoint_a.host, endpoint_a.port, endpoint_a.protocol
+                ),
+                tenant=None,  # type: ignore[arg-type]
+                routing_principal="own-principal",
+            )
+            assert {outbound.tag for outbound in desired.outbounds} == {"egress-1"}
+            assert desired.outbounds[0].credential_secret_ref == "snap/own-lock-order-credential"
+            assert db_a.in_transaction()
+            db_a.rollback()
+
+        with gateway_route_binding_write(db_b, timeout_seconds=2):
+            db_b.add(
+                GatewayRouteBinding(
+                    subscription_id=sub_b,
+                    egress_id=endpoint_b.id,
+                    gateway_principal="unrelated-principal",
+                    outbound_tag="egress-b-after-lock",
+                    enabled=True,
+                )
+            )
+            db_b.commit()
+
+        with Session(mysql_engine) as verify_db:
+            assert verify_db.scalar(
+                select(GatewayRouteBinding).where(
+                    GatewayRouteBinding.subscription_id == sub_b
+                )
+            ) is not None
