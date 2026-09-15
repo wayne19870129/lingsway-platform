@@ -6,8 +6,9 @@ merged and the Reality canonical persistence/ownership slice is complete. PR
 #106 is the ADR-020 vehicle. While PR #106 is open, ADR-020 remains the current
 architecture gate before preservation/legal-deletion. When this change is
 present on `main`, ADR-020 is complete and the active Phase 2B order becomes
-provider-neutral full-config composition implementation, preservation/legal-
-deletion, writer-guard/drift baseline, existing-data reconciliation, and final
+full-config Xray composition implementation under the concrete adapter,
+preservation/legal-deletion, writer-guard/drift baseline, existing-data
+reconciliation, and final
 Phase 2B current-main review. Phase 2B remains **NOT COMPLETE** and Phase 2C
 remains **BLOCKED**. Dates in this document are UTC unless stated otherwise.
 
@@ -459,8 +460,8 @@ decays quickly.
   main at `866bc63d70f6785cfef5877724e81105ce1d7316`; that slice is complete.
   PR #106 is the ADR-020 vehicle. While it is open, ADR-020 is the current
   architecture gate before preservation/legal-deletion. When this change is
-  present on `main`, ADR-020 is complete and the next order is provider-neutral
-  full-config composition implementation, preservation/legal-deletion,
+  present on `main`, ADR-020 is complete and the next order is full-config Xray
+  composition implementation under the concrete adapter, preservation/legal-deletion,
   writer-guard/drift baseline, existing-data reconciliation, and final Phase
   2B current-main review. Phase 2B is still **not COMPLETE**.
   Issue #97 and PR #98 are historical Phase 2C attempt artifacts, both closed;
@@ -477,11 +478,12 @@ decays quickly.
   persistence/ownership slice is complete. PR #106 is the ADR-020 vehicle.
   While PR #106 is open, ADR-020 remains the architecture gate before
   preservation/legal-deletion. When this change is present on `main`, ADR-020
-  is complete and the active order is provider-neutral full-config composition
-  implementation, preservation/legal-deletion, writer-guard/drift baseline,
+  is complete and the active order is full-config Xray composition implementation
+  under the concrete adapter, preservation/legal-deletion, writer-guard/drift baseline,
   existing-data reconciliation, and final Phase 2B current-main review.
-  `runtime.current()` remains observation/rollback/drift only, and Marzban
-  dynamic clients remain outside repo-owned candidate/projection. Phase 2B
+  `runtime.current()` remains observation/rollback/drift only; the candidate's
+  repo-owned file skeleton includes `settings.clients=[]`, while Marzban
+  runtime-only dynamic membership remains outside repo-owned equality. Phase 2B
   remains **NOT COMPLETE**; Phase 2C remains **BLOCKED**; no registry wiring is
   permitted.
 - **Issue #87 / TASK-T23 replaces the abandoned custom-App proposal.**
@@ -518,4 +520,3 @@ does not pre-commit to an ordering the user hasn't set.
 - If a future agent detects drift between this document and the
   authoritative source (ADR, `AGENTS.md`, current code, or a merged PR),
   fix this document in the same PR that notices the drift.
-

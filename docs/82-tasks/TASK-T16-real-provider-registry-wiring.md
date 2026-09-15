@@ -2112,13 +2112,12 @@ production Python，不开始 preservation/legal-deletion，不创建 Issue，�
 
 PR #106 是 ADR-020 的 implementation vehicle；在 PR OPEN 期间，ADR-020
 仍是 preservation/legal-deletion 的 architecture gate。ADR-020 的唯一
-决策是 **Option B + provider-neutral renderer port + shared pure canonical
-composer**：
+决策是 **Option B + 现有 `GatewayProvider.render(...)` + shared pure
+canonical composer**：
 
-- generic `GatewayCandidateRenderer` 只接收 `DesiredRoutingState`、
-  `CredentialResolver` 并返回 `CandidateConfig`；generic
-  `GatewayProvider` 只负责 `validate`/`apply`/`health`，或保留完全
-  provider-neutral 的 render signature；
+- generic `GatewayProvider.render(DesiredRoutingState, CredentialResolver)`
+  保持为唯一 render contract，并继续与 `validate`/`apply`/`health` 共存；
+  不新增重复的 generic renderer Protocol；
 - application/infra composition boundary 在同一 operation-scoped Session
   中读取并校验 explicit Xray static projection、中央 `Settings`、持久化
   Reality identity 与 fresh `DesiredRoutingState`，并构造同一 operation 的
@@ -2126,13 +2125,16 @@ composer**：
 - Xray-specific `XrayStaticSkeleton`、secret-safe `XrayRealityConfig` 和
   `XrayFullConfigInput` 只存在于 concrete Xray adapter；一个纯
   `xray_composition` 模块负责完整 inbound/Reality/routing/outbounds 组合与
-  BLOCK invariants；`XrayCandidateRenderer` 返回的 `CandidateConfig.content`
-  必须可直接 test/install/reload；
+  BLOCK invariants；具体 Xray provider 的 `render()` 返回的
+  `CandidateConfig.content` 必须可直接 test/install/reload；
 - `ops/gateway/render_xray_routes.py` 只保留运维入口，必须复用同一 assembler/
   pure composer，不得保留第二套 composition semantics；
 - `runtime.current()` 只用于 backup/rollback、drift 与 post-reload exact
-  projection，绝不作为 pre-apply desired source 或 merge superset；Marzban
-  dynamic clients 由 ADR-015 的独立 owner 管理，不复制进候选。
+  projection，绝不作为 pre-apply desired source 或 merge superset；磁盘
+  candidate 明确包含 repo-owned `inbounds[*].settings.clients=[]` 文件骨架，
+  而 Marzban gRPC Handler API 动态维护的真实 membership 属于独立
+  `MARZBAN_RUNTIME` owner，不复制进候选，也不参与 repo desired equality；
+  post-reload comparison 必须把两者分开。
 
 下一 slice 的 preservation contract 固定为：
 `GET_LOCK -> route mutate/flush -> fresh full desired snapshot ->
@@ -2144,7 +2146,7 @@ fields 分开；stale deleted route/outbound 必须不存在，缺失 repo-owned
 operation Session；既有 create-once bootstrap 仍是独立 Secret lifecycle。
 
 PR #106 合并到 `main` 后，ADR-020 即完成；下一顺序变为
-provider-neutral full-config composition implementation -> preservation/legal-
+full-config Xray composition implementation under the concrete adapter -> preservation/legal-
 deletion -> writer-guard/drift baseline -> existing-data reconciliation ->
 final Phase 2B current-main review。验收必须覆盖
 full-candidate/provider-ops parity、credential/Secret redaction、
@@ -2154,4 +2156,3 @@ run-test 前置拒绝以及 rollback。此 docs-only PR 合并后只表示 compo
 boundary 已收敛，不表示 preservation 已开始；Phase 2B 仍为 **NOT COMPLETE**，
 Phase 2C 仍为 **BLOCKED**。PR #105 的 Reality slice 已完成；PR #106
 仍须人工审查和人工合并，禁止自动 merge。
-

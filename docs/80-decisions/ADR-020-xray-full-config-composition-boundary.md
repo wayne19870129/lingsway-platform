@@ -20,19 +20,20 @@ composition boundary is split deliberately:
 2. A pure canonical Xray composer owns deterministic structural composition. It
    overlays the canonical Reality fields, renders resolved outbounds, renders
    routing, preserves the fixed skeleton, and returns a complete JSON object.
-3. A provider-neutral `GatewayCandidateRenderer` is the application port for
-   rendering. The concrete `XrayCandidateRenderer` is the full-config Xray
-   adapter; its `CandidateConfig` content is the complete file that the
-   `XrayFileProvider` runtime adapter may test, install, reload, and verify.
-   Neither generic domain code nor the provider base contract knows Xray,
-   Reality, Marzban, or a filesystem path.
+3. The existing `GatewayProvider.render(DesiredRoutingState,
+   CredentialResolver)` remains the single generic render API. The concrete
+   `XrayFileProvider` implementation may use an operation-fresh Xray
+   composition context supplied by application/infra and returns a complete
+   `CandidateConfig`. Neither generic domain code nor the provider base
+   contract knows Xray, Reality, Marzban, or a filesystem path.
 
-The selected alternative is **Option B: application/infra constructs a
-provider-neutral candidate-rendering port and a concrete Xray adapter receives
-validated Xray context, implemented through one shared pure canonical composer**.
-This keeps data ownership and secret/session lifetime outside generic domain and
-base contracts while making the provider/runtime path and standalone ops path
-use exactly one composition semantics.
+The selected alternative is **Option B: application/infra supplies an
+operation-fresh Xray composition context to the concrete Xray implementation,
+which uses one shared pure canonical composer behind the existing
+`GatewayProvider.render` contract**. This keeps data ownership and
+secret/session lifetime outside generic domain and base contracts while making
+the provider/runtime path and standalone ops path use exactly one composition
+semantics. No second generic renderer Protocol is introduced.
 
 This ADR does not implement the composer, change production Python, wire the
 registry, or start the preservation rewrite. Those are the next implementation
@@ -63,42 +64,53 @@ provider-specific meaning for `CandidateConfig`.
 ### 3.1 Static template skeleton
 
 `infrastructure/marzban/xray_config.base.json` remains an input to the concrete
-Xray adapter, not a generic desired-state source. The composer may copy only
-the following explicit allowlist; all other template paths are rejected as
-unknown unless this ADR is amended:
+Xray adapter, not a generic desired-state source. The composer may inspect only
+the following explicit field allowlist; each field is emitted according to its
+listed owner. All other template paths are rejected as unknown unless this ADR
+is amended:
 
 | Template path | Canonical owner | Candidate behavior |
 | --- | --- | --- |
-| `log.loglevel` | `STATIC_TEMPLATE` | copy exactly |
-| `inbounds[*].tag` | `STATIC_TEMPLATE` | copy exactly |
+| `log.loglevel` | `SETTINGS` | read from deployment Settings; template is not authoritative |
+| `inbounds[*].tag` | `XRAY_RENDERER_CONSTANT` | emit the fixed Xray tag; template is not authoritative |
 | `inbounds[*].listen` | `STATIC_TEMPLATE` | copy exactly |
 | `inbounds[*].port` | `STATIC_TEMPLATE` | copy exactly |
 | `inbounds[*].protocol` | `STATIC_TEMPLATE` | copy exactly |
-| `inbounds[*].settings.decryption` | `STATIC_TEMPLATE` | copy exactly |
-| `inbounds[*].streamSettings.network` | `STATIC_TEMPLATE` | copy exactly |
-| `inbounds[*].streamSettings.security` | `STATIC_TEMPLATE` | copy exactly |
-| `inbounds[*].streamSettings.realitySettings.show` | `STATIC_TEMPLATE` | copy exactly |
-| `inbounds[*].streamSettings.realitySettings.xver` | `STATIC_TEMPLATE` | copy exactly |
-| `routing.domainStrategy` | `STATIC_TEMPLATE` | copy exactly |
+| `inbounds[*].settings.decryption` | `XRAY_RENDERER_CONSTANT` | emit the fixed Xray protocol value |
+| `inbounds[*].streamSettings.network` | `XRAY_RENDERER_CONSTANT` | emit the fixed Xray transport value |
+| `inbounds[*].streamSettings.security` | `XRAY_RENDERER_CONSTANT` | emit the fixed Xray security value |
+| `inbounds[*].streamSettings.realitySettings.show` | `XRAY_RENDERER_CONSTANT` | emit the fixed Reality structure value |
+| `inbounds[*].streamSettings.realitySettings.xver` | `XRAY_RENDERER_CONSTANT` | emit the fixed Reality structure value |
+| `routing.domainStrategy` | `XRAY_RENDERER_CONSTANT` | emit the fixed routing structure value |
 | `inbounds[*].streamSettings.realitySettings.dest` | `SETTINGS` | overwrite from Settings |
 | `inbounds[*].streamSettings.realitySettings.serverNames` | `SETTINGS` | overwrite from Settings |
 | `inbounds[*].streamSettings.realitySettings.privateKey` | `SECRET` | overwrite from persisted identity |
 | `inbounds[*].streamSettings.realitySettings.shortIds` | `SECRET` | overwrite from persisted identity |
-| `inbounds[*].settings.clients` | `MARZBAN_RUNTIME` | exclude; never copy or synthesize |
+| `inbounds[*].settings.clients` | `XRAY_FILE_SKELETON` | emit the canonical repo-owned empty list `[]`; never copy runtime membership |
 | `routing.rules` | `DB` + `RENDERER_CONSTANT` | replace with fresh desired rules and fixed BLOCK rules |
 | `outbounds` | `DB` + `RENDERER_CONSTANT` | replace with fresh desired outbounds and BLOCK |
 
-`STATIC_TEMPLATE` is limited here to the listed fixed wire-up/default fields;
-it does not own Reality identity or deploy values. `DB` owns desired route and
-egress definitions, `SECRET` owns the persisted Reality identity,
-`SETTINGS` owns Reality deployment values, `RENDERER_CONSTANT` owns the BLOCK
-outbound/rules, and `MARZBAN_RUNTIME` owns dynamic clients. The composer must
-validate the template against this projection before composing. A future
-template key, or a current key not listed above, fails closed and requires an
-explicit ownership update in a reviewed ADR; it is never inherited by a broad
+`STATIC_TEMPLATE` is limited to the ADR-014 skeleton fields `protocol`,
+`listen`, and `port` (plus only genuinely equivalent infrastructure wiring
+if later accepted explicitly). It does not own log level or any Xray
+protocol/Reality structure value beyond the explicitly retained
+`inbounds[*].protocol` skeleton field, Reality identity, or deployment values.
+`DB` owns
+desired route and egress definitions, `SECRET` owns the persisted Reality
+identity, `SETTINGS` owns deployment-varying values, `XRAY_RENDERER_CONSTANT`
+owns fixed Xray protocol/structure semantics and fixed BLOCK semantics,
+`XRAY_FILE_SKELETON` owns the file's explicit empty `clients` skeleton, and
+`MARZBAN_RUNTIME` owns dynamic client membership. The composer must validate
+the template against this projection before composing. A future template key,
+or a current key not listed above, fails closed and requires an explicit
+ownership update in a reviewed ADR; it is never inherited by a broad
 `deepcopy(template)` rule.
 
 ### 3.2 Central Settings
+
+The deployment Settings owner supplies `log.loglevel` as well as the Reality
+deployment values below. A template value is never a fallback for a missing or
+invalid Settings value.
 
 `Settings.xray_reality_dest` and
 `Settings.xray_reality_server_name` are the sole desired sources for Reality
@@ -136,8 +148,8 @@ snapshot. It is not derived from `runtime.current()`.
 Egress credential refs continue to be resolved through the explicit
 operation-scoped `CredentialResolver` from ADR-019. The resolver is built by
 the application/infra boundary with the same provisioning `Session` used for
-the fresh route/outbound read. `XrayCandidateRenderer` may use the resolver only for
-the duration of `render()`; it never stores it. Plaintext credential material
+the fresh route/outbound read. The concrete Xray render path may use the resolver
+only for the duration of `render()`; it never stores it. Plaintext credential material
 may exist transiently in the composer/provider call, but DTO reprs, exceptions,
 logs, and audit payloads must remain redacted.
 
@@ -146,34 +158,32 @@ object.
 
 ## 4. Provider-neutral and Xray-specific contracts
 
-The generic provider base and domain remain provider-neutral. The approved
-generic application port is:
+The generic provider base and domain remain provider-neutral. The existing
+single render contract is retained exactly:
 
 ```python
-class GatewayCandidateRenderer(Protocol):
+class GatewayProvider(Protocol):
     def render(
         self,
         desired: DesiredRoutingState,
         resolver: CredentialResolver,
     ) -> CandidateConfig: ...
 
-
-class GatewayProvider(Protocol):
     def validate(self, candidate: CandidateConfig) -> ValidationResult: ...
     def apply(self, candidate: CandidateConfig) -> ApplyResult: ...
     def health(self) -> HealthReport: ...
 ```
 
-This is the explicit future change to `backend/app/providers/base.py`: add the
-provider-neutral `GatewayCandidateRenderer` and remove rendering from
-`GatewayProvider` if the current lifecycle Protocol still includes it. If a
-compatibility version retains `render` on `GatewayProvider`, its signature must
-remain exactly provider-neutral (`DesiredRoutingState` plus
-`CredentialResolver`), never an Xray-specific type. The domain provisioning
-service depends only on `GatewayCandidateRenderer`, `GatewayProvider`,
+No second generic renderer Protocol is needed. The implementation PR must keep
+this signature provider-neutral (`DesiredRoutingState` plus
+`CredentialResolver`) and must not place Xray-specific types in
+`backend/app/providers/base.py` or generic domain contracts. The domain
+provisioning service depends only on `GatewayProvider`,
 `DesiredRoutingState`, `CredentialResolver`, and `CandidateConfig`; it never
-imports Xray, Reality, Marzban, or filesystem concepts. The implementation PR
-must update mocks, constructors, callers, and tests in the same change.
+imports Xray, Reality, Marzban, or filesystem concepts. The concrete Xray
+adapter may use an operation-fresh Xray context internally, but that context
+is supplied at the application/infra boundary and is not a second public
+rendering interface.
 
 The concrete Xray adapter lives under `backend/app/providers/gateway/` or an
 application/infra adapter module and may define the following custom immutable
@@ -198,22 +208,14 @@ class XrayFullConfigInput:
     ...
 
 
-class XrayCandidateRenderer(GatewayCandidateRenderer):
-    def render(
-        self,
-        desired: DesiredRoutingState,
-        resolver: CredentialResolver,
-    ) -> CandidateConfig: ...
 ```
 
-`XrayCandidateRenderer` is constructed per operation by an application/infra
-factory with a validated `XrayStaticSkeleton` and persisted
-`XrayRealityConfig`. Its public method still satisfies the provider-neutral
-port; internally it forms `XrayFullConfigInput`, invokes the shared pure Xray
-composer, resolves credentials through the explicit resolver, and returns a
-complete candidate. The process/application-lifetime registry may hold the
-stateless `XrayFileProvider` runtime adapter, but it must not hold this
-operation-scoped Xray context, resolver, Session, or plaintext.
+The concrete Xray `GatewayProvider.render()` path is supplied per operation
+with a validated `XrayStaticSkeleton` and persisted `XrayRealityConfig`. It
+forms `XrayFullConfigInput`, invokes the shared pure Xray composer, resolves
+credentials through the explicit resolver, and returns a complete candidate.
+The process/application-lifetime registry may hold the runtime adapter, but it
+must not hold an operation-scoped Xray context, resolver, Session, or plaintext.
 
 `XrayRealityConfig` is normative as a custom immutable non-dataclass. Its
 secret-bearing properties (`private_key`, `short_ids`) are available only to
@@ -235,7 +237,7 @@ same operation Session
   -> current-read persisted Reality identity
   -> fresh DesiredRoutingState
   -> construct operation-scoped CredentialResolver
-  -> XrayCandidateRenderer.render(DesiredRoutingState, resolver)
+  -> concrete Xray GatewayProvider.render(DesiredRoutingState, resolver)
   -> complete CandidateConfig
 ```
 
@@ -284,9 +286,11 @@ The composer must:
 
 The static projection is an allowlist, not a permissive copy operation. A
 new template field is an error until its owner and behavior are explicitly
-recorded in an ADR. `inbounds[*].settings.clients` is deliberately omitted
-because its owner is `MARZBAN_RUNTIME`; its absence from the repo candidate is
-not a request to regenerate or preserve dynamic clients.
+recorded in an ADR. The repo-owned file candidate explicitly emits
+`inbounds[*].settings.clients: []`, matching the accepted empty skeleton from
+ADR-015. This empty list is file-skeleton state, not runtime membership: the
+composer never copies or synthesizes Marzban-managed dynamic clients from
+`runtime.current()`.
 
 The renderer owns these hard invariants:
 
@@ -311,15 +315,16 @@ operation Session. That violates the provider/domain/infra split and ADR-019's
 no-Session/no-ORM provider rule. A provider can own the pure rendering
 algorithm, but not the data-access lifecycle.
 
-### Option B — application/infra builds typed full input, concrete Xray adapter renders it
+### Option B — application/infra supplies Xray context to the concrete adapter
 
 Selected. It gives the assembler one operation lifecycle and keeps route,
 Settings, static-skeleton, and Secret reads explicit. The generic application
-port receives only `DesiredRoutingState` and `CredentialResolver`; the concrete
-`XrayCandidateRenderer` receives its validated Xray context at operation scope,
-forms the Xray-specific input, and returns the full candidate. The shared pure
-composer makes this choice deterministic rather than duplicating a second
-renderer, while `GatewayProvider` remains replaceable for non-Xray gateways.
+uses the existing `GatewayProvider.render(DesiredRoutingState,
+CredentialResolver)` call. The concrete Xray implementation receives its
+validated Xray context at operation scope, forms the Xray-specific input, and
+returns the full candidate. The shared pure composer makes this choice
+deterministic without adding a second renderer interface, while
+`GatewayProvider` remains replaceable for non-Xray gateways.
 
 ### Option C — merge `runtime.current()` into the candidate
 
@@ -344,44 +349,46 @@ this ADR removes.
 
 ## 7. Provider and standalone-ops relationship
 
-There is one canonical pure composer and two thin orchestration adapters:
+There is one canonical pure composer and one existing provider contract:
 
-- The application/infra factory constructs an operation-scoped
-  `XrayCandidateRenderer` with validated `XrayStaticSkeleton` and
-  `XrayRealityConfig`. Its provider-neutral `render(desired, resolver)` method
-  delegates to the pure composer and wraps the resulting full JSON object in
+- `XrayFileProvider.render(desired, resolver)` remains the single generic
+  entrypoint. Its concrete Xray implementation uses the operation-fresh
+  `XrayStaticSkeleton`/`XrayRealityConfig` context supplied by application/infra,
+  delegates to the pure composer, and wraps the resulting full JSON object in
   `CandidateConfig`.
-- `XrayFileProvider` is the stateless runtime/application adapter for
-  `validate`, `apply`, and `health`. It consumes only the complete
-  `CandidateConfig`; it never accepts or installs a routing fragment. If a
-  compatibility `render` method remains on this concrete class, it must expose
-  only the provider-neutral `DesiredRoutingState`/`CredentialResolver` shape
-  and delegate to an operation-scoped `XrayCandidateRenderer`, never expose
-  `XrayFullConfigInput` through a generic Protocol.
+- `XrayFileProvider` consumes only the complete `CandidateConfig` for
+  `validate`, `apply`, and `health`; it never accepts or installs a routing
+  fragment. The Xray context is an internal concrete-adapter concern, not a
+  new generic Protocol or DTO layer.
 - `ops/gateway/render_xray_routes.py` remains a standalone operational entry
   point while that workflow exists, but its DB/Settings/Secret collection is
   moved behind the same application/infra assembler and its final structure is
   produced by the same pure composer. It must not retain a parallel
   `render_config()` semantics.
 
-The concrete Xray candidate adapter is the long-term full-config renderer. The
-standalone script is a compatibility/operations adapter, not a second source of
-truth. The two paths must be covered by parity tests over the same
-Xray-specific context and generic desired snapshot. The generic gateway
-provider contract remains portable to a different engine or vendor.
+The concrete Xray adapter is the long-term full-config renderer. The standalone
+script is a compatibility/operations adapter, not a second source of truth.
+The two paths must be covered by parity tests over the same Xray-specific
+context and generic desired snapshot. The generic gateway provider contract
+remains portable to a different engine or vendor.
 
 ## 8. Marzban dynamic-client boundary
 
 Marzban remains the owner of dynamic client lifecycle described by ADR-015.
-Dynamic client records and other Marzban-managed runtime fields are not part of
-the repo-owned `XrayFullConfigInput`, canonical candidate, or repo-owned
-post-reload projection. The composer must not copy them from `runtime.current()`.
+The disk file also has a repo-owned skeleton: the canonical candidate includes
+`inbounds[*].settings.clients: []`. That empty list is a file-skeleton field;
+it is not the runtime membership managed by Marzban's gRPC Handler API.
+
+The actual dynamic client records and other Marzban-managed runtime fields are
+not part of the repo-owned desired state or desired equality. The composer must
+not copy them from `runtime.current()` into the candidate.
 
 The runtime adapter's install contract must therefore be explicit: it installs
-the repo-owned full candidate and must not synthesize dynamic clients from a
-runtime read. An adapter that cannot apply the full candidate while leaving
-Marzban's separately managed client lifecycle intact is unsupported and must
-fail closed; `runtime.current()` merging is not an allowed compatibility fix.
+the repo-owned full candidate with the empty file skeleton and must not
+synthesize dynamic clients from a runtime read. An adapter that cannot apply
+the full candidate while leaving Marzban's separately managed client lifecycle
+intact is unsupported and must fail closed; `runtime.current()` merging is not
+an allowed compatibility fix.
 
 The implementation must distinguish these comparison classes:
 
@@ -389,11 +396,22 @@ The implementation must distinguish these comparison classes:
 | --- | --- | --- |
 | Routing rules and repo-owned outbounds | repository desired state | exact canonical equality |
 | Static inbound protocol/listen/port skeleton | static template | exact canonical equality |
-| Reality `dest`, `serverNames`, `privateKey`, `shortIds` | Settings + Secret identity | exact canonical equality |
-| Marzban dynamic clients and runtime-only fields | Marzban/runtime | excluded from repo-owned equality; never copied |
+| Fixed Xray tag/decryption/network/security/Reality show/xver/domainStrategy | Xray renderer constants | exact canonical equality |
+| `log.loglevel` and Reality `dest`/`serverNames` | deployment Settings | exact canonical equality |
+| Reality `privateKey`, `shortIds` | Secret identity | exact canonical equality |
+| File skeleton `inbounds[*].settings.clients` | repo-owned Xray file skeleton | exact canonical equality to `[]` |
+| Runtime-only dynamic client membership and other runtime-only fields | Marzban/runtime | excluded from repo-owned equality; never copied |
 
-If a required repo-owned field is absent or cannot be projected safely after
-reload, verification fails closed. It is not silently classified as dynamic.
+The Settings row above covers deployment-varying values; the Secret identity
+row remains the sole owner of `privateKey` and `shortIds`. After reload or
+drift inspection, the projection must keep the file skeleton `clients=[]`
+separate from runtime-only dynamic membership. If the adapter cannot make that
+distinction safely, verification fails closed rather than broadening the
+desired candidate or treating the runtime membership as file drift.
+
+If any other required repo-owned field is absent or cannot be projected safely
+after reload, verification fails closed. It is not silently classified as
+dynamic.
 
 ## 9. Preservation/legal-deletion contract for the next slice
 
@@ -401,17 +419,19 @@ The preservation rewrite must use this algorithm:
 
 1. Acquire the existing named GatewayRouteBinding lock.
 2. Perform the route mutation and flush, without an early business commit.
-3. Read a fresh desired snapshot using the same operation Session, construct the
-   operation-scoped provider-neutral renderer and concrete Xray context at the
-   application/infra boundary, resolve credentials, and compose a full
-   candidate. The domain sees only the neutral renderer port.
+3. Read a fresh desired snapshot using the same operation Session, supply the
+   operation-fresh Xray context at the application/infra boundary, resolve
+   credentials, and call the existing `GatewayProvider.render()` to compose a
+   full candidate. The domain sees only the generic provider contract.
 4. Parse the candidate, run all structural invariants, and invoke `xray run
    -test` before installation.
 5. Back up the current file, install the complete candidate, reload, and run
    health checks.
-6. Read `runtime.current()` only for post-reload observation. Project its
-   repo-owned fields and compare them **exactly** with the candidate's
-   repo-owned projection.
+6. Read `runtime.current()` only for post-reload observation. Project the
+   repo-owned file skeleton, including `settings.clients=[]`, and the other
+   repo-owned fields; compare them **exactly** with the candidate's projection.
+   Keep Marzban runtime-only dynamic membership in a separate projection and
+   exclude it from repo-owned equality.
 7. Commit the caller-owned business transaction only after validation, apply,
    reload, and exact projection succeed. On any failure, rollback the business
    transaction and restore/reload the backup using the existing compensation
@@ -436,14 +456,14 @@ commit/rollback boundary remain unchanged.
 
 The next implementation PR must be limited to the following concrete work:
 
-- `backend/app/providers/base.py`: add the provider-neutral
-  `GatewayCandidateRenderer` Protocol and keep `GatewayProvider` limited to
-  `validate`/`apply`/`health` (or retain only a provider-neutral render
-  signature); adapt mocks and call sites together. Do not add Xray DTOs here.
+- `backend/app/providers/base.py`: retain the existing
+  `GatewayProvider.render(DesiredRoutingState, CredentialResolver)` contract
+  together with `validate`/`apply`/`health`; keep it provider-neutral and do
+  not add Xray DTOs or a second renderer Protocol here.
 - `backend/app/providers/gateway/xray_file.py` or the concrete Xray adapter
   module: add the custom immutable `XrayStaticSkeleton`, `XrayRealityConfig`,
-  and `XrayFullConfigInput` types plus the operation-scoped
-  `XrayCandidateRenderer`; these are not generic domain contracts.
+  and `XrayFullConfigInput` types plus the concrete Xray composition path;
+  these are not generic domain contracts.
 - `backend/app/providers/gateway/xray_composition.py`: add the pure canonical
   full-config composer and invariant helpers.
 - `backend/app/providers/gateway/xray_file.py`: make the concrete Xray adapter's
@@ -452,10 +472,10 @@ The next implementation PR must be limited to the following concrete work:
   preservation with the exact post-reload repo-owned projection in a later
   preservation slice.
 - `backend/app/domain/provisioning.py` and the application composition
-  boundary: depend on the provider-neutral renderer, while the application/
-  infra factory assembles fresh desired state, validates the explicit Xray
+  boundary: continue to call the generic `GatewayProvider.render()` contract;
+  application/infra assembles fresh desired state, validates the explicit Xray
   skeleton, reads Reality identity, and constructs the same-operation resolver
-  without exposing Session/ORM to the provider.
+  without exposing Session/ORM or Xray JSON to generic domain code.
 - `ops/gateway/render_xray_routes.py`: use the shared assembler/composer and
   remove duplicate structural semantics while retaining its operational entry
   point until the provider path is live.
@@ -490,4 +510,3 @@ This ADR does not authorize or include:
 - copying runtime config into desired state;
 - changing Reality ownership, Secret ref/purpose, Settings field names, or
   persisted identity semantics from PR #105.
-
