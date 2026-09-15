@@ -64,7 +64,7 @@ def test_composer_emits_all_canonical_owners_and_ignores_template_values() -> No
 
     assert candidate.version == "xray-full-v1"
     assert candidate.content["log"] == {"loglevel": "warning"}
-    inbound = candidate.content["inbounds"][0]
+    inbound = candidate.content["inbounds"][0]  # type: ignore[index]
     assert inbound["tag"] == "vless-reality"
     assert inbound["settings"]["clients"] == []
     assert inbound["streamSettings"]["realitySettings"]["privateKey"] == "private-key"
