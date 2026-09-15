@@ -274,6 +274,13 @@ def test_mysql_snapshot_does_not_lock_unrelated_phase_a_binding(
                 "EGRESS_CREDENTIAL",
             )
             state = SqlAlchemyProvisioningState(db_a, sub_a)
+            db_a.add(
+                EgressBinding(
+                    subscription_id=sub_a,
+                    egress_id=endpoint_a.id,
+                    credential_secret_ref="snap/own-lock-order-credential",
+                )
+            )
             desired = state.desired_routing_state(
                 request=None,  # type: ignore[arg-type]
                 endpoint=EgressEndpointDTO(
