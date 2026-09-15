@@ -1,15 +1,14 @@
 # Project Continuity / Handoff
 
-**Last reconciled with main baseline:** `d4a16ce21f21227670adc4e64233ecd382b435da`
-(verified 2026-09-14 UTC after PR #102 merge; PR #103 is the implementation vehicle
-for Phase 2B-remain-1B and its acceptance condition is independent PASS followed by
-manual merge — dates in
-this document are UTC unless stated otherwise, so a local-time reading
-of a commit's own timestamp can legitimately differ by a day), during
-Issue #74; corrected 2026-09-13 on this same PR (#75) after independent
-review found the Marzban provider baseline, the "Open" task list, an
-in-flight automation failure, and a role-wording contradiction all
-needed fixing — see sections 3, 5, 6, and 7.
+**Last reconciled with main baseline:** `2bc58c57de72da16583286c7d507eab882769da0`
+(verified 2026-09-14 UTC after PR #103 was manually merged). PR #104 is the
+TASK-T16 Phase 2B-remain-3 implementation vehicle. Only independent PASS plus
+manual merge completes remain-3; when this change is present on `main`, remain-3
+is complete and the remaining Phase 2B work becomes the active frontier:
+preservation/legal-deletion, Reality persistence/ownership, writer-guard/drift
+baseline, and existing-data reconciliation. Phase 2B remains **NOT COMPLETE**
+and Phase 2C remains **BLOCKED**. Dates in this document are UTC unless stated
+otherwise.
 
 This document is maintained by whichever agent last touched a section
 below; if it looks stale, the next agent should refresh the relevant
@@ -448,16 +447,15 @@ decays quickly.
   `GITHUB_TOKEN`, even when the same-SHA `workflow_dispatch` CI/Security/
   Risk trio is green — see section 5's correction. The zero-manual-
   approval acceptance criterion is not yet satisfied.
-- **Current technical frontier**: TASK-T16 Phase 2B-remain-1B,
-  whose implementation vehicle is PR #103. ADR-019 is Accepted and now fixes
-  route/endpoint/binding/Secret current-read freshness, ref-only
-  outbound DTOs with safe repr, the operation-scoped resolver API, plaintext
-  lifecycle, and CandidateConfig redaction. Remain-1B adds the resolver,
-  stable error contract, explicit provisioning/provider dependency, and
-  regression tests; it does not change the live desired-state shape. When PR #103
-  is on main, remain-1B is complete there. The next step is one coherent remain-3 full-snapshot and
-  `outbound_tags -> outbounds` live cutover; no intermediate full-snapshot
-  contract + delta producer may merge. Phase 2B is still **not COMPLETE**.
+- **Current technical frontier**: TASK-T16 Phase 2B-remain-3. PR #103/remain-1B
+  is already merged on main. PR #104 is the remain-3 implementation vehicle
+  and performs the one coherent full-snapshot and
+  `outbound_tags -> outbounds` cutover with current-read freshness,
+  credential precedence, and full Xray outbound rendering. Only independent
+  PASS followed by manual merge completes remain-3; once that change is on
+  main, the full snapshot/outbound cutover is complete. Preservation-rule rewrite, Reality persistence/
+  ownership, writer-guard/drift baseline, and existing-data reconciliation
+  remain outstanding. Phase 2B is still **not COMPLETE**.
   Issue #97 and PR #98 are historical Phase 2C attempt artifacts, both closed;
   PR #98 was never merged. Issue #101 is also closed as Not planned. Phase 2C
   remains technically **BLOCKED**, and `GATEWAY_PROVIDER=xray_file` registry

@@ -71,6 +71,7 @@ from backend.app.providers.base import (
     AccountUserDTO,
     CredentialDTO,
     DesiredRoutingState,
+    XrayOutboundDTO,
 )
 from backend.app.providers.captcha.noop import NoopCaptchaProvider
 from backend.app.providers.egress.mock import MockEgressProvider
@@ -1559,9 +1560,19 @@ def test_production_xray_render_uses_routing_principal_as_the_user_routes_key(
             )
         )
         assert binding is not None
+        current_endpoint = db.get(EgressEndpoint, binding.egress_id)
+        assert current_endpoint is not None
         desired = DesiredRoutingState(
             user_routes={binding.gateway_principal: binding.outbound_tag},
-            outbound_tags=(binding.outbound_tag, "BLOCK"),
+            outbounds=(
+                XrayOutboundDTO(
+                    binding.outbound_tag,
+                    current_endpoint.host,
+                    current_endpoint.port,
+                    current_endpoint.protocol,
+                    current_endpoint.credential_secret_ref,
+                ),
+            ),
         )
 
     candidate = XrayFileProvider(runtime=None).render(  # type: ignore[arg-type]

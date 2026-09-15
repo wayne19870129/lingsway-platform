@@ -2031,3 +2031,30 @@ Phase 2C attempt，现均已关闭；PR #98 从未 merge，不能恢复。Xray g
 本 PR 不创建 Issue、不自动合并，也不重新打开 #97/#98。Phase 2B 仍未 COMPLETE；remain-3
 仍未开始，Phase 2C 继续 BLOCKED。ADR-019 已接受；live `DesiredRoutingState`
 仍保持 `user_routes` / `outbound_tags` 旧形状。
+
+
+## Phase 2B-remain-3 — Atomic full desired-state snapshot and outbound cutover
+
+本阶段的实现载体为 PR #104，基线为已人工合并 PR #103 后的 main
+`2bc58c57de72da16583286c7d507eab882769da0`。该变更将 live
+`DesiredRoutingState` 一次性切换为 `user_routes` 与完整
+`tuple[XrayOutboundDTO, ...]`，并在同一 provisioning Session/事务中完成
+active route、endpoint、binding 与 credential ref 的全量 current-read 快照。
+
+- 快照只包含 enabled 且未 released 的 `GatewayRouteBinding`，拒绝缺失或
+  不一致 endpoint/binding、重复 principal/tag、无效 endpoint 字段以及无效
+  credential ref；binding override 只有精确 `None`/空字符串回退 endpoint ref，
+  非空 malformed（包括 whitespace）保持选中并由 resolver fail closed。
+- Xray renderer 只从 DTO 生成真实 SOCKS outbound，credential 通过同一
+  operation-scoped resolver 解析；BLOCK 由 renderer 固定生成，private geoip
+  规则置首，user rules 居中，tcp/udp BLOCK 置末，不生成 DIRECT。
+- 快照前不提前 commit；render/apply 成功后才由既有调用方 commit，失败则在
+  named-lock span 内 rollback。未修改 Reality、preservation 校验、registry
+  wiring、schema/migration、部署或生产 Xray IO。
+- 已新增 unit/provider 覆盖和 `test_mysql_xray_snapshot_concurrency.py` 的
+  MySQL-only current-read/concurrency 集成覆盖。
+  只有独立审查 PASS 且人工合并后，full snapshot/outbound cutover 才算完成；
+  当该变更位于 `main` 时，即视为 remain-3 完成。
+  preservation rewrite、Reality persistence/ownership、writer-guard/drift
+  baseline、existing-data reconciliation 仍是后续工作；Phase 2B 仍未
+  COMPLETE，Phase 2C 继续 BLOCKED。
