@@ -2117,7 +2117,9 @@ canonical composer**：
 
 - generic `GatewayProvider.render(DesiredRoutingState, CredentialResolver)`
   保持为唯一 render contract，并继续与 `validate`/`apply`/`health` 共存；
-  不新增重复的 generic renderer Protocol；
+  不新增重复的 generic renderer Protocol。ADR-019 已接受的
+  `XrayOutboundDTO` 及 `DesiredRoutingState.outbounds` 类型保持不变；本
+  ADR 不要求 rename/generalize，也不创建新的 provider-neutral outbound DTO；
 - `ProviderRegistry.gateway` 与 `XrayFileProvider` 是
   process/application-lifetime 的 stateless provider owner，只能持有
   immutable、non-secret 的 validated `XrayStaticSkeleton`、固定

@@ -168,9 +168,14 @@ identity is read from the template or `xray_config.json`, and no identity is
 written to logs, reprs, audit events, PR text, or error messages.
 
 The existing create-once bootstrap remains a separate identity-provisioning
-operation. During a route apply, the assembler performs a current read of the
-already-owned identity. If the identity is absent or invalid, composition fails
-closed; route mutation is not made to depend on an implicit regeneration.
+operation. During a route apply, the operation-scoped resolver implementing
+`XrayRenderResolver` performs the purpose-bound current read of the already-owned
+identity from the same operation Session when the concrete Xray
+`render()` calls `resolve_reality_identity()`. If the identity is absent or
+invalid, composition fails closed; route mutation is not made to depend on an
+implicit regeneration. The assembler constructs the same-operation resolver,
+obtains fresh `DesiredRoutingState`, and wires process-stable configuration; it
+does not pass Reality plaintext directly to the provider.
 
 ### 3.5 Fresh desired routing
 
@@ -232,11 +237,21 @@ class GatewayProvider(Protocol):
 
 No second generic renderer Protocol is needed. The implementation PR must keep
 this signature provider-neutral (`DesiredRoutingState` plus
-`CredentialResolver`) and must not place Xray-specific types in
-`backend/app/providers/base.py` or generic domain contracts. The domain
-provisioning service depends only on `GatewayProvider`,
-`DesiredRoutingState`, `CredentialResolver`, and `CandidateConfig`; it never
-imports Xray, Reality, Marzban, or filesystem concepts. The process-lifetime
+`CredentialResolver`). The existing `XrayOutboundDTO` in
+`backend/app/providers/base.py`, and its accepted use in
+`DesiredRoutingState.outbounds: tuple[XrayOutboundDTO, ...]`, are grandfathered
+by ADR-019 and remain unchanged in this slice. ADR-020 does not require
+renaming or generalizing that DTO, and no new provider-neutral outbound DTO is
+to be introduced.
+
+The prohibition applies only to adding new full-config or deployment-specific
+types to generic business contracts. `XrayStaticSkeleton`,
+`XrayDeploymentConfig`, `XrayRealityConfig`, `XrayFullConfigInput`,
+filesystem/runtime/VPS-specific types, and equivalent concrete provider types
+remain in the concrete Xray adapter. The domain provisioning service may use
+the ADR-019-approved outbound DTO through the existing base contract, but it
+does not import the concrete Xray adapter, Reality, Marzban, or filesystem
+concepts. The process-lifetime
 concrete Xray provider may hold only the immutable non-secret
 `XrayStaticSkeleton`, `XrayDeploymentConfig`, and fixed renderer constants
 described in §3.2. Its `render()` call receives the operation-scoped resolver
@@ -320,15 +335,23 @@ provider never stores it.
 
 ### 4.1 Portability rule
 
-Generic domain code and `backend/app/providers/base.py` must not mention
-Xray-specific DTOs, Reality, Marzban paths, VPS vendors, hard-coded hostnames
-or domains, Webshare-specific types, or concrete filesystem deployment paths.
-Replaceable infrastructure enters through Protocols, concrete providers,
-adapters, Settings/configuration, and operation-scoped factories. A future
-gateway engine or vendor must be implementable by adding/replacing its
-concrete adapter and its composition context without changing core business
-logic or generic candidate contracts. This extends ADR-009's replaceability
-rule; it does not authorize a repository-wide rewrite in this docs-only slice.
+Generic domain code and `backend/app/providers/base.py` must not introduce or
+depend on new full-config/deployment-specific types such as
+`XrayStaticSkeleton`, `XrayDeploymentConfig`, `XrayRealityConfig`,
+`XrayFullConfigInput`, Reality deployment config, Marzban paths, VPS vendors,
+hard-coded hostnames/domains, Webshare-specific types, or concrete filesystem
+deployment paths. The ADR-019-approved `XrayOutboundDTO` is the explicit
+grandfathered exception and remains unchanged; this ADR neither renames nor
+generalizes it and does not add another outbound DTO. Replaceable
+infrastructure enters through existing generic contracts, concrete providers,
+adapters, Settings/configuration, and operation-scoped factories. Strong
+modularity remains required for VPS/deployment targets, upstream/third-party
+providers, egress providers, subscription/distribution/API domains, and
+external endpoints/credentials. A future gateway engine or vendor must be
+implementable by adding/replacing its concrete adapter without changing core
+business logic or introducing a repository-wide abstraction hierarchy. This
+extends ADR-009's replaceability rule; it does not authorize a repository-wide
+rewrite in this docs-only slice.
 
 ## 5. Canonical composition semantics
 
