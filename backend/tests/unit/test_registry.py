@@ -310,7 +310,7 @@ def test_registry_selects_marzban_from_settings_without_http(
 
     assert isinstance(registry.accounting, MarzbanAccountingProvider)
     assert client.request_calls == 0
-    assert registry.accounting._base_url == "https://marzban.test"
+    assert registry.accounting._base_url == "https://marzban.example.invalid"
     assert registry.accounting._admin_username == "admin"
 
     registry.close()
