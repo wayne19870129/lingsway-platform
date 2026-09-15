@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator
 from pathlib import Path
+from typing import cast
 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
+from sqlalchemy.sql.schema import Table
 
 import backend.app.infra.xray_reality as reality_bootstrap
 import backend.app.models  # noqa: F401
@@ -27,7 +29,7 @@ from backend.app.providers.gateway.xray_composition import XrayRealityConfig
 @pytest.fixture
 def engine(tmp_path: Path) -> Iterator[Engine]:
     engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'reality.db'}")
-    secret_table = Secret.__table__
+    secret_table = cast(Table, Secret.__table__)
     Base.metadata.create_all(engine, tables=[secret_table])
     yield engine
     Base.metadata.drop_all(engine, tables=[secret_table])
