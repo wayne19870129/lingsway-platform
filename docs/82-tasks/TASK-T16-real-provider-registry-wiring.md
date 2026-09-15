@@ -2129,6 +2129,15 @@ writer-guard/drift 或 reconciliation 之外的 Phase 2C 工作。Phase 2B 仍�
 **NOT COMPLETE**，Phase 2C 仍为 **BLOCKED**；PR 必须保持 OPEN，等待人工独立
 审查后再决定是否手工合并。
 
+## Latest handoff — Existing-data reconciliation
+
+以上历史阶段记录保留作审计背景；当前 authoritative baseline 是 main
+`4bbcf585bf0fbfae885bec077645828dc7b58776`，PR #109 已合并，writer-guard/
+drift 已完成。当前 vehicle 是 PR #110 / branch
+`task/t16-2b-existing-data-reconciliation`，其 exact head 由 PR 状态与 CI
+记录维护。该 vehicle 只执行 ADR-016 的显式 reconciliation；Phase 2B
+仍 **NOT COMPLETE**，Phase 2C 仍 **BLOCKED**，PR 保持 OPEN 等待独立审查。
+
 ## Phase 2B-remain-4 — ADR-020: Xray full-config composition boundary
 
 PR #105 已人工合并到当前 `main`

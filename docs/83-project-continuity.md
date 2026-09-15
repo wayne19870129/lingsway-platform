@@ -1,13 +1,12 @@
 # Project Continuity / Handoff
 
-**Last reconciled with main baseline:** `994fe50416afdbc00648eaf48a65b415b658df3b`
-(verified 2026-09-15 UTC after PR #108 was manually merged). PR #108 is now
-merged; full-config composition and preservation/legal-deletion are complete.
-This PR is the writer-guard/three-state drift baseline implementation vehicle.
-While this PR is open, writer-guard/drift is the active frontier. When this
-change is present on `main`, that slice is complete and the active order becomes
-existing-data reconciliation and final Phase 2B current-main review. Phase 2B
-remains **NOT COMPLETE** and Phase 2C remains **BLOCKED**.
+**Last reconciled with main baseline:** `4bbcf585bf0fbfae885bec077645828dc7b58776`
+(verified 2026-09-15 UTC after PR #109 was manually merged). PR #109 is now
+merged; full-config composition, preservation/legal-deletion, and writer-guard/
+three-state drift are complete on main. This PR is the explicit existing-data
+reconciliation implementation vehicle. While this PR is open, reconciliation is
+the active frontier. Phase 2B remains **NOT COMPLETE** and Phase 2C remains
+**BLOCKED**.
 Dates in this document are UTC unless stated otherwise.
 
 This document is maintained by whichever agent last touched a section
