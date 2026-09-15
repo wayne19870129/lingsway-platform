@@ -1,7 +1,7 @@
 from collections.abc import Callable
 
 from cryptography.fernet import Fernet, InvalidToken
-from sqlalchemy import select
+from sqlalchemy import insert, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -86,11 +86,21 @@ def get_or_create_secret(
     if existing is not None:
         return existing, False
 
-    secret = Secret(
-        secret_ref=secret_ref,
-        ciphertext=encrypt_secret(plaintext_factory()),
-        purpose=purpose,
-    )
+    values = {
+        "secret_ref": secret_ref,
+        "ciphertext": encrypt_secret(plaintext_factory()),
+        "purpose": purpose,
+    }
+    if db.get_bind().dialect.name == "mysql":
+        # MySQL removes the savepoint on a duplicate-key error in this path;
+        # INSERT IGNORE lets the loser wait for and then read the winner.
+        result = db.execute(insert(Secret).values(values).prefix_with("IGNORE"))
+        winner = db.scalar(statement)
+        if winner is None:
+            raise SecretStoreError("Secret insert did not produce a readable row")
+        return winner, result.rowcount == 1
+
+    secret = Secret(**values)
     try:
         with db.begin_nested():
             db.add(secret)
