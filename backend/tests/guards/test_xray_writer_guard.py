@@ -117,7 +117,7 @@ class Runtime:
         self._exists = True
         self._current = deepcopy(dict(content))
         if self.mutate_after_install is not None:
-            self.mutate_after_install(cast(dict[str, object], self._current))
+            self.mutate_after_install(self._current)
 
     def reload(self) -> None:
         self.reload_calls += 1
