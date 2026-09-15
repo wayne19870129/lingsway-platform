@@ -4,7 +4,6 @@ from typing import cast
 
 from backend.app.providers.base import (
     CredentialDTO,
-    CredentialResolver,
     DesiredRoutingState,
     XrayOutboundDTO,
 )
@@ -37,7 +36,7 @@ def test_xray_provider_matches_standalone_socks_and_routing_fragment() -> None:
     )
     provider_candidate = XrayFileProvider(
         cast(XrayRuntime, None)
-    ).render(cast(DesiredRoutingState, desired), cast(CredentialResolver, resolver))
+    ).render(desired, resolver)
 
     standalone = render_config(
         {},

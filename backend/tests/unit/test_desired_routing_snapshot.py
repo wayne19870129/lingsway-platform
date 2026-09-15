@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from typing import Any, cast
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.dialects import mysql
 from sqlalchemy.orm import Session
 
@@ -160,6 +160,16 @@ def test_nonempty_whitespace_override_is_selected_without_endpoint_fallback() ->
 
 def test_sqlite_snapshot_excludes_inactive_routes_and_applies_fallbacks() -> None:
     engine = create_engine("sqlite+pysqlite://")
+
+    @event.listens_for(engine, "connect")
+    def register_mysql_if(dbapi_connection: Any, _: Any) -> None:
+        def sqlite_if(condition: Any, when_true: Any, when_false: Any) -> Any:
+            return when_true if condition else when_false
+
+        dbapi_connection.create_function(
+            "IF", 3, sqlite_if, deterministic=True
+        )
+
     Base.metadata.create_all(engine)
     released_at = datetime(2026, 9, 14, tzinfo=UTC)
     try:
