@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from types import TracebackType
 
 from backend.app.core.config import Settings
+from backend.app.providers.accounting.marzban import MarzbanAccountingProvider
 from backend.app.providers.accounting.mock import MockAccountingProvider
 from backend.app.providers.base import (
     AccountingProvider,
@@ -155,10 +156,15 @@ class ProviderRegistry:
 
 
 def build_registry(settings: Settings) -> ProviderRegistry:
-    """Build all providers without network, Docker, filesystem, or shell access."""
+    """Build all providers without external I/O or hidden provider discovery."""
+    if settings.accounting_provider == "marzban":
+        # Settings.from_env() already validates this, but callers
+        # constructing Settings directly need the same fail-closed gate.
+        settings.validate_runtime_safety()
+
     if settings.egress_provider != "mock":
         raise _unsupported("EGRESS_PROVIDER", settings.egress_provider)
-    if settings.accounting_provider != "mock":
+    if settings.accounting_provider not in {"mock", "marzban"}:
         raise _unsupported("ACCOUNTING_PROVIDER", settings.accounting_provider)
     if settings.gateway_provider != "mock":
         raise _unsupported("GATEWAY_PROVIDER", settings.gateway_provider)
@@ -177,9 +183,22 @@ def build_registry(settings: Settings) -> ProviderRegistry:
     if settings.transport_provider_mode != "mock":
         raise _unsupported("TRANSPORT_PROVIDER_MODE", settings.transport_provider_mode)
 
+    accounting: AccountingProvider
+    if settings.accounting_provider == "mock":
+        accounting = MockAccountingProvider()
+    else:
+        accounting = MarzbanAccountingProvider(
+            base_url=settings.marzban_base_url,
+            admin_username=settings.marzban_admin_username,
+            admin_password=settings.marzban_admin_password,
+            default_protocol=settings.marzban_default_protocol,
+            default_inbounds_json=settings.marzban_default_inbounds_json,
+            verify_tls=settings.marzban_verify_tls,
+        )
+
     return ProviderRegistry(
         egress=MockEgressProvider(),
-        accounting=MockAccountingProvider(),
+        accounting=accounting,
         gateway=MockGatewayProvider(),
         forwarder=MockForwarderProvider(),
         payment=MockPaymentProvider(),
@@ -190,8 +209,7 @@ def build_registry(settings: Settings) -> ProviderRegistry:
         transport=MockTransportProvider(),
     )
 
-
 def _unsupported(variable: str, value: str) -> ProviderConfigurationError:
     return ProviderConfigurationError(
-        f"{variable}={value!r} is not implemented in T2; use the mock/noop selection"
+        f"{variable}={value!r} is not an allowed provider selection"
     )

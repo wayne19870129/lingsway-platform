@@ -1,13 +1,12 @@
 """Production-capable ``AccountingProvider`` HTTP adapter for a patched
 pinned Marzban v0.8.4 admin API (ADR-016 Decision 3, Candidate B).
 
-TASK-T16 Phase 2B7 scope: this module implements the adapter and its
-offline HTTP contract tests only. **Nothing in this repository wires it
-into ``backend/app/providers/registry.py`` or selects it via
-``ACCOUNTING_PROVIDER=marzban`` yet** -- that is deliberately a separate,
-later, explicit opt-in task, so merging this file produces zero real
-external side effects. No real Marzban instance is contacted by any
-code path in this repository today.
+TASK-T16 Phase 2C1 scope: this module is selectable only through the
+explicit `ACCOUNTING_PROVIDER=marzban` branch in
+`backend/app/providers/registry.py`. Construction remains side-effect free:
+the registry may create and own an `httpx.Client`, but no HTTP request is
+sent until an AccountingProvider method is called. No real Marzban instance
+is contacted by unit tests or by default mock configuration.
 
 Pinned upstream: `github.com/Gozargah/Marzban` commit
 `7f396db3e703d71a28060bc9ce4a532ec64cb1f4` (tag `v0.8.4`) -- the same
@@ -358,11 +357,9 @@ class MarzbanAccountingProvider:
     admin API. See this module's docstring for the exact endpoints used
     and ADR-016 Decision 3 for the ``routing_principal`` contract.
 
-    Not registered with ``providers/registry.py`` -- constructing this
-    class is safe (no I/O happens in ``__init__`` beyond validating
-    ``default_inbounds_json``), but nothing in this repository does so
-    outside its own tests yet.
-    """
+    Construction is safe (no network I/O happens in `__init__` beyond
+    validating `default_inbounds_json`); registry selection owns the
+    resulting client and closes it through `ProviderRegistry.close()`.
 
     def __init__(
         self,

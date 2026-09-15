@@ -91,12 +91,22 @@ class Settings:
             )
         if self.app_env == "production" and self.secret_encryption_key.startswith("MDAwMDAw"):
             raise ValueError("Production SECRET_ENCRYPTION_KEY must be configured")
-        if self.app_env == "production" and self.accounting_provider == "marzban":
-            if "example.invalid" in self.marzban_base_url:
-                raise ValueError("Production MARZBAN_BASE_URL must be configured")
-            if "CHANGE_ME" in {self.marzban_admin_username, self.marzban_admin_password}:
-                raise ValueError("Production Marzban credentials must be configured")
-
+        if self.accounting_provider == "marzban":
+            if not self.marzban_base_url.strip():
+                raise ValueError("MARZBAN_BASE_URL must not be blank when Marzban is selected")
+            if not self.marzban_admin_username.strip():
+                raise ValueError(
+                    "MARZBAN_ADMIN_USERNAME must not be blank when Marzban is selected"
+                )
+            if not self.marzban_admin_password:
+                raise ValueError(
+                    "MARZBAN_ADMIN_PASSWORD must not be blank when Marzban is selected"
+                )
+            if self.app_env == "production":
+                if "example.invalid" in self.marzban_base_url:
+                    raise ValueError("Production MARZBAN_BASE_URL must be configured")
+                if "CHANGE_ME" in {self.marzban_admin_username, self.marzban_admin_password}:
+                    raise ValueError("Production Marzban credentials must be configured")
 
 @lru_cache
 def get_settings() -> Settings:
