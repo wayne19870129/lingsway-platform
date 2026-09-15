@@ -2094,7 +2094,6 @@ active Phase 2B frontier 为 preservation/legal-deletion、writer-guard/drift
 baseline、existing-data reconciliation。即使 PR #105 已合并，Phase 2B 仍为
 **NOT COMPLETE**，Phase 2C 仍为 **BLOCKED**。
 
-
 ## Phase 2B-remain-4 — ADR-020: Xray full-config composition boundary
 
 PR #105 已人工合并到当前 `main`
@@ -2180,12 +2179,10 @@ Phase 2C 仍为 **BLOCKED**。PR #105 的 Reality slice 已完成；PR #106 随�
 
 ## Phase 2B-remain-5 — Canonical full Xray composition implementation
 
-PR #106 已人工合并到 `main` `b7a0355be3fb28e182d7dd3781f327f685d04e5f`，
-ADR-020 已完成。本实现切片由 PR #107 承载；在 PR #107 OPEN 期间，
-full-config composition 仍是当前 Phase 2B frontier；当该 change 位于
-`main` 时，该 composition slice 完成，后续 frontier 转为
-preservation/legal-deletion → writer-guard/drift → existing-data
-reconciliation → Phase 2B final review：
+PR #106 已人工合并到 `main`，ADR-020 已完成。PR #107 已人工合并到
+`main` `5c67aba469f7beb82df13750247c90e2d1820e7a`，因此 full-config
+composition slice 已完成，当前 frontier 转为 preservation/legal-deletion →
+writer-guard/drift → existing-data reconciliation → Phase 2B final review：
 
 - `XrayFileProvider.render(DesiredRoutingState, CredentialResolver)` 现在通过
   concrete Xray adapter 的 shared pure composer 产出完整 `CandidateConfig`，包括
@@ -2201,11 +2198,25 @@ reconciliation → Phase 2B final review：
 - `Settings.xray_log_level` 从 `XRAY_LOG_LEVEL` 读取并严格规范化；standalone ops
   入口复用同一 composer，不保留第二套 full-config composition semantics。
 
-本切片不开始 preservation/legal-deletion、writer-guard/drift、reconciliation、
-registry wiring、schema/migration、deploy 或真实 Xray reload；不创建 Issue、不自动
-merge。验证至少包括 unit/guards、full-candidate/provider-ops parity、模板未知字段
-fail-closed、Reality/credential redaction、resolver failure 和 `git diff --check`。
-PR #107 实现合并到 `main` 后，下一顺序仍为 preservation/legal-deletion →
-writer-guard/drift → reconciliation → Phase 2B final review；Phase 2B 仍为
-**NOT COMPLETE**，Phase 2C 仍为 **BLOCKED**。
+该 composition slice 已完成；本阶段不包含 preservation/legal-deletion 之后的
+writer-guard/drift、reconciliation、registry wiring、schema/migration、deploy
+或真实 Xray reload。Phase 2B 仍为 **NOT COMPLETE**，Phase 2C 仍为
+**BLOCKED**。
 
+## Current Phase 2B — Xray preservation / legal-deletion implementation
+
+PR #107 已人工合并到 `main` `5c67aba469f7beb82df13750247c90e2d1820e7a`，
+full-config composition 已完成。本 PR 是 preservation/legal-deletion 的实现
+vehicle；在本 PR OPEN 期间，该 slice 是当前 Phase 2B frontier；当 change 位于
+`main` 时，该 slice 完成，后续顺序为 writer-guard/drift baseline →
+existing-data reconciliation → Phase 2B final current-main review。
+
+本 slice 的约束是：pre-apply 只验证 canonical full candidate、安全不变量和
+`xray run -test`，不读取 `runtime.current()` 进行 superset preservation；
+post-reload 只比较完整 repo-owned projection 的 exact equality。合法删除由
+fresh desired snapshot 决定，runtime stale extra、missing candidate-owned state
+以及任何 repo-owned full-file drift 都必须 fail closed 并走既有 rollback。
+
+本 PR 不开始 writer-guard/drift、reconciliation、registry wiring、deployment 或
+真实 Xray reload；不创建 Issue、不自动 merge。即使本 PR 合并，Phase 2B 仍为
+**NOT COMPLETE**，Phase 2C 仍为 **BLOCKED**。

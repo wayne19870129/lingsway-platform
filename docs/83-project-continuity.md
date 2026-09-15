@@ -1,14 +1,14 @@
 # Project Continuity / Handoff
 
-**Last reconciled with main baseline:** `b7a0355be3fb28e182d7dd3781f327f685d04e5f`
-(verified 2026-09-15 UTC after PR #106 was manually merged). PR #106 is now
-merged and ADR-020 is accepted. PR #107 is the full-config Xray composition
-implementation vehicle. While PR #107 is open, full-config composition is the
-current frontier. When this change is present on `main`, that slice is
-complete and the active order becomes preservation/legal-deletion,
-writer-guard/drift baseline, existing-data reconciliation, and final Phase 2B
-current-main review. Phase 2B remains **NOT COMPLETE** and Phase 2C remains
-**BLOCKED**. Dates in this document are UTC unless stated otherwise.
+**Last reconciled with main baseline:** `5c67aba469f7beb82df13750247c90e2d1820e7a`
+(verified 2026-09-15 UTC after PR #107 was manually merged). PR #107 is now
+merged and full-config Xray composition is complete. This PR is the
+preservation/legal-deletion implementation vehicle. While this PR is open,
+preservation/legal-deletion is the active frontier. When this change is present
+on `main`, that slice is complete and the active order becomes writer-guard/
+drift baseline, existing-data reconciliation, and final Phase 2B current-main
+review. Phase 2B remains **NOT COMPLETE** and Phase 2C remains **BLOCKED**.
+Dates in this document are UTC unless stated otherwise.
 
 This document is maintained by whichever agent last touched a section
 below; if it looks stale, the next agent should refresh the relevant
@@ -447,17 +447,18 @@ decays quickly.
   `GITHUB_TOKEN`, even when the same-SHA `workflow_dispatch` CI/Security/
   Risk trio is green — see section 5's correction. The zero-manual-
   approval acceptance criterion is not yet satisfied.
-- **Current technical frontier**: TASK-T16 Phase 2B full-config Xray composition.
+- **Current technical frontier**: TASK-T16 Phase 2B preservation/legal-deletion.
   PR #103/remain-1B and PR #104/remain-3 are already merged. PR #105 was the
   Reality canonical persistence/ownership implementation vehicle and PR #106
-  accepted ADR-020 on main at `b7a0355be3fb28e182d7dd3781f327f685d04e5f`.
+  accepted ADR-020 on main. PR #107 was the full-config composition
+  implementation vehicle and is now merged on main at
+  `5c67aba469f7beb82df13750247c90e2d1820e7a`.
   PR #104 performed the one coherent full-snapshot and
   `outbound_tags -> outbounds` cutover with current-read freshness,
   credential precedence, and full Xray outbound rendering. The Reality slice
-  and ADR-020 are complete on main. PR #107 is the full-config composition
-  implementation vehicle; while it is open, this is the current frontier.
-  When its change is present on main, the composition slice is complete and
-  the active order becomes preservation/legal-deletion, writer-guard/drift
+  and ADR-020 are complete on main. Full-config composition is also complete on
+  main. This preservation/legal-deletion PR is the current frontier; when its
+  change is present on main, the active order becomes writer-guard/drift
   baseline, existing-data reconciliation, and final Phase 2B current-main
   review. Phase 2B is still **not COMPLETE**.
   Issue #97 and PR #98 are historical Phase 2C attempt artifacts, both closed;
@@ -469,13 +470,12 @@ decays quickly.
   plus the corresponding PR are the durable requirement/acceptance/hand-off
   record; do not create a separate Issue unless explicitly requested.
 
-- **Current Phase 2B gate**: PR #106 is merged at
-  `b7a0355be3fb28e182d7dd3781f327f685d04e5f`; ADR-020 is accepted. PR #107 is
-  the full-config Xray composition implementation vehicle. While PR #107 is
-  open, full-config composition is the current frontier; when its change is
-  present on `main`, that slice is complete and the active order becomes
-  preservation/legal-deletion, writer-guard/drift baseline, existing-data
-  reconciliation, and final Phase 2B current-main review.
+- **Current Phase 2B gate**: PR #106 is merged and ADR-020 is accepted. PR #107
+  is merged on main at `5c67aba469f7beb82df13750247c90e2d1820e7a`; full-config
+  composition is complete. While this preservation/legal-deletion PR is open,
+  it is the active frontier; when its change is present on `main`, the active
+  order becomes writer-guard/drift baseline, existing-data reconciliation, and
+  final Phase 2B current-main review.
   The concrete process-lifetime Xray provider may hold only immutable non-secret
   skeleton/deployment configuration. Each render receives the operation-scoped
   resolver through the existing `GatewayProvider.render()` argument and reads
@@ -523,4 +523,3 @@ does not pre-commit to an ordering the user hasn't set.
 - If a future agent detects drift between this document and the
   authoritative source (ADR, `AGENTS.md`, current code, or a merged PR),
   fix this document in the same PR that notices the drift.
-
