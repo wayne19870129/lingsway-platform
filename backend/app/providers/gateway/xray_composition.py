@@ -7,6 +7,7 @@ only place where the full Xray JSON shape is assembled.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from types import MappingProxyType
@@ -484,6 +485,12 @@ def repo_owned_xray_projection(config: Mapping[str, object]) -> str:
     if errors:
         raise XrayCompositionError(errors[0])
     return json.dumps(config, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def repo_owned_xray_fingerprint(config: Mapping[str, object]) -> str:
+    """Return the SHA-256 of the single canonical repo-owned projection."""
+
+    return hashlib.sha256(repo_owned_xray_projection(config).encode("utf-8")).hexdigest()
 
 
 def repo_owned_projection_errors(

@@ -2203,20 +2203,37 @@ writer-guard/drift、reconciliation、registry wiring、schema/migration、deplo
 或真实 Xray reload。Phase 2B 仍为 **NOT COMPLETE**，Phase 2C 仍为
 **BLOCKED**。
 
-## Current Phase 2B — Xray preservation / legal-deletion implementation
+## Current Phase 2B — Xray writer-guard / three-state drift baseline
 
 PR #107 已人工合并到 `main` `5c67aba469f7beb82df13750247c90e2d1820e7a`，
-full-config composition 已完成。本 PR 是 preservation/legal-deletion 的实现
+full-config composition 已完成；PR #108 随后已人工合并到 `main`
+`994fe50416afdbc00648eaf48a65b415b658df3b`，preservation/legal-deletion
+也已完成。本 PR 是 writer-guard / three-state drift baseline 的实现
 vehicle；在本 PR OPEN 期间，该 slice 是当前 Phase 2B frontier；当 change 位于
-`main` 时，该 slice 完成，后续顺序为 writer-guard/drift baseline →
-existing-data reconciliation → Phase 2B final current-main review。
+`main` 时，该 slice 完成，后续顺序为 existing-data reconciliation →
+Phase 2B final current-main review。
 
-本 slice 的约束是：pre-apply 只验证 canonical full candidate、安全不变量和
-`xray run -test`，不读取 `runtime.current()` 进行 superset preservation；
-post-reload 只比较完整 repo-owned projection 的 exact equality。合法删除由
-fresh desired snapshot 决定，runtime stale extra、missing candidate-owned state
-以及任何 repo-owned full-file drift 都必须 fail closed 并走既有 rollback。
+本 slice 严格区分 `last_applied_state`、`current_disk_state` 和
+`new_db_desired_state`：只有 `current_disk_state != last_applied_state`
+才是 drift；正常的 `last_applied_state != new_db_desired_state` 允许继续
+apply。baseline 复用 `repo_owned_xray_projection()` 的确定性序列化和 SHA-256
+fingerprint，覆盖完整 repo-owned Xray object；Marzban 动态 clients 不纳入，
+磁盘 `settings.clients=[]` skeleton 仍纳入。
 
-本 PR 不开始 writer-guard/drift、reconciliation、registry wiring、deployment 或
+本实现使用 concrete Xray sidecar baseline store（默认
+`xray_config.last_applied.json`，可由 `XRAY_APPLIED_STATE_PATH` 指定），只保存
+`schema_version`、`projection_version` 和 `sha256`。文件通过同目录临时文件、
+flush/fsync、replace 原子更新，不保存 Reality privateKey、shortIds、Socks
+password 或 ciphertext 的副本。baseline malformed/unreadable、disk malformed/
+unreadable、已有 disk 但 baseline 缺失，均 fail closed；不自动 adopt。只有文件
+缺失且 baseline 缺失时允许首次 apply，完整成功后建立 baseline。
+
+writer guard 在 install 前执行；baseline 只在 install、reload、health 和
+post-reload exact projection 全部成功后推进。baseline 持久化失败选择立即按
+既有安全 rollback 恢复旧运行态；rollback 或其健康复核失败时保持旧 baseline
+不变并 fail closed。standalone `ops/gateway/render_xray_routes.py` 写入同一
+共享文件时复用同一 guard/store/atomic writer contract。
+
+本 PR 不开始 existing-data reconciliation、registry wiring、deployment 或
 真实 Xray reload；不创建 Issue、不自动 merge。即使本 PR 合并，Phase 2B 仍为
 **NOT COMPLETE**，Phase 2C 仍为 **BLOCKED**。

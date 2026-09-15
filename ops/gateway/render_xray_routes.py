@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import tempfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -15,6 +16,11 @@ from backend.app.infra.credential_resolver import SqlAlchemyCredentialResolver
 from backend.app.infra.provisioning_state import full_desired_routing_snapshot
 from backend.app.infra.xray_reality import bootstrap_reality_identity
 from backend.app.providers.base import CredentialDTO, DesiredRoutingState, XrayOutboundDTO
+from backend.app.providers.gateway.xray_baseline import (
+    XrayAppliedStateStore,
+    XrayBaselineError,
+    ensure_current_matches_baseline,
+)
 from backend.app.providers.gateway.xray_composition import (
     XrayCompositionError,
     XrayDeploymentConfig,
@@ -34,6 +40,12 @@ BASE_CONFIG = Path(
 )
 OUTPUT_CONFIG = Path(
     os.getenv("XRAY_RUNTIME_CONFIG_PATH", "/app/data/marzban/xray_config.json")
+)
+BASELINE_PATH = Path(
+    os.getenv(
+        "XRAY_APPLIED_STATE_PATH",
+        str(OUTPUT_CONFIG.with_name("xray_config.last_applied.json")),
+    )
 )
 
 
@@ -127,16 +139,100 @@ def render_from_database() -> Path:
             reality_server_name=settings.xray_reality_server_name,
             reality_identity=reality,
         )
-    OUTPUT_CONFIG.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        "w", dir=OUTPUT_CONFIG.parent, prefix=".xray_config.", suffix=".json", delete=False
-    ) as stream:
-        json.dump(rendered, stream, indent=2, ensure_ascii=False)
-        stream.write("\n")
-        temporary = Path(stream.name)
-    temporary.chmod(0o600)
-    temporary.replace(OUTPUT_CONFIG)
-    return OUTPUT_CONFIG
+    return write_rendered_config(rendered)
+
+
+def write_rendered_config(
+    rendered: Mapping[str, Any],
+    *,
+    output_config: Path = OUTPUT_CONFIG,
+    baseline_path: Path = BASELINE_PATH,
+) -> Path:
+    """Guard and atomically write the shared Xray file used by deployment."""
+
+    store = XrayAppliedStateStore(baseline_path)
+    try:
+        ensure_current_matches_baseline(
+            store,
+            config_exists=lambda: _config_exists(output_config),
+            current=lambda: _read_current_config(output_config),
+        )
+    except XrayBaselineError as exc:
+        raise XrayRenderError("Xray writer guard rejected the current config") from exc
+
+    output_config.parent.mkdir(parents=True, exist_ok=True)
+    backup: Path | None = None
+    if _config_exists(output_config):
+        with tempfile.NamedTemporaryFile(
+            dir=output_config.parent,
+            prefix=f".{output_config.name}.",
+            suffix=".backup",
+            delete=False,
+        ) as stream:
+            backup = Path(stream.name)
+        shutil.copy2(output_config, backup)
+
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            dir=output_config.parent,
+            prefix=f".{output_config.name}.",
+            suffix=".tmp",
+            encoding="utf-8",
+            delete=False,
+        ) as stream:
+            temporary = Path(stream.name)
+            json.dump(rendered, stream, indent=2, ensure_ascii=False)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.chmod(0o600)
+        os.replace(temporary, output_config)
+        temporary = None
+        try:
+            store.save(rendered)
+        except XrayBaselineError as exc:
+            try:
+                if backup is None:
+                    output_config.unlink(missing_ok=True)
+                else:
+                    shutil.copy2(backup, output_config)
+            except OSError as rollback_exc:
+                raise XrayRenderError(
+                    "Xray baseline persistence failed and config rollback is unverified"
+                ) from rollback_exc
+            raise XrayRenderError(
+                "Xray baseline persistence failed; config write was rolled back"
+            ) from exc
+        return output_config
+    except OSError as exc:
+        raise XrayRenderError("cannot atomically write Xray runtime config") from exc
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+        if backup is not None:
+            backup.unlink(missing_ok=True)
+
+
+def _config_exists(path: Path) -> bool:
+    try:
+        path.stat()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise XrayRenderError("cannot determine whether Xray config exists") from exc
+    return True
+
+
+def _read_current_config(path: Path) -> Mapping[str, object]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise XrayRenderError("current Xray config cannot be read safely") from exc
+    if not isinstance(value, Mapping):
+        raise XrayRenderError("current Xray config must be an object")
+    return value
 
 
 def main() -> None:
@@ -152,4 +248,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

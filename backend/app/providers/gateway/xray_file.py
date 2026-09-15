@@ -23,6 +23,11 @@ from backend.app.providers.base import (
     HealthReport,
     ValidationResult,
 )
+from backend.app.providers.gateway.xray_baseline import (
+    XrayAppliedStateStore,
+    XrayBaselineError,
+    ensure_current_matches_baseline,
+)
 from backend.app.providers.gateway.xray_composition import (
     XrayCompositionError,
     XrayDeploymentConfig,
@@ -45,6 +50,7 @@ class XrayReloadError(RuntimeError):
 
 class XrayRuntime(Protocol):
     def backup(self) -> object: ...
+    def config_exists(self) -> bool: ...
     def current(self) -> Mapping[str, object]: ...
     def xray_test(self, content: Mapping[str, object]) -> bool: ...
     def install(self, content: Mapping[str, object]) -> None: ...
@@ -67,6 +73,7 @@ class XrayFileProvider:
         disable_user: Callable[[str], None] = lambda _username: None,
         alert: Callable[[str], None] = lambda _message: None,
         audit: AuditCallback = lambda _event, _details: None,
+        baseline_store: XrayAppliedStateStore | None = None,
     ) -> XrayFileProvider:
         """Build a provider from validated process-stable template/Settings projections."""
 
@@ -77,6 +84,7 @@ class XrayFileProvider:
             disable_user=disable_user,
             alert=alert,
             audit=audit,
+            baseline_store=baseline_store,
         )
 
     def __init__(
@@ -88,6 +96,7 @@ class XrayFileProvider:
         disable_user: Callable[[str], None] = lambda _username: None,
         alert: Callable[[str], None] = lambda _message: None,
         audit: AuditCallback = lambda _event, _details: None,
+        baseline_store: XrayAppliedStateStore | None = None,
     ) -> None:
         self._runtime = runtime
         # The skeleton is optional only so validation/apply-only callers can
@@ -98,6 +107,7 @@ class XrayFileProvider:
         self._disable_user = disable_user
         self._alert = alert
         self._audit = audit
+        self._baseline_store = baseline_store or _baseline_store_for_runtime(runtime)
 
     def render(
         self, desired: DesiredRoutingState, resolver: CredentialResolver
@@ -149,6 +159,17 @@ class XrayFileProvider:
     def apply(self, candidate: CandidateConfig, *, new_username: str | None = None) -> ApplyResult:
         backup = self._runtime.backup()
         self._audit("backup_created", {"version": candidate.version})
+        if self._baseline_store is not None:
+            try:
+                ensure_current_matches_baseline(
+                    self._baseline_store,
+                    config_exists=self._runtime.config_exists,
+                    current=self._runtime.current,
+                )
+            except XrayBaselineError as exc:
+                self._audit("writer_guard_rejected", {"reason": str(exc)})
+                self._alert("Xray writer guard rejected the candidate")
+                raise XrayValidationError(str(exc)) from None
         validation = self.validate(candidate, new_username=new_username)
         if not validation.valid:
             self._audit("candidate_rejected", {"errors": validation.errors})
@@ -192,6 +213,22 @@ class XrayFileProvider:
         except Exception:
             post_reload_errors = ["observed repo-owned Xray config is unavailable"]
         if report.healthy and not post_reload_errors:
+            if self._baseline_store is not None:
+                try:
+                    self._baseline_store.save(candidate.content)
+                except XrayBaselineError:
+                    self._audit("baseline_persistence_failed", {})
+                    self._rollback(
+                        backup,
+                        new_username=new_username,
+                        failure_summary=(
+                            "Xray apply succeeded but its writer baseline could not "
+                            "be persisted; previous config restored"
+                        ),
+                        reload_error_message=(
+                            "Xray writer baseline persistence failed after apply"
+                        ),
+                    )
             self._audit("health_ok", report.details)
             return ApplyResult(True, candidate.version)
 
@@ -311,14 +348,32 @@ class LocalXrayRuntime:
     asset_dir: Path = Path("/usr/local/share/xray")
     reload_command: tuple[str, ...] = ("systemctl", "reload", "xray")
     marzban_health: Callable[[], bool] = lambda: True
+    baseline_path: Path | None = None
+
+    def __post_init__(self) -> None:
+        if self.baseline_path is None:
+            self.baseline_path = self.config_path.with_name(
+                f"{self.config_path.stem}.last_applied.json"
+            )
 
     def backup(self) -> object:
+        if not self.config_exists():
+            return None
         self.backup_dir.mkdir(parents=True, exist_ok=True)
         destination = self.backup_dir / (
             f"xray_config.{datetime.now(UTC).strftime('%Y%m%dT%H%M%S%fZ')}.json"
         )
         shutil.copy2(self.config_path, destination)
         return destination
+
+    def config_exists(self) -> bool:
+        try:
+            self.config_path.stat()
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            raise XrayValidationError("cannot determine whether Xray config exists") from exc
+        return True
 
     def current(self) -> Mapping[str, object]:
         value = json.loads(self.config_path.read_text(encoding="utf-8"))
@@ -366,6 +421,17 @@ class LocalXrayRuntime:
         )
 
     def restore(self, backup: object) -> None:
+        if backup is None:
+            self.config_path.unlink(missing_ok=True)
+            return
         if not isinstance(backup, Path):
             raise TypeError("backup must be a Path")
         shutil.copy2(backup, self.config_path)
+
+
+def _baseline_store_for_runtime(runtime: XrayRuntime) -> XrayAppliedStateStore | None:
+    if isinstance(runtime, LocalXrayRuntime):
+        if runtime.baseline_path is None:
+            raise XrayValidationError("Xray baseline path is not configured")
+        return XrayAppliedStateStore(runtime.baseline_path)
+    return None

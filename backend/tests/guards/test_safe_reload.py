@@ -104,6 +104,9 @@ class Runtime:
         self._backup = self._current
         return Path("backup.json")
 
+    def config_exists(self) -> bool:
+        return True
+
     def current(self) -> Mapping[str, object]:
         self.current_calls += 1
         if self.forbid_current:
