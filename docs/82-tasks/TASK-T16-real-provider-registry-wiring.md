@@ -2308,3 +2308,34 @@ Vultr → 搬瓦工迁移。当前 PR 不开始 existing-data reconciliation、r
 wiring、provider default changes、deployment automation 之外的真实部署或
 真实 Xray reload；不创建 Issue、不自动 merge。即使本 PR 合并，Phase 2B 仍为
 **NOT COMPLETE**，Phase 2C 仍为 **BLOCKED**。
+
+
+## Latest authoritative handoff — Phase 2C1 Marzban registry wiring
+
+Verified against current `main` baseline `9b86d6c3b804c6d700a8f94fe559496f655a4cff`:
+PR #109 and PR #110 are merged; writer-guard/drift, preservation/legal-deletion,
+and existing-data reconciliation are complete. Phase 2B is **COMPLETE** and
+Phase 2C is **UNBLOCKED**.
+
+The active vehicle is PR `TASK-T16 Phase 2C: wire real Marzban accounting provider`
+on branch `task/t16-2c1-marzban-registry-wiring`. This slice adds only the
+explicit closed-set `ACCOUNTING_PROVIDER=mock | marzban` selection. Other real
+providers remain out of scope, the default remains `mock`, and no production
+deployment or real side effect is included.
+
+`MarzbanAccountingProvider` is constructed only from central `Settings`
+values. Its constructor performs local validation and creates its owned
+`httpx.Client`, but sends no HTTP request; `ProviderRegistry.close()` owns
+closing that client. Blank Marzban URL/credentials, malformed protocol/inbounds,
+and unsafe production defaults fail closed before any request. The existing
+`routing_principal` response contract remains read-only and has no local or
+runtime fallback.
+
+The repository contains the routing_principal source patch under
+`infrastructure/marzban/patches/`, but `infrastructure/compose/compose.transport.yml`
+still defaults to the unpatched upstream `gozargah/marzban:v0.8.4` image
+(or `MARZBAN_IMAGE` override). Therefore:
+`MARZBAN_PATCHED_IMAGE_DEPLOYMENT_PENDING`.
+Real staging network validation is also pending; tests use offline mocked
+transports only. This PR does not build/deploy a custom image, change defaults,
+modify schema/workflows/AGENTS.md, wire other providers, or start Phase 2C2.

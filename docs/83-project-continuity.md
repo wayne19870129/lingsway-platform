@@ -1,12 +1,11 @@
 # Project Continuity / Handoff
 
-**Last reconciled with main baseline:** `4bbcf585bf0fbfae885bec077645828dc7b58776`
-(verified 2026-09-15 UTC after PR #109 was manually merged). PR #109 is now
-merged; full-config composition, preservation/legal-deletion, and writer-guard/
-three-state drift are complete on main. This PR is the explicit existing-data
-reconciliation implementation vehicle. While this PR is open, reconciliation is
-the active frontier. Phase 2B remains **NOT COMPLETE** and Phase 2C remains
-**BLOCKED**.
+**Last reconciled with main baseline:** `9b86d6c3b804c6d700a8f94fe559496f655a4cff`
+(verified 2026-09-15 UTC after PR #110 was manually merged). PR #109 and PR #110
+are merged; writer-guard/drift, preservation/legal-deletion, and existing-data
+reconciliation are complete on main. Phase 2B is **COMPLETE** and Phase 2C is
+**UNBLOCKED**. The active vehicle is Phase 2C1 real Marzban registry wiring on
+branch `task/t16-2c1-marzban-registry-wiring`.
 Dates in this document are UTC unless stated otherwise.
 
 This document is maintained by whichever agent last touched a section
@@ -550,3 +549,33 @@ PR 是 explicit existing-data reconciliation 的当前 vehicle，目标是把 ac
 迁移。reconciliation 若 commit 已成功但 named-lock release 未确认，必须
 报告 `committed_with_warning / lock_release_unverified` 并保留 committed
 count；不得返回普通 aborted/rollback 叙述，CLI 以 non-zero 要求人工确认。
+
+
+## Latest authoritative handoff — Phase 2C1
+
+Current main baseline: `9b86d6c3b804c6d700a8f94fe559496f655a4cff`.
+PR #109 and PR #110 are merged and the Phase 2B final current-main review is
+PASS. Phase 2B is **COMPLETE**; Phase 2C is **UNBLOCKED**.
+
+The active vehicle is PR `TASK-T16 Phase 2C: wire real Marzban accounting provider`
+on `task/t16-2c1-marzban-registry-wiring`. `build_registry()` now permits
+only the explicit accounting closed set `mock | marzban`; all other provider
+categories remain at their existing mock/noop selections and the global default
+is unchanged.
+
+The Marzban provider is constructed from central Settings only. Its constructor
+does local validation and creates an owned `httpx.Client` without making HTTP
+requests; the application-scoped `ProviderRegistry` closes that client exactly
+once. Invalid blank URL/credentials, malformed protocol/inbounds, and unsafe
+production defaults fail closed before external I/O. The provider continues to
+read the patched Marzban `routing_principal` response and never computes or
+falls back to a local identity.
+
+The repository patch set exists under `infrastructure/marzban/patches/`, but
+`compose.transport.yml` defaults to `gozargah/marzban:v0.8.4` (with only a
+`MARZBAN_IMAGE` override), not a built patched image. Record the follow-up
+deployment state as `MARZBAN_PATCHED_IMAGE_DEPLOYMENT_PENDING`. No real
+staging credentials or network test is used in this slice;
+`REAL_STAGING_MARZBAN_NETWORK_TEST = PENDING`. Webshare, Xray, Mihomo,
+transport registry wiring, deployment, schema/migration, workflow, and Phase
+2C2 remain out of scope.

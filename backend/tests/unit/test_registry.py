@@ -4,6 +4,10 @@ from dataclasses import dataclass, field
 import pytest
 
 from backend.app.core.config import Settings
+from backend.app.providers.accounting.marzban import (
+    MarzbanAccountingProvider,
+    MarzbanContractError,
+)
 from backend.app.providers.accounting.mock import MockAccountingProvider
 from backend.app.providers.captcha.noop import NoopCaptchaProvider
 from backend.app.providers.egress.mock import MockEgressProvider
@@ -263,3 +267,113 @@ def test_registry_close_closes_a_shared_provider_object_only_once() -> None:
     registry.close()
 
     assert len(shared.close_calls) == 1
+
+
+class _NoIoClient:
+    def __init__(self) -> None:
+        self.request_calls = 0
+        self.close_calls = 0
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+    def request(self, *args: object, **kwargs: object) -> None:
+        del args, kwargs
+        self.request_calls += 1
+        raise AssertionError("registry construction attempted HTTP")
+
+
+def _marzban_settings(**overrides: object) -> Settings:
+    values: dict[str, object] = {
+        "accounting_provider": "marzban",
+        "marzban_base_url": "https://marzban.example.invalid",
+        "marzban_admin_username": "admin",
+        "marzban_admin_password": "test-password",
+        "marzban_default_protocol": "vless",
+        "marzban_default_inbounds_json": '{"vless": ["inbound-vless"]}',
+        "marzban_verify_tls": True,
+    }
+    values.update(overrides)
+    return Settings(**values)  # type: ignore[arg-type]
+
+
+def test_registry_selects_marzban_from_settings_without_http(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _NoIoClient()
+    monkeypatch.setattr(
+        "backend.app.providers.accounting.marzban.httpx.Client",
+        lambda **_kwargs: client,
+    )
+
+    registry = build_registry(_marzban_settings())
+
+    assert isinstance(registry.accounting, MarzbanAccountingProvider)
+    assert client.request_calls == 0
+    assert registry.accounting._base_url == "https://marzban.example.invalid"
+    assert registry.accounting._admin_username == "admin"
+
+    registry.close()
+    registry.close()
+    assert client.close_calls == 1
+
+
+def test_unsupported_accounting_provider_fails_closed() -> None:
+    with pytest.raises(ProviderConfigurationError, match="ACCOUNTING_PROVIDER"):
+        build_registry(Settings(accounting_provider="unsupported"))
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"marzban_base_url": " "},
+        {"marzban_admin_username": " "},
+        {"marzban_admin_password": ""},
+    ],
+)
+def test_blank_marzban_settings_fail_closed_before_client_creation(
+    monkeypatch: pytest.MonkeyPatch, overrides: dict[str, object]
+) -> None:
+    monkeypatch.setattr(
+        "backend.app.providers.accounting.marzban.httpx.Client",
+        lambda **_kwargs: pytest.fail("client must not be created for invalid settings"),
+    )
+
+    with pytest.raises(ValueError):
+        build_registry(_marzban_settings(**overrides))
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"marzban_default_protocol": "invalid"},
+        {"marzban_default_inbounds_json": "{}"},
+    ],
+)
+def test_malformed_marzban_contract_fails_closed_before_client_creation(
+    monkeypatch: pytest.MonkeyPatch, overrides: dict[str, object]
+) -> None:
+    monkeypatch.setattr(
+        "backend.app.providers.accounting.marzban.httpx.Client",
+        lambda **_kwargs: pytest.fail("client must not be created for invalid contract"),
+    )
+
+    with pytest.raises(MarzbanContractError):
+        build_registry(_marzban_settings(**overrides))
+
+
+def test_production_default_marzban_credential_fails_closed() -> None:
+    with pytest.raises(ValueError, match="credentials"):
+        Settings.from_env(
+            {
+                "APP_ENV": "production",
+                "ACCOUNTING_PROVIDER": "marzban",
+                "JWT_SECRET": "J" * 32,
+                "SECRET_ENCRYPTION_KEY": "S" * 44,
+                "MARZBAN_BASE_URL": "https://marzban.test",
+                "MARZBAN_ADMIN_USERNAME": "admin",
+                "MARZBAN_ADMIN_PASSWORD": "CHANGE_ME",
+                "MARZBAN_DEFAULT_PROTOCOL": "vless",
+                "MARZBAN_DEFAULT_INBOUNDS_JSON": '{"vless": ["inbound-vless"]}',
+            }
+        )
