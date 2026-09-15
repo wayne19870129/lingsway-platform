@@ -1,15 +1,12 @@
 # Project Continuity / Handoff
 
-**Last reconciled with main baseline:** `de96406db1081835681798db282810d1fd64028f`
-(verified 2026-09-15 UTC after PR #104 was manually merged). PR #104 is now
-merged and TASK-T16 Phase 2B-remain-3 is complete. PR #105 is the
-implementation vehicle for the Reality canonical persistence/ownership slice;
-while it is open, only independent PASS plus manual merge completes that slice.
-When PR #105 is present on main, Reality canonical persistence/ownership is
-complete and the active Phase 2B frontier becomes preservation/legal-deletion,
-writer-guard/drift baseline, and existing-data reconciliation. Phase 2B remains
-**NOT COMPLETE** and Phase 2C remains **BLOCKED**. Dates in this document are
-UTC unless stated otherwise.
+**Last reconciled with main baseline:** `866bc63d70f6785cfef5877724e81105ce1d7316`
+(verified 2026-09-15 UTC after PR #105 was manually merged). PR #105 is now
+merged and the Reality canonical persistence/ownership slice is complete. The
+active Phase 2B frontier is the ADR-020 full-config composition boundary before
+preservation/legal-deletion, followed by writer-guard/drift baseline and
+existing-data reconciliation. Phase 2B remains **NOT COMPLETE** and Phase 2C
+remains **BLOCKED**. Dates in this document are UTC unless stated otherwise.
 
 This document is maintained by whichever agent last touched a section
 below; if it looks stale, the next agent should refresh the relevant
@@ -454,11 +451,12 @@ decays quickly.
   `outbound_tags -> outbounds` cutover with current-read freshness,
   credential precedence, and full Xray outbound rendering. Only independent
   PASS followed by manual merge completes remain-3; once that change is on
-  main, the full snapshot/outbound cutover is complete. PR #105 is the Reality
-  canonical persistence/ownership implementation vehicle; when it is on main,
-  that slice is complete and the active Phase 2B frontier is
-  preservation/legal-deletion, writer-guard/drift baseline, and existing-data
-  reconciliation. Phase 2B is still **not COMPLETE**.
+  main, the full snapshot/outbound cutover is complete. PR #105 was the Reality
+  canonical persistence/ownership implementation vehicle and is now merged on
+  main at `866bc63d70f6785cfef5877724e81105ce1d7316`; that slice is complete.
+  ADR-020 is now the active architecture gate before preservation/legal-deletion,
+  followed by writer-guard/drift baseline and existing-data reconciliation.
+  Phase 2B is still **not COMPLETE**.
   Issue #97 and PR #98 are historical Phase 2C attempt artifacts, both closed;
   PR #98 was never merged. Issue #101 is also closed as Not planned. Phase 2C
   remains technically **BLOCKED**, and `GATEWAY_PROVIDER=xray_file` registry
@@ -467,6 +465,20 @@ decays quickly.
   `build_registry()` (see section 6). For future small T16 slices, TASK-T16
   plus the corresponding PR are the durable requirement/acceptance/hand-off
   record; do not create a separate Issue unless explicitly requested.
+
+- **Current Phase 2B gate**: PR #105 is merged at
+  `866bc63d70f6785cfef5877724e81105ce1d7316` and the Reality canonical
+  persistence/ownership slice is complete. The next docs-only decision is
+  ADR-020, which fixes the mismatch between the provider's current
+  routing/outbound fragment and `LocalXrayRuntime.install()` replacing the
+  complete file. ADR-020 selects application/infra typed full-config input plus
+  one shared pure canonical composer; `XrayFileProvider` becomes the long-term
+  full-config renderer, while `ops/gateway/render_xray_routes.py` becomes a
+  thin adapter. `runtime.current()` remains observation/rollback/drift only,
+  and Marzban dynamic clients remain outside repo-owned candidate/projection.
+  Preservation/legal-deletion implementation is blocked until this ADR is
+  independently reviewed and manually merged. Phase 2B remains **NOT COMPLETE**;
+  Phase 2C remains **BLOCKED**; no registry wiring is permitted.
 - **Issue #87 / TASK-T23 replaces the abandoned custom-App proposal.**
   The minimal workflow is implemented in PR #88 and needs post-merge
   live validation with a new Issue comment. TASK-T22 is retained only as
@@ -501,3 +513,4 @@ does not pre-commit to an ordering the user hasn't set.
 - If a future agent detects drift between this document and the
   authoritative source (ADR, `AGENTS.md`, current code, or a merged PR),
   fix this document in the same PR that notices the drift.
+

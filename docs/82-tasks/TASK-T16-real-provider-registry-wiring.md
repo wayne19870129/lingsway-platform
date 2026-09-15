@@ -2093,3 +2093,55 @@ change 位于 main 时，Reality canonical persistence/ownership 已完成，后
 active Phase 2B frontier 为 preservation/legal-deletion、writer-guard/drift
 baseline、existing-data reconciliation。即使 PR #105 已合并，Phase 2B 仍为
 **NOT COMPLETE**，Phase 2C 仍为 **BLOCKED**。
+
+
+## Phase 2B-remain-4 — ADR-020: Xray full-config composition boundary
+
+PR #105 已人工合并到当前 `main`
+`866bc63d70f6785cfef5877724e81105ce1d7316`，Reality canonical
+persistence/ownership slice 已完成。下一步 preservation/legal-deletion
+实现不能直接沿用当前 provider 的 fragment 语义：当前
+`XrayFileProvider.render()` 只产出 `routing`/`outbounds`，而
+`LocalXrayRuntime.install()` 会替换完整 `xray_config.json`，因此必须先由
+ADR-020 收敛 full-config composition boundary。
+
+本阶段的实现载体是一个 docs-only PR，目标是接受
+`docs/80-decisions/ADR-020-xray-full-config-composition-boundary.md`，不修改
+production Python，不开始 preservation/legal-deletion，不创建 Issue，不
+开始 registry wiring，不做 deploy/reload，不自动 merge。
+
+ADR-020 的唯一决策是 **Option B + shared pure canonical composer**：
+
+- application/infra composition boundary 在同一 operation-scoped Session
+  中读取 static skeleton、中央 `Settings`、持久化 Reality identity 与 fresh
+  `DesiredRoutingState`，并构造同一 operation 的 `CredentialResolver`；
+- provider-side `XrayFullConfigInput` 与 `XrayRealityConfig` 是无 Session/ORM
+  的 typed DTO；resolver 仍以显式参数传入，registry 不持有 resolver；
+- 一个纯 `xray_composition` 模块负责完整 inbound/Reality/routing/outbounds
+  组合与 BLOCK invariants；`XrayFileProvider` 的长期 contract 是 full-config
+  renderer，`CandidateConfig.content` 必须可直接 test/install/reload；
+- `ops/gateway/render_xray_routes.py` 只保留运维入口，必须复用同一 assembler/
+  pure composer，不得保留第二套 composition semantics；
+- `runtime.current()` 只用于 backup/rollback、drift 与 post-reload exact
+  projection，绝不作为 pre-apply desired source 或 merge superset；Marzban
+  dynamic clients 由 ADR-015 的独立 owner 管理，不复制进候选。
+
+下一 slice 的 preservation contract 固定为：
+`GET_LOCK -> route mutate/flush -> fresh full desired snapshot ->
+resolve/render/validate/apply -> reload/health/exact repo-owned projection ->
+caller commit or rollback -> RELEASE_LOCK`。比较边界必须把 repo-owned
+routing/outbounds、static inbound skeleton、Reality fields 与 Marzban dynamic
+fields 分开；stale deleted route/outbound 必须不存在，缺失 repo-owned field
+必须 fail closed。ADR-017 的事务边界不变，Reality identity 的 read 使用同一
+operation Session；既有 create-once bootstrap 仍是独立 Secret lifecycle。
+
+验收必须覆盖 full-candidate/provider-ops parity、credential/Secret redaction、
+deleted/stale/missing route 和 outbound、static skeleton/Reality drift、
+malformed/decrypt/purpose failure、dynamic Marzban client exclusion、xray
+run-test 前置拒绝以及 rollback。此 docs-only PR 合并后只表示 composition
+boundary 已收敛，不表示 preservation 已开始；Phase 2B 仍为 **NOT COMPLETE**，
+Phase 2C 仍为 **BLOCKED**。PR #105 的 Reality slice 已完成，后续顺序为：
+ADR-020 merge -> full-config composer/provider contract implementation ->
+preservation/legal-deletion -> writer-guard/drift baseline -> existing-data
+reconciliation -> independent review/manual merge gates -> 才能评估 Phase 2C。
+
