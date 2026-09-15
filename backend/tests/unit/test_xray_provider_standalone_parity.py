@@ -10,6 +10,7 @@ from backend.app.providers.base import (
 from backend.app.providers.gateway.xray_composition import (
     XrayDeploymentConfig,
     XrayRealityConfig,
+    XrayStaticSkeleton,
 )
 from backend.app.providers.gateway.xray_file import XrayFileProvider, XrayRuntime
 from ops.gateway.render_xray_routes import render_config
@@ -43,6 +44,7 @@ def test_xray_provider_matches_standalone_socks_and_routing_fragment() -> None:
     )
     provider_candidate = XrayFileProvider(
         cast(XrayRuntime, None),
+        static_skeleton=XrayStaticSkeleton.canonical(),
         deployment_config=XrayDeploymentConfig(
             xray_log_level="warning",
             reality_dest="dest.example:443",

@@ -2,12 +2,13 @@
 
 **Last reconciled with main baseline:** `b7a0355be3fb28e182d7dd3781f327f685d04e5f`
 (verified 2026-09-15 UTC after PR #106 was manually merged). PR #106 is now
-merged and ADR-020 is accepted. The current implementation frontier is the
-full-config Xray composition slice under the concrete adapter, followed by
-preservation/legal-deletion, writer-guard/drift baseline, existing-data
-reconciliation, and final Phase 2B current-main review. Phase 2B remains
-**NOT COMPLETE** and Phase 2C remains **BLOCKED**. Dates in this document are
-UTC unless stated otherwise.
+merged and ADR-020 is accepted. PR #107 is the full-config Xray composition
+implementation vehicle. While PR #107 is open, full-config composition is the
+current frontier. When this change is present on `main`, that slice is
+complete and the active order becomes preservation/legal-deletion,
+writer-guard/drift baseline, existing-data reconciliation, and final Phase 2B
+current-main review. Phase 2B remains **NOT COMPLETE** and Phase 2C remains
+**BLOCKED**. Dates in this document are UTC unless stated otherwise.
 
 This document is maintained by whichever agent last touched a section
 below; if it looks stale, the next agent should refresh the relevant
@@ -453,12 +454,12 @@ decays quickly.
   PR #104 performed the one coherent full-snapshot and
   `outbound_tags -> outbounds` cutover with current-read freshness,
   credential precedence, and full Xray outbound rendering. The Reality slice
-  and ADR-020 are complete on main. The current implementation adds the shared
-  full composer, concrete operation resolver capability, validated
-  skeleton/Settings projections, and full provider/ops parity. After it, the
-  order remains preservation/legal-deletion, writer-guard/drift baseline,
-  existing-data reconciliation, and final Phase 2B current-main review. Phase
-  2B is still **not COMPLETE**.
+  and ADR-020 are complete on main. PR #107 is the full-config composition
+  implementation vehicle; while it is open, this is the current frontier.
+  When its change is present on main, the composition slice is complete and
+  the active order becomes preservation/legal-deletion, writer-guard/drift
+  baseline, existing-data reconciliation, and final Phase 2B current-main
+  review. Phase 2B is still **not COMPLETE**.
   Issue #97 and PR #98 are historical Phase 2C attempt artifacts, both closed;
   PR #98 was never merged. Issue #101 is also closed as Not planned. Phase 2C
   remains technically **BLOCKED**, and `GATEWAY_PROVIDER=xray_file` registry
@@ -469,10 +470,12 @@ decays quickly.
   record; do not create a separate Issue unless explicitly requested.
 
 - **Current Phase 2B gate**: PR #106 is merged at
-  `b7a0355be3fb28e182d7dd3781f327f685d04e5f`; ADR-020 is accepted and the
-  active order is full-config Xray composition implementation under the
-  concrete adapter, preservation/legal-deletion, writer-guard/drift baseline,
-  existing-data reconciliation, and final Phase 2B current-main review.
+  `b7a0355be3fb28e182d7dd3781f327f685d04e5f`; ADR-020 is accepted. PR #107 is
+  the full-config Xray composition implementation vehicle. While PR #107 is
+  open, full-config composition is the current frontier; when its change is
+  present on `main`, that slice is complete and the active order becomes
+  preservation/legal-deletion, writer-guard/drift baseline, existing-data
+  reconciliation, and final Phase 2B current-main review.
   The concrete process-lifetime Xray provider may hold only immutable non-secret
   skeleton/deployment configuration. Each render receives the operation-scoped
   resolver through the existing `GatewayProvider.render()` argument and reads

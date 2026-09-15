@@ -31,6 +31,7 @@ from backend.app.providers.gateway.mock import MockGatewayProvider
 from backend.app.providers.gateway.xray_composition import (
     XrayDeploymentConfig,
     XrayRealityConfig,
+    XrayStaticSkeleton,
 )
 from backend.app.providers.gateway.xray_file import (
     XrayFileProvider,
@@ -240,6 +241,7 @@ def test_gateway_providers_accept_operation_scoped_resolver() -> None:
     mock_candidate = MockGatewayProvider().render(desired, resolver)
     xray_candidate = XrayFileProvider(
         runtime=cast(XrayRuntime, None),
+        static_skeleton=XrayStaticSkeleton.canonical(),
         deployment_config=XrayDeploymentConfig(
             xray_log_level="warning",
             reality_dest="dest.example:443",
@@ -293,6 +295,7 @@ def test_xray_renderer_resolves_each_full_outbound_and_keeps_block_fixed() -> No
 
     candidate = XrayFileProvider(
         runtime=cast(XrayRuntime, None),
+        static_skeleton=XrayStaticSkeleton.canonical(),
         deployment_config=XrayDeploymentConfig(
             xray_log_level="warning",
             reality_dest="dest.example:443",
@@ -345,23 +348,66 @@ def test_desired_routing_state_has_no_legacy_outbound_tags_field() -> None:
 
 
 @pytest.mark.parametrize(
-    "outbound",
+    ("outbound", "error"),
     [
-        XrayOutboundDTO("egress", "proxy.example.invalid", 1080, "http", "secret/ref"),
-        XrayOutboundDTO("egress", "proxy.example.invalid", 0, "socks5", "secret/ref"),
-        XrayOutboundDTO("egress", "proxy.example.invalid", 1080, "socks5", " "),
+        (
+            XrayOutboundDTO("egress", "proxy.example.invalid", 1080, "http", "secret/ref"),
+            "unsupported desired outbound protocol",
+        ),
+        (
+            XrayOutboundDTO("egress", "proxy.example.invalid", 0, "socks5", "secret/ref"),
+            "invalid desired outbound port",
+        ),
+        (
+            XrayOutboundDTO("egress", "proxy.example.invalid", 1080, "socks5", " "),
+            "CREDENTIAL_REF_INVALID",
+        ),
     ],
 )
 def test_xray_renderer_fails_closed_for_invalid_outbound_inputs(
-    outbound: XrayOutboundDTO,
+    outbound: XrayOutboundDTO, error: str
 ) -> None:
     class Resolver:
         def resolve(self, secret_ref: str) -> CredentialDTO:
+            if secret_ref == "secret/ref":
+                return CredentialDTO("resolver-user", "resolver-password")
             raise CredentialResolutionError("CREDENTIAL_REF_INVALID")
 
+        def resolve_reality_identity(self) -> XrayRealityConfig:
+            return XrayRealityConfig("reality-private-key", ["reality-short-id"])
+
     desired = DesiredRoutingState(user_routes={"principal": outbound.tag}, outbounds=(outbound,))
-    with pytest.raises((XrayValidationError, CredentialResolutionError)) as raised:
-        XrayFileProvider(runtime=None).render(desired, Resolver())  # type: ignore[arg-type]
+    provider = XrayFileProvider(
+        runtime=None,  # type: ignore[arg-type]
+        static_skeleton=XrayStaticSkeleton.canonical(),
+        deployment_config=XrayDeploymentConfig(
+            xray_log_level="warning",
+            reality_dest="dest.example:443",
+            reality_server_names=("dest.example",),
+        ),
+    )
+    with pytest.raises((XrayValidationError, CredentialResolutionError), match=error) as raised:
+        provider.render(desired, Resolver())
 
     assert "secret/ref" not in str(raised.value)
+
+
+def test_xray_renderer_rejects_missing_static_skeleton_before_composition() -> None:
+    class Resolver:
+        def resolve(self, secret_ref: str) -> CredentialDTO:
+            return CredentialDTO("resolver-user", "resolver-password")
+
+        def resolve_reality_identity(self) -> XrayRealityConfig:
+            return XrayRealityConfig("reality-private-key", ["reality-short-id"])
+
+    provider = XrayFileProvider(
+        runtime=None,  # type: ignore[arg-type]
+        deployment_config=XrayDeploymentConfig(
+            xray_log_level="warning",
+            reality_dest="dest.example:443",
+            reality_server_names=("dest.example",),
+        ),
+    )
+    with pytest.raises(XrayValidationError, match="static skeleton"):
+        provider.render(DesiredRoutingState(), Resolver())
 

@@ -88,10 +88,10 @@ class XrayFileProvider:
         audit: AuditCallback = lambda _event, _details: None,
     ) -> None:
         self._runtime = runtime
-        # These are process-stable, non-secret projections.  The optional
-        # defaults preserve construction for validation-only callers; a live
-        # render must supply a validated deployment projection.
-        self._static_skeleton = static_skeleton or XrayStaticSkeleton.canonical()
+        # The skeleton is optional only so validation/apply-only callers can
+        # construct the provider. A live render must receive the validated
+        # STATIC_TEMPLATE projection from from_template().
+        self._static_skeleton = static_skeleton
         self._deployment_config = deployment_config
         self._disable_user = disable_user
         self._alert = alert
@@ -100,6 +100,9 @@ class XrayFileProvider:
     def render(
         self, desired: DesiredRoutingState, resolver: CredentialResolver
     ) -> CandidateConfig:
+        skeleton = self._static_skeleton
+        if skeleton is None:
+            raise XrayValidationError("Xray static skeleton is not configured")
         if self._deployment_config is None:
             raise XrayValidationError("Xray deployment configuration is not configured")
         if not isinstance(resolver, XrayRenderResolver):
@@ -114,7 +117,7 @@ class XrayFileProvider:
                 for outbound in desired.outbounds
             }
             input_value = XrayFullConfigInput(
-                self._static_skeleton,
+                skeleton,
                 self._deployment_config,
                 reality,
                 desired,

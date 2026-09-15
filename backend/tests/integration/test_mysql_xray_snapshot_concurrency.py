@@ -4,6 +4,7 @@ import os
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+from threading import Barrier, Lock
 from uuid import uuid4
 
 import pytest
@@ -11,12 +12,18 @@ from sqlalchemy import select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
+import backend.app.infra.xray_reality as reality_bootstrap
 import backend.app.models  # noqa: F401
 from backend.app.core.database import Base, build_engine
 from backend.app.core.secrets import put_secret
 from backend.app.infra.credential_resolver import SqlAlchemyCredentialResolver
 from backend.app.infra.gateway_route_lock import gateway_route_binding_write
 from backend.app.infra.provisioning_state import SqlAlchemyProvisioningState
+from backend.app.infra.xray_reality import (
+    REALITY_IDENTITY_PURPOSE,
+    REALITY_IDENTITY_SECRET_REF,
+    bootstrap_reality_identity,
+)
 from backend.app.models import (
     Customer,
     EgressBinding,
@@ -32,6 +39,7 @@ from backend.app.models import (
 from backend.app.providers.base import EgressEndpointDTO
 from backend.app.providers.gateway.xray_composition import (
     XrayDeploymentConfig,
+    XrayRealityConfig,
     XrayStaticSkeleton,
 )
 from backend.app.providers.gateway.xray_file import XrayFileProvider
@@ -432,37 +440,76 @@ def test_mysql_snapshot_refreshes_stale_identity_map_rows(mysql_engine: Engine) 
             db_a.rollback()
 
 
-def test_mysql_concurrent_reality_reads_use_one_persisted_identity(
+def test_mysql_concurrent_reality_bootstrap_keeps_one_identity(
     mysql_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Concurrent operation resolvers read, but never bootstrap, Reality state."""
-    with Session(mysql_engine) as db:
-        put_secret(
-            db,
-            "gateway/xray/reality-identity",
-            '{"privateKey":"persisted-private-key","shortIds":["persisted-id"]}',
-            "XRAY_REALITY_IDENTITY",
-        )
-        db.commit()
+    """Concurrent bootstrap operations converge on one persisted winner."""
+    candidates: list[str] = []
+    candidate_lock = Lock()
+    both_generators_started = Barrier(2)
 
-    def resolve() -> tuple[str, tuple[str, ...]]:
+    def generate(_: str) -> str:
+        both_generators_started.wait(timeout=15)
+        with candidate_lock:
+            candidate = f"candidate-{len(candidates) + 1}"
+            candidates.append(candidate)
+        return '{"privateKey":"' + candidate + '","shortIds":["shared-id"]}'
+
+    monkeypatch.setattr(reality_bootstrap, "_new_reality_identity", generate)
+
+    def bootstrap() -> XrayRealityConfig:
         with Session(mysql_engine) as db:
-            identity = SqlAlchemyCredentialResolver(db).resolve_reality_identity()
-            return identity.private_key, identity.short_ids
+            return bootstrap_reality_identity(db, xray_binary="unused-xray")
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        results = list(executor.map(lambda _: resolve(), range(2)))
+        results = list(executor.map(lambda _: bootstrap(), range(2)))
 
-    assert results == [
-        ("persisted-private-key", ("persisted-id",)),
-        ("persisted-private-key", ("persisted-id",)),
-    ]
+    assert len(candidates) == 2
+    assert results[0] == results[1]
     with Session(mysql_engine) as db:
+        persisted = SqlAlchemyCredentialResolver(db).resolve_reality_identity()
         stored = db.scalars(
             select(Secret).where(
-                Secret.secret_ref == "gateway/xray/reality-identity",
-                Secret.purpose == "XRAY_REALITY_IDENTITY",
+                Secret.secret_ref == REALITY_IDENTITY_SECRET_REF,
+                Secret.purpose == REALITY_IDENTITY_PURPOSE,
             )
         ).all()
+    assert results[0] == persisted
     assert len(stored) == 1
+
+
+def test_mysql_reality_current_read_refreshes_stale_identity_map(
+    mysql_engine: Engine,
+) -> None:
+    """A purpose-bound current read returns B's committed identity, not A's stale row."""
+    with Session(mysql_engine) as writer:
+        put_secret(
+            writer,
+            REALITY_IDENTITY_SECRET_REF,
+            '{"privateKey":"old-private-key","shortIds":["old-id"]}',
+            REALITY_IDENTITY_PURPOSE,
+        )
+        writer.commit()
+
+    with Session(mysql_engine) as reader:
+        stale = reader.scalar(
+            select(Secret).where(
+                Secret.secret_ref == REALITY_IDENTITY_SECRET_REF,
+                Secret.purpose == REALITY_IDENTITY_PURPOSE,
+            )
+        )
+        assert stale is not None
+        with Session(mysql_engine) as writer:
+            put_secret(
+                writer,
+                REALITY_IDENTITY_SECRET_REF,
+                '{"privateKey":"new-private-key","shortIds":["new-id"]}',
+                REALITY_IDENTITY_PURPOSE,
+            )
+            writer.commit()
+
+        refreshed = SqlAlchemyCredentialResolver(reader).resolve_reality_identity()
+
+    assert refreshed == XrayRealityConfig("new-private-key", ("new-id",))
 

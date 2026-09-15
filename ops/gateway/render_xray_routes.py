@@ -9,12 +9,11 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select
-
 from backend.app.core.config import get_settings
 from backend.app.core.database import SessionLocal
 from backend.app.infra.credential_resolver import SqlAlchemyCredentialResolver
-from backend.app.models import EgressBinding, EgressEndpoint, GatewayRouteBinding
+from backend.app.infra.provisioning_state import full_desired_routing_snapshot
+from backend.app.infra.xray_reality import bootstrap_reality_identity
 from backend.app.providers.base import CredentialDTO, DesiredRoutingState, XrayOutboundDTO
 from backend.app.providers.gateway.xray_composition import (
     XrayCompositionError,
@@ -36,32 +35,37 @@ BASE_CONFIG = Path(
 OUTPUT_CONFIG = Path(
     os.getenv("XRAY_RUNTIME_CONFIG_PATH", "/app/data/marzban/xray_config.json")
 )
-def _active_routes(db: Any) -> list[tuple[GatewayRouteBinding, EgressEndpoint, str]]:
-    rows = db.execute(
-        select(GatewayRouteBinding, EgressEndpoint)
-        .join(EgressEndpoint, EgressEndpoint.id == GatewayRouteBinding.egress_id)
-        .where(
-            GatewayRouteBinding.enabled.is_(True),
-            GatewayRouteBinding.released_at.is_(None),
+
+
+def _compose_desired(
+    base_config: Mapping[str, Any],
+    desired: DesiredRoutingState,
+    credentials: Mapping[str, CredentialDTO],
+    *,
+    xray_log_level: str,
+    reality_dest: str,
+    reality_server_name: str,
+    reality_identity: XrayRealityConfig,
+) -> dict[str, Any]:
+    try:
+        skeleton = XrayStaticSkeleton.from_template(base_config)
+        deployment = XrayDeploymentConfig(
+            xray_log_level=xray_log_level,
+            reality_dest=reality_dest,
+            reality_server_names=(reality_server_name,),
         )
-        .order_by(GatewayRouteBinding.id)
-    ).all()
-    result: list[tuple[GatewayRouteBinding, EgressEndpoint, str]] = []
-    for route, endpoint in rows:
-        binding = db.scalar(
-            select(EgressBinding).where(
-                EgressBinding.subscription_id == route.subscription_id,
-                EgressBinding.egress_id == route.egress_id,
-                EgressBinding.released_at.is_(None),
+        candidate = compose_xray_config(
+            XrayFullConfigInput(
+                skeleton,
+                deployment,
+                reality_identity,
+                desired,
+                credentials,
             )
         )
-        secret_ref = (
-            binding.credential_secret_ref
-            if binding and binding.credential_secret_ref
-            else endpoint.credential_secret_ref
-        )
-        result.append((route, endpoint, secret_ref))
-    return result
+    except (XrayCompositionError, TypeError, ValueError) as exc:
+        raise XrayRenderError("Xray full configuration composition failed") from exc
+    return dict(candidate.content)
 
 
 def render_config(
@@ -85,25 +89,15 @@ def render_config(
         credentials[ref] = CredentialDTO(
             credential.get("username", ""), credential.get("password", "")
         )
-    try:
-        skeleton = XrayStaticSkeleton.from_template(base_config)
-        deployment = XrayDeploymentConfig(
-            xray_log_level=xray_log_level,
-            reality_dest=reality_dest,
-            reality_server_names=(reality_server_name,),
-        )
-        candidate = compose_xray_config(
-            XrayFullConfigInput(
-                skeleton,
-                deployment,
-                reality_identity,
-                DesiredRoutingState(desired_routes, tuple(outbounds)),
-                credentials,
-            )
-        )
-    except (XrayCompositionError, TypeError, ValueError) as exc:
-        raise XrayRenderError("Xray full configuration composition failed") from exc
-    return dict(candidate.content)
+    return _compose_desired(
+        base_config,
+        DesiredRoutingState(desired_routes, tuple(outbounds)),
+        credentials,
+        xray_log_level=xray_log_level,
+        reality_dest=reality_dest,
+        reality_server_name=reality_server_name,
+        reality_identity=reality_identity,
+    )
 
 
 def render_from_database() -> Path:
@@ -116,23 +110,18 @@ def render_from_database() -> Path:
     settings = get_settings()
     with SessionLocal() as db:
         resolver = SqlAlchemyCredentialResolver(db)
+        desired = full_desired_routing_snapshot(db)
         reality = resolver.resolve_reality_identity()
-        rows = []
-        for route, endpoint, secret_ref in _active_routes(db):
-            credential = resolver.resolve(secret_ref)
-            rows.append(
-                (
-                    route.gateway_principal,
-                    route.outbound_tag,
-                    endpoint.protocol,
-                    endpoint.port,
-                    endpoint.host,
-                    {"username": credential.username, "password": credential.password},
-                )
+        credentials = {
+            outbound.credential_secret_ref: resolver.resolve(
+                outbound.credential_secret_ref
             )
-        rendered = render_config(
+            for outbound in desired.outbounds
+        }
+        rendered = _compose_desired(
             base_config,
-            rows,
+            desired,
+            credentials,
             xray_log_level=settings.xray_log_level,
             reality_dest=settings.xray_reality_dest,
             reality_server_name=settings.xray_reality_server_name,
@@ -151,6 +140,11 @@ def render_from_database() -> Path:
 
 
 def main() -> None:
+    with SessionLocal() as db:
+        bootstrap_reality_identity(
+            db,
+            xray_binary=os.getenv("XRAY_BINARY", "/usr/local/bin/xray"),
+        )
     output = render_from_database()
     settings = get_settings()
     print(f"rendered Xray config to {output} using {settings.app_env} settings")
