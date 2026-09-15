@@ -1,3 +1,5 @@
+from collections.abc import Callable
+
 from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -59,6 +61,61 @@ def put_secret(db: Session, secret_ref: str, plaintext: str, purpose: str) -> Se
         recovered.purpose = purpose
         db.flush()
         return recovered
+
+
+def get_or_create_secret(
+    db: Session,
+    secret_ref: str,
+    plaintext_factory: Callable[[], str],
+    purpose: str,
+) -> tuple[Secret, bool]:
+    """Create a Secret exactly once without overwriting a concurrent winner.
+
+    The normal ``put_secret`` path intentionally keeps update semantics for
+    callers that own a value and want to replace it.  A generated identity has
+    different semantics: after the first insert wins, every concurrent loser
+    must read that winner and must never write its own candidate over it.
+    """
+    statement = (
+        select(Secret)
+        .where(Secret.secret_ref == secret_ref)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    existing = db.scalar(statement)
+    if existing is not None:
+        return existing, False
+
+    secret = Secret(
+        secret_ref=secret_ref,
+        ciphertext=encrypt_secret(plaintext_factory()),
+        purpose=purpose,
+    )
+    try:
+        with db.begin_nested():
+            db.add(secret)
+            db.flush()
+        return secret, True
+    except IntegrityError:
+        winner = db.scalar(statement)
+        if winner is None:
+            raise
+        return winner, False
+
+
+def reveal_secret_for_purpose(db: Session, secret_ref: str, purpose: str) -> str:
+    """Decrypt a purpose-bound secret without exposing its value or ref in errors."""
+    statement = (
+        select(Secret)
+        .where(Secret.secret_ref == secret_ref)
+        .execution_options(populate_existing=True)
+    )
+    stored = db.scalar(statement)
+    if stored is None:
+        raise SecretStoreError("Secret reference not found")
+    if stored.purpose != purpose:
+        raise SecretStoreError("Secret purpose mismatch")
+    return decrypt_secret(stored.ciphertext)
 
 
 def reveal_secret(db: Session, secret_ref: str) -> str:

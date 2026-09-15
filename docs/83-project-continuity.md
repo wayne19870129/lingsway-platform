@@ -1,14 +1,13 @@
 # Project Continuity / Handoff
 
-**Last reconciled with main baseline:** `2bc58c57de72da16583286c7d507eab882769da0`
-(verified 2026-09-14 UTC after PR #103 was manually merged). PR #104 is the
-TASK-T16 Phase 2B-remain-3 implementation vehicle. Only independent PASS plus
-manual merge completes remain-3; when this change is present on `main`, remain-3
-is complete and the remaining Phase 2B work becomes the active frontier:
-preservation/legal-deletion, Reality persistence/ownership, writer-guard/drift
-baseline, and existing-data reconciliation. Phase 2B remains **NOT COMPLETE**
-and Phase 2C remains **BLOCKED**. Dates in this document are UTC unless stated
-otherwise.
+**Last reconciled with main baseline:** `de96406db1081835681798db282810d1fd64028f`
+(verified 2026-09-15 UTC after PR #104 was manually merged). PR #104 is now
+merged and TASK-T16 Phase 2B-remain-3 is complete. The current Phase 2B
+implementation vehicle is the Reality canonical persistence/ownership slice;
+only independent PASS plus manual merge completes that slice. The remaining
+Phase 2B frontier is preservation/legal-deletion, writer-guard/drift baseline,
+and existing-data reconciliation. Phase 2B remains **NOT COMPLETE** and Phase
+2C remains **BLOCKED**. Dates in this document are UTC unless stated otherwise.
 
 This document is maintained by whichever agent last touched a section
 below; if it looks stale, the next agent should refresh the relevant
@@ -448,14 +447,15 @@ decays quickly.
   Risk trio is green — see section 5's correction. The zero-manual-
   approval acceptance criterion is not yet satisfied.
 - **Current technical frontier**: TASK-T16 Phase 2B-remain-3. PR #103/remain-1B
-  is already merged on main. PR #104 is the remain-3 implementation vehicle
-  and performs the one coherent full-snapshot and
+  is already merged on main at `de96406db1081835681798db282810d1fd64028f`.
+  PR #104 was the remain-3 implementation vehicle and performed the one coherent full-snapshot and
   `outbound_tags -> outbounds` cutover with current-read freshness,
   credential precedence, and full Xray outbound rendering. Only independent
   PASS followed by manual merge completes remain-3; once that change is on
-  main, the full snapshot/outbound cutover is complete. Preservation-rule rewrite, Reality persistence/
-  ownership, writer-guard/drift baseline, and existing-data reconciliation
-  remain outstanding. Phase 2B is still **not COMPLETE**.
+  main, the full snapshot/outbound cutover is complete. Reality persistence/
+  ownership is now the active implementation slice; preservation-rule rewrite,
+  writer-guard/drift baseline, and existing-data reconciliation remain
+  outstanding. Phase 2B is still **not COMPLETE**.
   Issue #97 and PR #98 are historical Phase 2C attempt artifacts, both closed;
   PR #98 was never merged. Issue #101 is also closed as Not planned. Phase 2C
   remains technically **BLOCKED**, and `GATEWAY_PROVIDER=xray_file` registry

@@ -14,9 +14,14 @@ from typing import Any
 
 from sqlalchemy import select
 
-from backend.app.core.config import get_settings
+from backend.app.core.config import Settings, get_settings
 from backend.app.core.database import SessionLocal
-from backend.app.core.secrets import reveal_secret
+from backend.app.core.secrets import (
+    SecretStoreError,
+    get_or_create_secret,
+    reveal_secret,
+    reveal_secret_for_purpose,
+)
 from backend.app.models import EgressBinding, EgressEndpoint, GatewayRouteBinding
 
 
@@ -30,6 +35,8 @@ BASE_CONFIG = Path(
 OUTPUT_CONFIG = Path(
     os.getenv("XRAY_RUNTIME_CONFIG_PATH", "/app/data/marzban/xray_config.json")
 )
+REALITY_IDENTITY_SECRET_REF = "gateway/xray/reality-identity"
+REALITY_IDENTITY_PURPOSE = "XRAY_REALITY_IDENTITY"
 
 
 def _x25519_private_key(binary: str) -> str:
@@ -46,7 +53,72 @@ def _x25519_private_key(binary: str) -> str:
     raise XrayRenderError("xray x25519 output did not contain a private key")
 
 
-def _reality_settings(config: dict[str, Any]) -> dict[str, Any]:
+def _parse_reality_identity(value: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(value)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise XrayRenderError("XRAY_REALITY_IDENTITY_MALFORMED") from exc
+    if not isinstance(payload, dict) or set(payload) != {"privateKey", "shortIds"}:
+        raise XrayRenderError("XRAY_REALITY_IDENTITY_MALFORMED")
+    private_key = payload["privateKey"]
+    short_ids = payload["shortIds"]
+    if (
+        not isinstance(private_key, str)
+        or not private_key.strip()
+        or not isinstance(short_ids, list)
+        or not short_ids
+        or any(not isinstance(short_id, str) or not short_id.strip() for short_id in short_ids)
+    ):
+        raise XrayRenderError("XRAY_REALITY_IDENTITY_MALFORMED")
+    return {"privateKey": private_key, "shortIds": short_ids}
+
+
+def _new_reality_identity(binary: str) -> str:
+    private_key = _x25519_private_key(binary)
+    return json.dumps(
+        {"privateKey": private_key, "shortIds": [secrets.token_hex(8)]},
+        separators=(",", ":"),
+    )
+
+
+def _reality_identity(db: Any) -> dict[str, Any]:
+    try:
+        secret, created = get_or_create_secret(
+            db,
+            REALITY_IDENTITY_SECRET_REF,
+            lambda: _new_reality_identity(os.getenv("XRAY_BINARY", "/usr/local/bin/xray")),
+            REALITY_IDENTITY_PURPOSE,
+        )
+        if created:
+            db.commit()
+        identity = _parse_reality_identity(
+            reveal_secret_for_purpose(db, secret.secret_ref, REALITY_IDENTITY_PURPOSE)
+        )
+    except (SecretStoreError, XrayRenderError) as exc:
+        if isinstance(exc, XrayRenderError):
+            raise
+        raise XrayRenderError("XRAY_REALITY_IDENTITY_UNREADABLE") from exc
+    return identity
+
+
+def _compose_reality_settings(
+    skeleton: Mapping[str, Any], settings: Settings, identity: Mapping[str, Any]
+) -> dict[str, Any]:
+    dest = settings.xray_reality_dest.strip()
+    server_name = settings.xray_reality_server_name.strip()
+    if not dest or not server_name:
+        raise XrayRenderError("XRAY_REALITY_DEST and XRAY_REALITY_SERVER_NAME are required")
+    result = copy.deepcopy(dict(skeleton))
+    result.setdefault("show", False)
+    result.setdefault("xver", 0)
+    result["dest"] = dest
+    result["serverNames"] = [server_name]
+    result["privateKey"] = identity["privateKey"]
+    result["shortIds"] = identity["shortIds"]
+    return result
+
+
+def _reality_settings(config: dict[str, Any], db: Any, settings: Settings) -> dict[str, Any]:
     for inbound in config.get("inbounds", []):
         if not isinstance(inbound, dict):
             continue
@@ -56,23 +128,12 @@ def _reality_settings(config: dict[str, Any]) -> dict[str, Any]:
         reality = stream.get("realitySettings")
         if not isinstance(reality, dict):
             raise XrayRenderError("Reality inbound has no realitySettings object")
-        reality.setdefault("show", False)
-        reality.setdefault("xver", 0)
-        reality["dest"] = reality.get("dest") or os.getenv("XRAY_REALITY_DEST", "")
-        server_names = reality.get("serverNames") or []
-        if not server_names:
-            configured = os.getenv("XRAY_REALITY_SERVER_NAME", "")
-            server_names = [configured] if configured else []
-        reality["serverNames"] = server_names
-        if not reality["dest"] or not reality["serverNames"]:
-            raise XrayRenderError(
-                "XRAY_REALITY_DEST and XRAY_REALITY_SERVER_NAME are required"
-            )
-        if not reality.get("privateKey"):
-            reality["privateKey"] = _x25519_private_key(
-                os.getenv("XRAY_BINARY", "/usr/local/bin/xray")
-            )
-        reality["shortIds"] = reality.get("shortIds") or [secrets.token_hex(8)]
+        if not settings.xray_reality_dest.strip() or not settings.xray_reality_server_name.strip():
+            raise XrayRenderError("XRAY_REALITY_DEST and XRAY_REALITY_SERVER_NAME are required")
+        identity = _reality_identity(db)
+        composed = _compose_reality_settings(reality, settings, identity)
+        reality.clear()
+        reality.update(composed)
         return reality
     raise XrayRenderError("base config has no Reality inbound")
 
@@ -163,8 +224,9 @@ def render_from_database() -> Path:
         raise XrayRenderError(f"cannot read base Xray config: {BASE_CONFIG}") from exc
     if not isinstance(base_config, dict):
         raise XrayRenderError("base Xray config must be a JSON object")
-    _reality_settings(base_config)
+    settings = get_settings()
     with SessionLocal() as db:
+        _reality_settings(base_config, db, settings)
         rows = []
         for route, endpoint, secret_ref in _active_routes(db):
             rows.append(
