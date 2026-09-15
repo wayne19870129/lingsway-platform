@@ -2174,5 +2174,38 @@ deleted/stale/missing route 和 outbound、static skeleton/Reality drift、
 malformed/decrypt/purpose failure、dynamic Marzban client exclusion、xray
 run-test 前置拒绝以及 rollback。此 docs-only PR 合并后只表示 composition
 boundary 已收敛，不表示 preservation 已开始；Phase 2B 仍为 **NOT COMPLETE**，
-Phase 2C 仍为 **BLOCKED**。PR #105 的 Reality slice 已完成；PR #106
-仍须人工审查和人工合并，禁止自动 merge。
+Phase 2C 仍为 **BLOCKED**。PR #105 的 Reality slice 已完成；PR #106 随后已由
+人工审查并合并，未启用自动 merge。
+
+
+## Phase 2B-remain-5 — Canonical full Xray composition implementation
+
+PR #106 已人工合并到 `main` `b7a0355be3fb28e182d7dd3781f327f685d04e5f`，
+ADR-020 已完成。本实现切片由 PR #107 承载；在 PR #107 OPEN 期间，
+full-config composition 仍是当前 Phase 2B frontier；当该 change 位于
+`main` 时，该 composition slice 完成，后续 frontier 转为
+preservation/legal-deletion → writer-guard/drift → existing-data
+reconciliation → Phase 2B final review：
+
+- `XrayFileProvider.render(DesiredRoutingState, CredentialResolver)` 现在通过
+  concrete Xray adapter 的 shared pure composer 产出完整 `CandidateConfig`，包括
+  `log`、inbounds/static skeleton、Reality、`clients=[]`、routing、outbounds 和
+  固定 BLOCK 规则；不从 `runtime.current()` 补齐 desired candidate。
+- 新增的 `XrayStaticSkeleton`、`XrayDeploymentConfig`、secret-safe
+  `XrayRealityConfig`、operation-local `XrayFullConfigInput` 与
+  `XrayRenderResolver` 只存在于 concrete Xray 模块；ADR-019 已接受的
+  `XrayOutboundDTO` 与 generic render contract 保持不变。
+- `SqlAlchemyCredentialResolver` 使用调用方同一 operation Session 做
+  purpose-bound current read，提供 Reality capability；provider/registry 不保存
+  Session、resolver、Reality plaintext 或 mutable operation context。
+- `Settings.xray_log_level` 从 `XRAY_LOG_LEVEL` 读取并严格规范化；standalone ops
+  入口复用同一 composer，不保留第二套 full-config composition semantics。
+
+本切片不开始 preservation/legal-deletion、writer-guard/drift、reconciliation、
+registry wiring、schema/migration、deploy 或真实 Xray reload；不创建 Issue、不自动
+merge。验证至少包括 unit/guards、full-candidate/provider-ops parity、模板未知字段
+fail-closed、Reality/credential redaction、resolver failure 和 `git diff --check`。
+PR #107 实现合并到 `main` 后，下一顺序仍为 preservation/legal-deletion →
+writer-guard/drift → reconciliation → Phase 2B final review；Phase 2B 仍为
+**NOT COMPLETE**，Phase 2C 仍为 **BLOCKED**。
+

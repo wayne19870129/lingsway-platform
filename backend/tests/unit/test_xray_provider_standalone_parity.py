@@ -7,6 +7,11 @@ from backend.app.providers.base import (
     DesiredRoutingState,
     XrayOutboundDTO,
 )
+from backend.app.providers.gateway.xray_composition import (
+    XrayDeploymentConfig,
+    XrayRealityConfig,
+    XrayStaticSkeleton,
+)
 from backend.app.providers.gateway.xray_file import XrayFileProvider, XrayRuntime
 from ops.gateway.render_xray_routes import render_config
 
@@ -20,6 +25,9 @@ class _FixedCredentialResolver:
 
     def resolve(self, secret_ref: str) -> CredentialDTO:
         return self._credentials[secret_ref]
+
+    def resolve_reality_identity(self) -> XrayRealityConfig:
+        return XrayRealityConfig("reality-private-key", ["reality-short-id"])
 
 
 def test_xray_provider_matches_standalone_socks_and_routing_fragment() -> None:
@@ -35,11 +43,42 @@ def test_xray_provider_matches_standalone_socks_and_routing_fragment() -> None:
         ),
     )
     provider_candidate = XrayFileProvider(
-        cast(XrayRuntime, None)
+        cast(XrayRuntime, None),
+        static_skeleton=XrayStaticSkeleton.canonical(),
+        deployment_config=XrayDeploymentConfig(
+            xray_log_level="warning",
+            reality_dest="dest.example:443",
+            reality_server_names=("dest.example",),
+        ),
     ).render(desired, resolver)
 
     standalone = render_config(
-        {},
+        {
+            "log": {"loglevel": "warning"},
+            "inbounds": [
+                {
+                    "tag": "vless-reality",
+                    "listen": "0.0.0.0",
+                    "port": 8443,
+                    "protocol": "vless",
+                    "settings": {"clients": [], "decryption": "none"},
+                    "streamSettings": {
+                        "network": "tcp",
+                        "security": "reality",
+                        "realitySettings": {
+                            "show": False,
+                            "dest": "",
+                            "xver": 0,
+                            "serverNames": [],
+                            "privateKey": "",
+                            "shortIds": [],
+                        },
+                    },
+                }
+            ],
+            "outbounds": [],
+            "routing": {"domainStrategy": "AsIs", "rules": []},
+        },
         [
             (
                 "principal-a",
@@ -58,7 +97,10 @@ def test_xray_provider_matches_standalone_socks_and_routing_fragment() -> None:
                 {"username": "user-b", "password": "password-b"},
             ),
         ],
+        reality_dest="dest.example:443",
+        reality_server_name="dest.example",
+        reality_identity=XrayRealityConfig("reality-private-key", ["reality-short-id"]),
     )
 
-    assert provider_candidate.content["outbounds"] == standalone["outbounds"]
-    assert provider_candidate.content["routing"] == standalone["routing"]
+    assert provider_candidate.content == standalone
+

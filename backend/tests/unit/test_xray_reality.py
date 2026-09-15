@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
 import pytest
 from sqlalchemy import Table, create_engine, select
@@ -11,11 +11,16 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 import backend.app.models  # noqa: F401
-import ops.gateway.render_xray_routes as renderer
 from backend.app.core.config import Settings
 from backend.app.core.database import Base
 from backend.app.core.secrets import put_secret
+from backend.app.infra.credential_resolver import SqlAlchemyCredentialResolver
 from backend.app.models import Secret
+from backend.app.providers.base import CredentialResolutionError
+from backend.app.providers.gateway.xray_composition import XrayRealityConfig
+
+REALITY_REF = "gateway/xray/reality-identity"
+REALITY_PURPOSE = "XRAY_REALITY_IDENTITY"
 
 
 @pytest.fixture
@@ -30,101 +35,40 @@ def secret_engine(tmp_path: Path) -> Iterator[Engine]:
         engine.dispose()
 
 
-def _base_config() -> dict[str, Any]:
-    return {
-        "inbounds": [
-            {
-                "protocol": "vless",
-                "listen": "0.0.0.0",
-                "port": 8443,
-                "streamSettings": {
-                    "security": "reality",
-                    "realitySettings": {
-                        "show": False,
-                        "xver": 0,
-                        "dest": "template-bogus.example:443",
-                        "serverNames": ["template-bogus.example"],
-                        "privateKey": "template-bogus-private-key",
-                        "shortIds": ["template-bogus-short-id"],
-                    },
-                },
-            }
-        ]
-    }
-
-
-def _settings() -> Settings:
-    return Settings(
-        xray_reality_dest="settings-dest.example:443",
-        xray_reality_server_name="settings-server.example",
-    )
-
-
-def test_settings_own_reality_deploy_parameters() -> None:
+def test_settings_own_reality_deploy_parameters_and_xray_log_level() -> None:
     settings = Settings.from_env(
         {
+            "XRAY_LOG_LEVEL": "  DeBuG ",
             "XRAY_REALITY_DEST": "env-dest.example:443",
             "XRAY_REALITY_SERVER_NAME": "env-server.example",
         }
     )
 
+    assert settings.xray_log_level == "debug"
     assert settings.xray_reality_dest == "env-dest.example:443"
     assert settings.xray_reality_server_name == "env-server.example"
 
 
-def test_template_reality_values_are_ignored_and_identity_is_stable(
-    secret_engine: Engine, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("value", ["", " ", "trace", "INFO\nextra"])
+def test_invalid_xray_log_level_fails_closed(value: str) -> None:
+    with pytest.raises(ValueError, match="XRAY_LOG_LEVEL"):
+        Settings.from_env({"XRAY_LOG_LEVEL": value})
+
+
+def test_reality_resolver_reads_persisted_identity_without_regeneration(
+    secret_engine: Engine,
 ) -> None:
-    generated: list[str] = []
-
-    def generate(binary: str) -> str:
-        generated.append(binary)
-        return json.dumps({"privateKey": "persisted-private-key", "shortIds": ["persisted-id"]})
-
-    monkeypatch.setattr(renderer, "_new_reality_identity", generate)
-    settings = _settings()
-
     with Session(secret_engine) as db:
-        first = renderer._reality_settings(_base_config(), db, settings)
-
-    with Session(secret_engine) as db:
-        second = renderer._reality_settings(_base_config(), db, settings)
-        stored = db.scalar(
-            select(Secret).where(Secret.secret_ref == renderer.REALITY_IDENTITY_SECRET_REF)
+        put_secret(
+            db,
+            REALITY_REF,
+            json.dumps({"privateKey": "persisted-private-key", "shortIds": ["persisted-id"]}),
+            REALITY_PURPOSE,
         )
+        identity = SqlAlchemyCredentialResolver(db).resolve_reality_identity()
 
-    assert first == second
-    assert first["dest"] == "settings-dest.example:443"
-    assert first["serverNames"] == ["settings-server.example"]
-    assert first["privateKey"] == "persisted-private-key"
-    assert first["shortIds"] == ["persisted-id"]
-    assert generated == ["/usr/local/bin/xray"]
-    assert stored is not None
-    assert stored.purpose == renderer.REALITY_IDENTITY_PURPOSE
-
-
-def test_blank_reality_settings_fail_closed_before_bootstrap(
-    secret_engine: Engine, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    generated = False
-
-    def generate(_: str) -> str:
-        nonlocal generated
-        generated = True
-        return "{}"
-
-    monkeypatch.setattr(renderer, "_new_reality_identity", generate)
-
-    with Session(secret_engine) as db:
-        with pytest.raises(renderer.XrayRenderError, match="XRAY_REALITY_DEST"):
-            renderer._reality_settings(
-                _base_config(),
-                db,
-                Settings(xray_reality_dest=" ", xray_reality_server_name=""),
-            )
-        assert db.scalar(select(Secret)) is None
-
-    assert generated is False
+    assert identity == XrayRealityConfig("persisted-private-key", ["persisted-id"])
+    assert repr(identity) == "XrayRealityConfig(private_key=<redacted>, short_ids=<redacted>)"
 
 
 @pytest.mark.parametrize(
@@ -139,86 +83,49 @@ def test_blank_reality_settings_fail_closed_before_bootstrap(
                 "unexpected": True,
             }
         ),
+        json.dumps({"privateKey": "sentinel-private-key", "shortIds": "not-a-list"}),
     ],
 )
-def test_malformed_reality_identity_fails_closed_without_regeneration(
-    secret_engine: Engine,
-    monkeypatch: pytest.MonkeyPatch,
-    stored_value: str,
+def test_malformed_reality_identity_fails_closed(
+    secret_engine: Engine, stored_value: str
 ) -> None:
-    generated = False
-
-    def generate(_: str) -> str:
-        nonlocal generated
-        generated = True
-        return json.dumps({"privateKey": "replacement", "shortIds": ["replacement"]})
-
-    monkeypatch.setattr(renderer, "_new_reality_identity", generate)
     with Session(secret_engine) as db:
-        put_secret(
-            db,
-            renderer.REALITY_IDENTITY_SECRET_REF,
-            stored_value,
-            renderer.REALITY_IDENTITY_PURPOSE,
-        )
-        db.commit()
+        put_secret(db, REALITY_REF, stored_value, REALITY_PURPOSE)
+        with pytest.raises(CredentialResolutionError) as raised:
+            SqlAlchemyCredentialResolver(db).resolve_reality_identity()
 
-        with pytest.raises(
-            renderer.XrayRenderError, match="XRAY_REALITY_IDENTITY_MALFORMED"
-        ) as raised:
-            renderer._reality_settings(_base_config(), db, _settings())
-
-    assert generated is False
+    assert raised.value.code == "CREDENTIAL_MALFORMED"
     assert "sentinel-private-key" not in str(raised.value)
     assert "sentinel-short-id" not in str(raised.value)
-    assert stored_value not in str(raised.value)
 
 
-def test_reality_identity_purpose_and_decrypt_failures_do_not_regenerate(
-    secret_engine: Engine, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    generated = False
-
-    def generate(_: str) -> str:
-        nonlocal generated
-        generated = True
-        return json.dumps({"privateKey": "replacement", "shortIds": ["replacement"]})
-
-    monkeypatch.setattr(renderer, "_new_reality_identity", generate)
+def test_wrong_purpose_and_decrypt_failures_are_not_fallbacks(secret_engine: Engine) -> None:
     with Session(secret_engine) as db:
         put_secret(
             db,
-            renderer.REALITY_IDENTITY_SECRET_REF,
+            REALITY_REF,
             json.dumps({"privateKey": "key", "shortIds": ["id"]}),
             "WRONG_PURPOSE",
         )
-        db.add(
-            Secret(
-                secret_ref="gateway/xray/bad-reality-identity",
-                ciphertext="ciphertext-sentinel",
-                purpose=renderer.REALITY_IDENTITY_PURPOSE,
-            )
-        )
-        db.commit()
+        with pytest.raises(CredentialResolutionError) as wrong_purpose:
+            SqlAlchemyCredentialResolver(db).resolve_reality_identity()
+        assert wrong_purpose.value.code == "CREDENTIAL_NOT_FOUND"
 
-        with pytest.raises(renderer.XrayRenderError, match="UNREADABLE"):
-            renderer._reality_settings(_base_config(), db, _settings())
-
-        wrong = db.scalar(
-            select(Secret).where(Secret.secret_ref == renderer.REALITY_IDENTITY_SECRET_REF)
-        )
-        assert wrong is not None
-        db.delete(wrong)
+        existing = db.scalar(select(Secret).where(Secret.secret_ref == REALITY_REF))
+        assert existing is not None
+        db.delete(existing)
         db.flush()
         db.add(
             Secret(
-                secret_ref=renderer.REALITY_IDENTITY_SECRET_REF,
+                secret_ref=REALITY_REF,
                 ciphertext="ciphertext-sentinel",
-                purpose=renderer.REALITY_IDENTITY_PURPOSE,
+                purpose=REALITY_PURPOSE,
             )
         )
         db.flush()
-        with pytest.raises(renderer.XrayRenderError, match="UNREADABLE"):
-            renderer._reality_settings(_base_config(), db, _settings())
+        with pytest.raises(CredentialResolutionError) as decrypt_failed:
+            SqlAlchemyCredentialResolver(db).resolve_reality_identity()
 
-    assert generated is False
+    assert decrypt_failed.value.code == "CREDENTIAL_DECRYPT_FAILED"
+    assert "ciphertext-sentinel" not in str(decrypt_failed.value)
+

@@ -13,21 +13,29 @@ from backend.app.models import Secret
 from backend.app.providers.base import (
     CredentialDTO,
     CredentialResolutionError,
-    CredentialResolver,
+)
+from backend.app.providers.gateway.xray_composition import (
+    XrayRealityConfig,
+    XrayRenderResolver,
 )
 
 
-def _current_secret_statement(secret_ref: str) -> Select[tuple[Secret]]:
+def _current_secret_statement(
+    secret_ref: str, *, purpose: str | None = None
+) -> Select[tuple[Secret]]:
     """Build the locking, identity-map-refreshing current-read statement."""
-    return (
+    statement = (
         select(Secret)
         .where(Secret.secret_ref == secret_ref)
         .with_for_update()
         .execution_options(populate_existing=True)
     )
+    if purpose is not None:
+        statement = statement.where(Secret.purpose == purpose)
+    return statement
 
 
-class SqlAlchemyCredentialResolver(CredentialResolver):
+class SqlAlchemyCredentialResolver(XrayRenderResolver):
     """Resolve one credential using the caller's provisioning Session."""
 
     def __init__(self, db: Session) -> None:
@@ -63,3 +71,37 @@ class SqlAlchemyCredentialResolver(CredentialResolver):
             raise CredentialResolutionError("CREDENTIAL_MALFORMED") from None
         except Exception:
             raise CredentialResolutionError("CREDENTIAL_RESOLUTION_FAILED") from None
+
+    def resolve_reality_identity(self) -> XrayRealityConfig:
+        """Read the existing purpose-bound identity in this operation Session."""
+
+        secret_ref = "gateway/xray/reality-identity"
+        purpose = "XRAY_REALITY_IDENTITY"
+        try:
+            stored = self._db.scalar(_current_secret_statement(secret_ref, purpose=purpose))
+            if stored is None:
+                raise CredentialResolutionError("CREDENTIAL_NOT_FOUND")
+            payload = json.loads(decrypt_secret(stored.ciphertext))
+            if not isinstance(payload, dict) or set(payload) != {"privateKey", "shortIds"}:
+                raise CredentialResolutionError("CREDENTIAL_MALFORMED")
+            if (
+                not isinstance(payload["privateKey"], str)
+                or not payload["privateKey"].strip()
+                or not isinstance(payload["shortIds"], list)
+                or not payload["shortIds"]
+                or any(
+                    not isinstance(short_id, str) or not short_id.strip()
+                    for short_id in payload["shortIds"]
+                )
+            ):
+                raise CredentialResolutionError("CREDENTIAL_MALFORMED")
+            return XrayRealityConfig(payload["privateKey"], payload["shortIds"])
+        except CredentialResolutionError:
+            raise
+        except SecretStoreError:
+            raise CredentialResolutionError("CREDENTIAL_DECRYPT_FAILED") from None
+        except (json.JSONDecodeError, TypeError, ValueError, UnicodeError):
+            raise CredentialResolutionError("CREDENTIAL_MALFORMED") from None
+        except Exception:
+            raise CredentialResolutionError("CREDENTIAL_RESOLUTION_FAILED") from None
+

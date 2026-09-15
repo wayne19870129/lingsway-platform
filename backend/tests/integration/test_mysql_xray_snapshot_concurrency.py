@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import os
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -13,14 +12,18 @@ from sqlalchemy import select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
+import backend.app.infra.xray_reality as reality_bootstrap
 import backend.app.models  # noqa: F401
-import ops.gateway.render_xray_routes as reality_renderer
-from backend.app.core.config import Settings
 from backend.app.core.database import Base, build_engine
-from backend.app.core.secrets import put_secret, reveal_secret_for_purpose
+from backend.app.core.secrets import put_secret
 from backend.app.infra.credential_resolver import SqlAlchemyCredentialResolver
 from backend.app.infra.gateway_route_lock import gateway_route_binding_write
 from backend.app.infra.provisioning_state import SqlAlchemyProvisioningState
+from backend.app.infra.xray_reality import (
+    REALITY_IDENTITY_PURPOSE,
+    REALITY_IDENTITY_SECRET_REF,
+    bootstrap_reality_identity,
+)
 from backend.app.models import (
     Customer,
     EgressBinding,
@@ -34,6 +37,11 @@ from backend.app.models import (
     SubscriptionStatus,
 )
 from backend.app.providers.base import EgressEndpointDTO
+from backend.app.providers.gateway.xray_composition import (
+    XrayDeploymentConfig,
+    XrayRealityConfig,
+    XrayStaticSkeleton,
+)
 from backend.app.providers.gateway.xray_file import XrayFileProvider
 
 
@@ -144,6 +152,18 @@ def _seed(engine: Engine) -> tuple[int, int, EgressEndpoint, EgressEndpoint]:
         return sub_a.id, sub_b.id, endpoint_a, endpoint_b
 
 
+def _configured_provider() -> XrayFileProvider:
+    return XrayFileProvider(
+        runtime=None,  # type: ignore[arg-type]
+        static_skeleton=XrayStaticSkeleton.canonical(),
+        deployment_config=XrayDeploymentConfig(
+            xray_log_level="warning",
+            reality_dest="shared.example:443",
+            reality_server_names=("shared.example",),
+        ),
+    )
+
+
 def test_mysql_snapshot_sees_b_committed_and_a_uncommitted_with_one_session(
     mysql_engine: Engine,
 ) -> None:
@@ -155,6 +175,14 @@ def test_mysql_snapshot_sees_b_committed_and_a_uncommitted_with_one_session(
     route and Secret, and must render both customers from one Session.
     """
     sub_a, sub_b, endpoint_a, endpoint_b = _seed(mysql_engine)
+    with Session(mysql_engine) as db:
+        put_secret(
+            db,
+            "gateway/xray/reality-identity",
+            '{"privateKey":"persisted-private-key","shortIds":["persisted-id"]}',
+            "XRAY_REALITY_IDENTITY",
+        )
+        db.commit()
 
     with Session(mysql_engine) as db_a:
         # Establish the old REPEATABLE READ view before B commits.
@@ -213,7 +241,7 @@ def test_mysql_snapshot_sees_b_committed_and_a_uncommitted_with_one_session(
                 tenant=None,  # type: ignore[arg-type]
                 routing_principal="a-principal",
             )
-            candidate = XrayFileProvider(runtime=None).render(
+            candidate = _configured_provider().render(
                 desired, SqlAlchemyCredentialResolver(db_a)
             )  # type: ignore[arg-type]
 
@@ -413,9 +441,10 @@ def test_mysql_snapshot_refreshes_stale_identity_map_rows(mysql_engine: Engine) 
 
 
 def test_mysql_concurrent_reality_bootstrap_keeps_one_identity(
-    mysql_engine: Engine, monkeypatch: pytest.MonkeyPatch
+    mysql_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Concurrent first renderers converge on the first persisted Secret."""
+    """Concurrent bootstrap operations converge on one persisted winner."""
     candidates: list[str] = []
     candidate_lock = Lock()
     both_generators_started = Barrier(2)
@@ -427,59 +456,60 @@ def test_mysql_concurrent_reality_bootstrap_keeps_one_identity(
             candidates.append(candidate)
         return '{"privateKey":"' + candidate + '","shortIds":["shared-id"]}'
 
-    monkeypatch.setattr(reality_renderer, "_new_reality_identity", generate)
-    settings = Settings(
-        xray_reality_dest="shared.example:443",
-        xray_reality_server_name="shared.example",
-    )
-    base_template = {
-        "inbounds": [
-            {
-                "streamSettings": {
-                    "security": "reality",
-                    "realitySettings": {
-                        "dest": "template-bogus.example:443",
-                        "serverNames": ["template-bogus.example"],
-                        "privateKey": "template-bogus-key",
-                        "shortIds": ["template-bogus-id"],
-                    },
-                }
-            }
-        ]
-    }
+    monkeypatch.setattr(reality_bootstrap, "_new_reality_identity", generate)
 
-    def render() -> dict[str, object]:
+    def bootstrap() -> XrayRealityConfig:
         with Session(mysql_engine) as db:
-            result = reality_renderer._reality_settings(
-                copy.deepcopy(base_template), db, settings
-            )
-            return copy.deepcopy(result)
+            return bootstrap_reality_identity(db, xray_binary="unused-xray")
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        results = list(executor.map(lambda _: render(), range(2)))
+        results = list(executor.map(lambda _: bootstrap(), range(2)))
 
     assert len(candidates) == 2
+    assert results[0] == results[1]
     with Session(mysql_engine) as db:
+        persisted = SqlAlchemyCredentialResolver(db).resolve_reality_identity()
         stored = db.scalars(
-            select(Secret).where(Secret.secret_ref == reality_renderer.REALITY_IDENTITY_SECRET_REF)
+            select(Secret).where(
+                Secret.secret_ref == REALITY_IDENTITY_SECRET_REF,
+                Secret.purpose == REALITY_IDENTITY_PURPOSE,
+            )
         ).all()
-        persisted = reality_renderer._parse_reality_identity(
-            reveal_secret_for_purpose(
-                db,
-                reality_renderer.REALITY_IDENTITY_SECRET_REF,
-                reality_renderer.REALITY_IDENTITY_PURPOSE,
+    assert results[0] == persisted
+    assert len(stored) == 1
+
+
+def test_mysql_reality_current_read_refreshes_stale_identity_map(
+    mysql_engine: Engine,
+) -> None:
+    """A purpose-bound current read returns B's committed identity, not A's stale row."""
+    with Session(mysql_engine) as writer:
+        put_secret(
+            writer,
+            REALITY_IDENTITY_SECRET_REF,
+            '{"privateKey":"old-private-key","shortIds":["old-id"]}',
+            REALITY_IDENTITY_PURPOSE,
+        )
+        writer.commit()
+
+    with Session(mysql_engine) as reader:
+        stale = reader.scalar(
+            select(Secret).where(
+                Secret.secret_ref == REALITY_IDENTITY_SECRET_REF,
+                Secret.purpose == REALITY_IDENTITY_PURPOSE,
             )
         )
+        assert stale is not None
+        with Session(mysql_engine) as writer:
+            put_secret(
+                writer,
+                REALITY_IDENTITY_SECRET_REF,
+                '{"privateKey":"new-private-key","shortIds":["new-id"]}',
+                REALITY_IDENTITY_PURPOSE,
+            )
+            writer.commit()
 
-    worker_identities = [
-        {"privateKey": result["privateKey"], "shortIds": result["shortIds"]}
-        for result in results
-    ]
-    assert len(set(candidates)) == 2
-    assert results[0] is not results[1]
-    assert worker_identities == [persisted, persisted]
-    assert len(stored) == 1
-    assert stored[0].purpose == reality_renderer.REALITY_IDENTITY_PURPOSE
-    assert persisted["privateKey"] in candidates
-    assert set(candidates) - {persisted["privateKey"]}
-    assert persisted["privateKey"] != "template-bogus-key"
+        refreshed = SqlAlchemyCredentialResolver(reader).resolve_reality_identity()
+
+    assert refreshed == XrayRealityConfig("new-private-key", ("new-id",))
+

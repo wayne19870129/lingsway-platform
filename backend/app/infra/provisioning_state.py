@@ -242,124 +242,7 @@ class SqlAlchemyProvisioningState(ProvisioningState):
         return binding
 
     def _full_desired_routing_snapshot(self) -> DesiredRoutingState:
-        """Build the complete active routing state with current DB reads.
-
-        Every read here is performed on the caller-owned provisioning Session.
-        Locking reads are intentional: the named lock serializes route writers,
-        while these reads independently bypass an older MySQL REPEATABLE READ
-        view and refresh any stale ORM identity-map entries.
-        """
-        statement = (
-            select(GatewayRouteBinding, EgressEndpoint, EgressBinding)
-            .outerjoin(
-                EgressEndpoint, EgressEndpoint.id == GatewayRouteBinding.egress_id
-            )
-            .outerjoin(
-                EgressBinding,
-                and_(
-                    EgressBinding.subscription_id == GatewayRouteBinding.subscription_id,
-                    EgressBinding.egress_id == GatewayRouteBinding.egress_id,
-                    EgressBinding.released_at.is_(None),
-                ),
-            )
-            .where(
-                GatewayRouteBinding.enabled.is_(True),
-                GatewayRouteBinding.released_at.is_(None),
-            )
-            .order_by(
-                GatewayRouteBinding.outbound_tag,
-                GatewayRouteBinding.gateway_principal,
-                GatewayRouteBinding.id,
-            )
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
-        rows = self.db.execute(statement).all()
-
-        # Read only active bindings belonging to subscriptions represented by
-        # the authoritative route set.  This current-read consistency check
-        # catches a same-subscription binding pointing at another egress, but
-        # does not lock unrelated Phase-A bindings for subscriptions that have
-        # no active GatewayRouteBinding yet.
-        route_subscription_ids = {route.subscription_id for route, _, _ in rows}
-        active_bindings = (
-            self.db.scalars(
-                select(EgressBinding)
-                .where(
-                    EgressBinding.released_at.is_(None),
-                    EgressBinding.subscription_id.in_(route_subscription_ids),
-                )
-                .with_for_update()
-                .execution_options(populate_existing=True)
-            ).all()
-            if route_subscription_ids
-            else []
-        )
-        bindings_by_subscription: dict[int, list[EgressBinding]] = {}
-        for binding in active_bindings:
-            bindings_by_subscription.setdefault(binding.subscription_id, []).append(binding)
-
-        user_routes: dict[str, str] = {}
-        outbounds_by_tag: dict[str, XrayOutboundDTO] = {}
-        for route, endpoint, joined_binding in rows:
-            if not isinstance(route.gateway_principal, str) or not route.gateway_principal.strip():
-                raise DesiredRoutingStateError("ROUTE_PRINCIPAL_INVALID")
-            if not isinstance(route.outbound_tag, str) or not route.outbound_tag.strip():
-                raise DesiredRoutingStateError("ROUTE_TAG_INVALID")
-            if route.outbound_tag == "BLOCK":
-                raise DesiredRoutingStateError("ROUTE_TAG_RESERVED")
-            if route.gateway_principal in user_routes:
-                raise DesiredRoutingStateError("ROUTE_PRINCIPAL_DUPLICATE")
-
-            if endpoint is None:
-                raise DesiredRoutingStateError("ROUTE_ENDPOINT_MISSING")
-            bindings = bindings_by_subscription.get(route.subscription_id, [])
-            if any(binding.egress_id != route.egress_id for binding in bindings):
-                raise DesiredRoutingStateError("ROUTE_BINDING_EGRESS_MISMATCH")
-            if joined_binding is not None and joined_binding.egress_id != route.egress_id:
-                raise DesiredRoutingStateError("ROUTE_BINDING_EGRESS_MISMATCH")
-
-            if not isinstance(endpoint.host, str) or not endpoint.host.strip():
-                raise DesiredRoutingStateError("ENDPOINT_HOST_INVALID")
-            if (
-                not isinstance(endpoint.port, int)
-                or isinstance(endpoint.port, bool)
-                or not 1 <= endpoint.port <= 65535
-            ):
-                raise DesiredRoutingStateError("ENDPOINT_PORT_INVALID")
-            if not isinstance(endpoint.protocol, str) or endpoint.protocol.lower() not in {
-                "socks",
-                "socks5",
-            }:
-                raise DesiredRoutingStateError("ENDPOINT_PROTOCOL_UNSUPPORTED")
-
-            selected_ref = endpoint.credential_secret_ref
-            if (
-                joined_binding is not None
-                and joined_binding.credential_secret_ref is not None
-                and joined_binding.credential_secret_ref != ""
-            ):
-                selected_ref = joined_binding.credential_secret_ref
-            if not isinstance(selected_ref, str) or selected_ref == "":
-                raise DesiredRoutingStateError("CREDENTIAL_REF_INVALID")
-
-            outbound = XrayOutboundDTO(
-                tag=route.outbound_tag,
-                host=endpoint.host,
-                port=endpoint.port,
-                protocol=endpoint.protocol,
-                credential_secret_ref=selected_ref,
-            )
-            existing = outbounds_by_tag.get(outbound.tag)
-            if existing is not None:
-                raise DesiredRoutingStateError("ROUTE_TAG_DUPLICATE")
-            outbounds_by_tag[outbound.tag] = outbound
-            user_routes[route.gateway_principal] = route.outbound_tag
-
-        return DesiredRoutingState(
-            user_routes=user_routes,
-            outbounds=tuple(outbounds_by_tag[tag] for tag in sorted(outbounds_by_tag)),
-        )
+        return full_desired_routing_snapshot(self.db)
 
     def desired_routing_state(
         self,
@@ -409,3 +292,124 @@ class SqlAlchemyProvisioningState(ProvisioningState):
         if "://" not in base:
             base = f"https://{base}"
         return f"{base}/s/{self.read_subscription_token()}"
+
+def full_desired_routing_snapshot(db: Session) -> DesiredRoutingState:
+    """Build the complete active routing state with current DB reads.
+
+    Every read here is performed on the caller-owned provisioning Session.
+    Locking reads are intentional: the named lock serializes route writers,
+    while these reads independently bypass an older MySQL REPEATABLE READ
+    view and refresh any stale ORM identity-map entries.
+    """
+    statement = (
+        select(GatewayRouteBinding, EgressEndpoint, EgressBinding)
+        .outerjoin(
+            EgressEndpoint, EgressEndpoint.id == GatewayRouteBinding.egress_id
+        )
+        .outerjoin(
+            EgressBinding,
+            and_(
+                EgressBinding.subscription_id == GatewayRouteBinding.subscription_id,
+                EgressBinding.egress_id == GatewayRouteBinding.egress_id,
+                EgressBinding.released_at.is_(None),
+            ),
+        )
+        .where(
+            GatewayRouteBinding.enabled.is_(True),
+            GatewayRouteBinding.released_at.is_(None),
+        )
+        .order_by(
+            GatewayRouteBinding.outbound_tag,
+            GatewayRouteBinding.gateway_principal,
+            GatewayRouteBinding.id,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    rows = db.execute(statement).all()
+
+    # Read only active bindings belonging to subscriptions represented by
+    # the authoritative route set.  This current-read consistency check
+    # catches a same-subscription binding pointing at another egress, but
+    # does not lock unrelated Phase-A bindings for subscriptions that have
+    # no active GatewayRouteBinding yet.
+    route_subscription_ids = {route.subscription_id for route, _, _ in rows}
+    active_bindings = (
+        db.scalars(
+            select(EgressBinding)
+            .where(
+                EgressBinding.released_at.is_(None),
+                EgressBinding.subscription_id.in_(route_subscription_ids),
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).all()
+        if route_subscription_ids
+        else []
+    )
+    bindings_by_subscription: dict[int, list[EgressBinding]] = {}
+    for binding in active_bindings:
+        bindings_by_subscription.setdefault(binding.subscription_id, []).append(binding)
+
+    user_routes: dict[str, str] = {}
+    outbounds_by_tag: dict[str, XrayOutboundDTO] = {}
+    for route, endpoint, joined_binding in rows:
+        if not isinstance(route.gateway_principal, str) or not route.gateway_principal.strip():
+            raise DesiredRoutingStateError("ROUTE_PRINCIPAL_INVALID")
+        if not isinstance(route.outbound_tag, str) or not route.outbound_tag.strip():
+            raise DesiredRoutingStateError("ROUTE_TAG_INVALID")
+        if route.outbound_tag == "BLOCK":
+            raise DesiredRoutingStateError("ROUTE_TAG_RESERVED")
+        if route.gateway_principal in user_routes:
+            raise DesiredRoutingStateError("ROUTE_PRINCIPAL_DUPLICATE")
+
+        if endpoint is None:
+            raise DesiredRoutingStateError("ROUTE_ENDPOINT_MISSING")
+        bindings = bindings_by_subscription.get(route.subscription_id, [])
+        if any(binding.egress_id != route.egress_id for binding in bindings):
+            raise DesiredRoutingStateError("ROUTE_BINDING_EGRESS_MISMATCH")
+        if joined_binding is not None and joined_binding.egress_id != route.egress_id:
+            raise DesiredRoutingStateError("ROUTE_BINDING_EGRESS_MISMATCH")
+
+        if not isinstance(endpoint.host, str) or not endpoint.host.strip():
+            raise DesiredRoutingStateError("ENDPOINT_HOST_INVALID")
+        if (
+            not isinstance(endpoint.port, int)
+            or isinstance(endpoint.port, bool)
+            or not 1 <= endpoint.port <= 65535
+        ):
+            raise DesiredRoutingStateError("ENDPOINT_PORT_INVALID")
+        if not isinstance(endpoint.protocol, str) or endpoint.protocol.lower() not in {
+            "socks",
+            "socks5",
+        }:
+            raise DesiredRoutingStateError("ENDPOINT_PROTOCOL_UNSUPPORTED")
+
+        selected_ref = endpoint.credential_secret_ref
+        if (
+            joined_binding is not None
+            and joined_binding.credential_secret_ref is not None
+            and joined_binding.credential_secret_ref != ""
+        ):
+            selected_ref = joined_binding.credential_secret_ref
+        if not isinstance(selected_ref, str) or selected_ref == "":
+            raise DesiredRoutingStateError("CREDENTIAL_REF_INVALID")
+
+        outbound = XrayOutboundDTO(
+            tag=route.outbound_tag,
+            host=endpoint.host,
+            port=endpoint.port,
+            protocol=endpoint.protocol,
+            credential_secret_ref=selected_ref,
+        )
+        existing = outbounds_by_tag.get(outbound.tag)
+        if existing is not None:
+            raise DesiredRoutingStateError("ROUTE_TAG_DUPLICATE")
+        outbounds_by_tag[outbound.tag] = outbound
+        user_routes[route.gateway_principal] = route.outbound_tag
+
+    return DesiredRoutingState(
+        user_routes=user_routes,
+        outbounds=tuple(outbounds_by_tag[tag] for tag in sorted(outbounds_by_tag)),
+    )
+

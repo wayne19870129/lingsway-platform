@@ -29,6 +29,7 @@ class Settings:
     marzban_default_protocol: str = "vless"
     marzban_default_inbounds_json: str = "{}"
     marzban_verify_tls: bool = True
+    xray_log_level: str = "warning"
     xray_reality_dest: str = ""
     xray_reality_server_name: str = ""
     accounting_sync_batch_size: int = 100
@@ -50,6 +51,14 @@ class Settings:
     transport_provider_mode: str = "mock"
     cors_origins: str = "http://localhost:3000"
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.xray_log_level, str):
+            raise ValueError("XRAY_LOG_LEVEL must be a string")
+        normalized = self.xray_log_level.strip().lower()
+        if normalized not in {"debug", "info", "warning", "error", "none"}:
+            raise ValueError("XRAY_LOG_LEVEL must be one of debug, info, warning, error, none")
+        object.__setattr__(self, "xray_log_level", normalized)
+
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> "Settings":
         values = os.environ if environ is None else environ
@@ -65,6 +74,8 @@ class Settings:
                 converted[field.name] = int(raw)
             elif field.name == "marzban_verify_tls":
                 converted[field.name] = raw.lower() in {"1", "true", "yes", "on"}
+            elif field.name == "xray_log_level":
+                converted[field.name] = raw.strip().lower()
             else:
                 converted[field.name] = raw
         settings = cls(**converted)  # type: ignore[arg-type]
@@ -90,3 +101,4 @@ class Settings:
 @lru_cache
 def get_settings() -> Settings:
     return Settings.from_env()
+
