@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any, cast
 
 import pytest
+from sqlalchemy import create_engine
 from sqlalchemy.dialects import mysql
 from sqlalchemy.orm import Session
 
+import backend.app.models  # noqa: F401
+from backend.app.core.database import Base
 from backend.app.infra.provisioning_state import (
     DesiredRoutingStateError,
     SqlAlchemyProvisioningState,
@@ -152,3 +156,63 @@ def test_nonempty_whitespace_override_is_selected_without_endpoint_fallback() ->
     desired = SqlAlchemyProvisioningState(cast(Session, db), 1)._full_desired_routing_snapshot()
 
     assert desired.outbounds[0].credential_secret_ref == "   "
+
+
+def test_sqlite_snapshot_excludes_inactive_routes_and_applies_fallbacks() -> None:
+    engine = create_engine("sqlite+pysqlite://")
+    Base.metadata.create_all(engine)
+    released_at = datetime(2026, 9, 14, tzinfo=UTC)
+    try:
+        with Session(engine) as db:
+            endpoints = [_endpoint(index, f"endpoint/ref-{index}") for index in range(1, 6)]
+            routes = [
+                _route(1, 1, 1, "principal-none", "active-none"),
+                _route(2, 2, 2, "principal-empty", "active-empty"),
+                _route(3, 3, 3, "principal-released-binding", "active-released-binding"),
+                _route(4, 4, 4, "principal-disabled", "disabled"),
+                _route(5, 5, 5, "principal-released", "released"),
+            ]
+            routes[3].enabled = False
+            routes[4].released_at = released_at
+            routes[4].enabled = True
+            bindings = [
+                EgressBinding(
+                    subscription_id=1,
+                    egress_id=1,
+                    credential_secret_ref=None,
+                ),
+                EgressBinding(
+                    subscription_id=2,
+                    egress_id=2,
+                    credential_secret_ref="",
+                ),
+                EgressBinding(
+                    subscription_id=3,
+                    egress_id=3,
+                    credential_secret_ref="released/ref",
+                    released_at=released_at,
+                ),
+            ]
+            db.add_all([*endpoints, *routes, *bindings])
+            db.commit()
+
+            desired = SqlAlchemyProvisioningState(
+                db, 1
+            )._full_desired_routing_snapshot()
+
+            assert [outbound.tag for outbound in desired.outbounds] == [
+                "active-empty",
+                "active-none",
+                "active-released-binding",
+            ]
+            assert {
+                outbound.credential_secret_ref for outbound in desired.outbounds
+            } == {"endpoint/ref-1", "endpoint/ref-2", "endpoint/ref-3"}
+            assert set(desired.user_routes) == {
+                "principal-none",
+                "principal-empty",
+                "principal-released-binding",
+            }
+    finally:
+        Base.metadata.drop_all(engine)
+        engine.dispose()

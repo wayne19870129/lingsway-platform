@@ -1,9 +1,14 @@
 # Project Continuity / Handoff
 
 **Last reconciled with main baseline:** `2bc58c57de72da16583286c7d507eab882769da0`
-(verified 2026-09-14 UTC after PR #103 was manually merged). The active
-technical work is TASK-T16 Phase 2B-remain-3; dates in this document are UTC
-unless stated otherwise.
+(verified 2026-09-14 UTC after PR #103 was manually merged). PR #104 is the
+TASK-T16 Phase 2B-remain-3 implementation vehicle. Only independent PASS plus
+manual merge completes remain-3; when this change is present on `main`, remain-3
+is complete and the remaining Phase 2B work becomes the active frontier:
+preservation/legal-deletion, Reality persistence/ownership, writer-guard/drift
+baseline, and existing-data reconciliation. Phase 2B remains **NOT COMPLETE**
+and Phase 2C remains **BLOCKED**. Dates in this document are UTC unless stated
+otherwise.
 
 This document is maintained by whichever agent last touched a section
 below; if it looks stale, the next agent should refresh the relevant

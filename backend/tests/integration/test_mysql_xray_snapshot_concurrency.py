@@ -312,3 +312,95 @@ def test_mysql_snapshot_does_not_lock_unrelated_phase_a_binding(
                     GatewayRouteBinding.subscription_id == sub_b
                 )
             ) is not None
+
+
+def test_mysql_snapshot_refreshes_stale_identity_map_rows(mysql_engine: Engine) -> None:
+    """Prove current reads refresh stale route, endpoint, binding, and Secret state."""
+    sub_a, _, endpoint_a, _ = _seed(mysql_engine)
+    initial_ref = f"snap/initial/{uuid4().hex[:10]}"
+
+    with Session(mysql_engine) as seed_db:
+        put_secret(
+            seed_db,
+            initial_ref,
+            '{"username":"old-user","password":"old-password"}',
+            "EGRESS_CREDENTIAL",
+        )
+        seed_db.add(
+            EgressBinding(
+                subscription_id=sub_a,
+                egress_id=endpoint_a.id,
+                credential_secret_ref=initial_ref,
+            )
+        )
+        seed_db.add(
+            GatewayRouteBinding(
+                subscription_id=sub_a,
+                egress_id=endpoint_a.id,
+                gateway_principal="old-principal",
+                outbound_tag="egress-initial",
+                enabled=True,
+            )
+        )
+        with gateway_route_binding_write(seed_db):
+            seed_db.commit()
+
+    with Session(mysql_engine) as db_a:
+        stale_route = db_a.scalar(
+            select(GatewayRouteBinding).where(
+                GatewayRouteBinding.subscription_id == sub_a
+            )
+        )
+        stale_endpoint = db_a.get(EgressEndpoint, endpoint_a.id)
+        stale_binding = db_a.scalar(
+            select(EgressBinding).where(EgressBinding.subscription_id == sub_a)
+        )
+        assert stale_route is not None
+        assert stale_endpoint is not None
+        assert stale_binding is not None
+        assert stale_route.gateway_principal == "old-principal"
+        assert stale_endpoint.host == "a-before.example.invalid"
+        assert stale_binding.credential_secret_ref == initial_ref
+
+        with Session(mysql_engine) as db_b, gateway_route_binding_write(db_b):
+            route_b = db_b.scalar(
+                select(GatewayRouteBinding).where(
+                    GatewayRouteBinding.subscription_id == sub_a
+                )
+            )
+            endpoint_b = db_b.get(EgressEndpoint, endpoint_a.id)
+            binding_b = db_b.scalar(
+                select(EgressBinding).where(EgressBinding.subscription_id == sub_a)
+            )
+            assert route_b is not None
+            assert endpoint_b is not None
+            assert binding_b is not None
+            route_b.gateway_principal = "fresh-principal"
+            route_b.outbound_tag = "egress-fresh"
+            endpoint_b.host = "a-after.example.invalid"
+            endpoint_b.port = 2080
+            fresh_ref = "snap/fresh-binding"
+            binding_b.credential_secret_ref = fresh_ref
+            put_secret(
+                db_b,
+                fresh_ref,
+                '{"username":"fresh-user","password":"fresh-password"}',
+                "EGRESS_CREDENTIAL",
+            )
+            db_b.commit()
+
+        with gateway_route_binding_write(db_a):
+            desired = SqlAlchemyProvisioningState(
+                db_a, sub_a
+            )._full_desired_routing_snapshot()
+            credential = SqlAlchemyCredentialResolver(db_a).resolve(
+                desired.outbounds[0].credential_secret_ref
+            )
+
+            assert desired.user_routes == {"fresh-principal": "egress-fresh"}
+            assert desired.outbounds[0].host == "a-after.example.invalid"
+            assert desired.outbounds[0].port == 2080
+            assert desired.outbounds[0].credential_secret_ref == "snap/fresh-binding"
+            assert credential.username == "fresh-user"
+            assert credential.password == "fresh-password"
+            db_a.rollback()
