@@ -3,10 +3,11 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from sqlalchemy.dialects import mysql
+from sqlalchemy.orm import Session
 
 from backend.app.infra.gateway_route_lock import GatewayRouteBindingLockError
 from ops.reconciliation import gateway_principals as reconciliation
@@ -22,8 +23,13 @@ class _Result:
 
 
 class _Session:
-    def __init__(self, rowcounts: list[int] | None = None) -> None:
+    def __init__(
+        self,
+        rowcounts: list[int] | None = None,
+        rows: list[tuple[Any, Any]] | None = None,
+    ) -> None:
         self.rowcounts = list(rowcounts or [])
+        self.rows = rows or []
         self.execute_calls = 0
         self.commit_calls = 0
         self.rollback_calls = 0
@@ -32,6 +38,8 @@ class _Session:
     def execute(self, statement: Any) -> _Result:
         self.execute_calls += 1
         self.statements.append(statement)
+        if self.rows:
+            return _Result(rows=self.rows)
         rowcount = self.rowcounts.pop(0) if self.rowcounts else 0
         return _Result(rowcount=rowcount)
 
@@ -75,7 +83,7 @@ def test_phase_a_success_then_phase_b_commits_conditional_updates(
     session = _Session(rowcounts=[1])
 
     result = reconciliation.reconcile_gateway_principals(
-        session,
+        cast(Session, session),
         lambda username: {"alice": "principal-a", "bob": "principal-b-new"}[username],
         confirm=True,
     )
@@ -99,7 +107,9 @@ def test_any_marzban_lookup_failure_causes_zero_writes(monkeypatch: pytest.Monke
             raise RuntimeError("transport failure")
         return "principal-a"
 
-    result = reconciliation.reconcile_gateway_principals(session, lookup, confirm=True)
+    result = reconciliation.reconcile_gateway_principals(
+        cast(Session, session), lookup, confirm=True
+    )
 
     assert result.reason_code == "marzban_lookup_failed"
     assert calls == ["alice", "bob"]
@@ -116,7 +126,7 @@ def test_missing_or_blank_routing_principal_causes_zero_writes(
     session = _Session()
 
     result = reconciliation.reconcile_gateway_principals(
-        session, lambda _username: target, confirm=True
+        cast(Session, session), lambda _username: target, confirm=True
     )
 
     assert result.status == "aborted"
@@ -130,7 +140,7 @@ def test_duplicate_target_principal_causes_zero_writes(monkeypatch: pytest.Monke
     session = _Session()
 
     result = reconciliation.reconcile_gateway_principals(
-        session, lambda _username: "same", confirm=True
+        cast(Session, session), lambda _username: "same", confirm=True
     )
 
     assert result.reason_code == "duplicate_target_principal"
@@ -144,7 +154,7 @@ def test_snapshot_change_after_phase_a_aborts_before_write(monkeypatch: pytest.M
     session = _Session(rowcounts=[1])
 
     result = reconciliation.reconcile_gateway_principals(
-        session, lambda _username: "principal-new", confirm=True
+        cast(Session, session), lambda _username: "principal-new", confirm=True
     )
 
     assert result.reason_code == "snapshot_changed"
@@ -160,7 +170,7 @@ def test_conditional_update_rowcount_failure_rolls_back_everything(
     session = _Session(rowcounts=[0])
 
     result = reconciliation.reconcile_gateway_principals(
-        session, lambda _username: "principal-new", confirm=True
+        cast(Session, session), lambda _username: "principal-new", confirm=True
     )
 
     assert result.reason_code == "conditional_update_rowcount"
@@ -181,7 +191,7 @@ def test_lock_acquisition_failure_causes_zero_writes(monkeypatch: pytest.MonkeyP
     session = _Session()
 
     result = reconciliation.reconcile_gateway_principals(
-        session, lambda _username: "principal-new", confirm=True
+        cast(Session, session), lambda _username: "principal-new", confirm=True
     )
 
     assert result.reason_code == "lock_acquisition_failed"
@@ -194,7 +204,7 @@ def test_second_already_reconciled_run_is_a_safe_noop(monkeypatch: pytest.Monkey
     session = _Session()
 
     result = reconciliation.reconcile_gateway_principals(
-        session, lambda _username: "principal-a", confirm=True
+        cast(Session, session), lambda _username: "principal-a", confirm=True
     )
 
     assert result.status == "success"
@@ -215,7 +225,7 @@ def test_dry_run_never_writes_and_audit_is_secret_safe(
 
     with caplog.at_level("INFO"):
         result = reconciliation.reconcile_gateway_principals(
-            session, lambda _username: "principal-new", confirm=False
+            cast(Session, session), lambda _username: "principal-new", confirm=False
         )
 
     assert result.mode == "dry-run"
@@ -227,9 +237,8 @@ def test_dry_run_never_writes_and_audit_is_secret_safe(
 
 def test_active_snapshot_query_excludes_disabled_and_released_rows() -> None:
     session = _Session()
-    session.execute = lambda statement: session.statements.append(statement) or _Result()  # type: ignore[method-assign]
 
-    assert reconciliation._active_snapshot(session) == ()
+    assert reconciliation._active_snapshot(cast(Session, session)) == ()
     compiled = str(session.statements[0].compile(dialect=mysql.dialect()))
     assert "enabled IS true" in compiled
     assert "released_at IS NULL" in compiled
@@ -243,13 +252,10 @@ def test_missing_subscription_is_fail_closed() -> None:
         released_at=None,
         gateway_principal="principal-a",
     )
-    session = _Session()
-    session.execute = lambda statement: (  # type: ignore[method-assign]
-        session.statements.append(statement) or _Result(rows=[(binding, None)])
-    )
+    session = _Session(rows=[(binding, None)])
 
     with pytest.raises(reconciliation.ReconciliationError) as raised:
-        reconciliation._active_snapshot(session)
+        reconciliation._active_snapshot(cast(Session, session))
 
     assert raised.value.reason_code == "subscription_missing"
 
