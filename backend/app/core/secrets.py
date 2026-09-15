@@ -121,6 +121,7 @@ def reveal_secret_for_purpose(db: Session, secret_ref: str, purpose: str) -> str
     statement = (
         select(Secret)
         .where(Secret.secret_ref == secret_ref)
+        .with_for_update()
         .execution_options(populate_existing=True)
     )
     stored = db.scalar(statement)
