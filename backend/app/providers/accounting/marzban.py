@@ -360,6 +360,7 @@ class MarzbanAccountingProvider:
     Construction is safe (no network I/O happens in `__init__` beyond
     validating `default_inbounds_json`); registry selection owns the
     resulting client and closes it through `ProviderRegistry.close()`.
+    """
 
     def __init__(
         self,
