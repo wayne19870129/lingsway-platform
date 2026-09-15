@@ -1,7 +1,9 @@
 from collections.abc import Callable
+from typing import Any, cast
 
 from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import insert, select
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -79,7 +81,6 @@ def get_or_create_secret(
     statement = (
         select(Secret)
         .where(Secret.secret_ref == secret_ref)
-        .with_for_update()
         .execution_options(populate_existing=True)
     )
     existing = db.scalar(statement)
@@ -94,7 +95,9 @@ def get_or_create_secret(
     if db.get_bind().dialect.name == "mysql":
         # MySQL removes the savepoint on a duplicate-key error in this path;
         # INSERT IGNORE lets the loser wait for and then read the winner.
-        result = db.execute(insert(Secret).values(values).prefix_with("IGNORE"))
+        result = cast(
+            CursorResult[Any], db.execute(insert(Secret).values(values).prefix_with("IGNORE"))
+        )
         winner = db.scalar(statement)
         if winner is None:
             raise SecretStoreError("Secret insert did not produce a readable row")
