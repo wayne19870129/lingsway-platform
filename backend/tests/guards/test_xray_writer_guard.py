@@ -355,24 +355,26 @@ def test_rollback_failure_does_not_advance_baseline(tmp_path: Path) -> None:
     assert record.state == "degraded"
 
 
-@pytest.mark.parametrize(
-    ("runtime_kwargs", "health_values"),
-    [
-        ({"restore_error": RuntimeError("restore failed")}, [False]),
-        ({"reload_errors": {2: RuntimeError("rollback reload failed")}}, [False, True]),
-        ({}, [False, RuntimeError("rollback health failed")]),
-        ({}, [False, False]),
-    ],
-)
+@pytest.mark.parametrize("failure", ["restore", "reload", "health", "unhealthy"])
 def test_every_unverified_rollback_is_marked_degraded(
     tmp_path: Path,
-    runtime_kwargs: dict[str, object],
-    health_values: list[bool | Exception],
+    failure: str,
 ) -> None:
     path = tmp_path / "baseline.json"
     initial = config()
     seed_baseline(path, initial)
-    runtime = Runtime(initial, health=health_values, **runtime_kwargs)
+    if failure == "restore":
+        runtime = Runtime(initial, health=[False], restore_error=RuntimeError("restore failed"))
+    elif failure == "reload":
+        runtime = Runtime(
+            initial,
+            health=[False, True],
+            reload_errors={2: RuntimeError("rollback reload failed")},
+        )
+    elif failure == "health":
+        runtime = Runtime(initial, health=[False, RuntimeError("rollback health failed")])
+    else:
+        runtime = Runtime(initial, health=[False, False])
 
     with pytest.raises(XrayReloadError):
         make_provider(runtime, path).apply(
