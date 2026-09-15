@@ -1,9 +1,24 @@
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from copy import deepcopy
 from pathlib import Path
+from typing import cast
 
 import pytest
 
-from backend.app.providers.base import CandidateConfig, HealthReport
+from backend.app.providers.base import (
+    CandidateConfig,
+    CredentialDTO,
+    DesiredRoutingState,
+    HealthReport,
+    XrayOutboundDTO,
+)
+from backend.app.providers.gateway.xray_composition import (
+    XrayDeploymentConfig,
+    XrayFullConfigInput,
+    XrayRealityConfig,
+    XrayStaticSkeleton,
+    compose_xray_config,
+)
 from backend.app.providers.gateway.xray_file import (
     XrayFileProvider,
     XrayReloadError,
@@ -11,27 +26,41 @@ from backend.app.providers.gateway.xray_file import (
 )
 
 
-def config(*, users: tuple[str, ...] = ("old-user",)) -> dict[str, object]:
-    return {
-        "routing": {
-            "rules": [
-                {"type": "field", "ip": ["geoip:private"], "outboundTag": "BLOCK"},
-                *(
-                    {"type": "field", "user": [user], "outboundTag": "egress-1"}
-                    for user in users
-                ),
-                {
-                    "type": "field",
-                    "network": "tcp,udp",
-                    "outboundTag": "BLOCK",
-                },
-            ]
-        },
-        "outbounds": [
-            {"tag": "BLOCK", "protocol": "blackhole"},
-            {"tag": "egress-1", "protocol": "socks"},
-        ],
+def config(
+    *,
+    routes: tuple[tuple[str, str], ...] = (("old-user", "egress-1"),),
+) -> dict[str, object]:
+    tags = tuple(dict.fromkeys(tag for _, tag in routes))
+    desired = DesiredRoutingState(
+        user_routes=dict(routes),
+        outbounds=tuple(
+            XrayOutboundDTO(
+                tag,
+                f"{tag}.example.invalid",
+                1080,
+                "socks",
+                f"secret/{tag}",
+            )
+            for tag in tags
+        ),
+    )
+    credentials = {
+        f"secret/{tag}": CredentialDTO(f"user-{tag}", f"password-{tag}") for tag in tags
     }
+    candidate = compose_xray_config(
+        XrayFullConfigInput(
+            XrayStaticSkeleton.canonical(),
+            XrayDeploymentConfig(
+                xray_log_level="warning",
+                reality_dest="reality.example.invalid:443",
+                reality_server_names=("reality.example.invalid",),
+            ),
+            XrayRealityConfig("private-key", ("short-id",)),
+            desired,
+            credentials,
+        )
+    )
+    return deepcopy(dict(candidate.content))
 
 
 class Runtime:
@@ -54,12 +83,15 @@ class Runtime:
         install_error: Exception | None = None,
         reload_errors: dict[int, Exception] | None = None,
         restore_error: Exception | None = None,
+        forbid_current: bool = False,
     ) -> None:
         self.xray_valid = xray_valid
         self.health_values: list[bool | Exception] = health or [True]
         self.install_error = install_error
         self.reload_errors = reload_errors or {}
         self.restore_error = restore_error
+        self.forbid_current = forbid_current
+        self.current_calls = 0
         self.events: list[str] = []
         self.timeline: list[str] = []
         self.reload_calls = 0
@@ -73,6 +105,9 @@ class Runtime:
         return Path("backup.json")
 
     def current(self) -> Mapping[str, object]:
+        self.current_calls += 1
+        if self.forbid_current:
+            raise AssertionError("validate() must not inspect runtime.current()")
         return self._current
 
     def xray_test(self, content: Mapping[str, object]) -> bool:
@@ -86,7 +121,7 @@ class Runtime:
         if self.install_error is not None:
             error, self.install_error = self.install_error, None
             raise error
-        self._current = content
+        self._current = deepcopy(dict(content))
 
     def reload(self) -> None:
         self.reload_calls += 1
@@ -122,7 +157,7 @@ def test_invalid_candidate_stops_before_reload() -> None:
 
     assert runtime.reload_calls == 0
     assert not any(event.startswith("reload:") for event in runtime.events)
-    assert runtime.events == ["backup", "xray_test"]
+    assert runtime.events == ["backup"]
 
 
 def test_failed_post_reload_health_executes_complete_rollback_sequence() -> None:
@@ -148,7 +183,10 @@ def test_failed_post_reload_health_executes_complete_rollback_sequence() -> None
 
     with pytest.raises(XrayReloadError):
         provider.apply(
-            CandidateConfig(config(users=("old-user", "new-user")), "v2"),
+            CandidateConfig(
+                config(routes=(("old-user", "egress-1"), ("new-user", "egress-1"))),
+                "v2",
+            ),
             new_username="new-user",
         )
 
@@ -209,7 +247,7 @@ def test_install_exception_triggers_full_rollback_and_fails_closed() -> None:
     runtime = Runtime(install_error=original_error)
     disabled, alerts, audits, raised = _apply_with_recorders(
         runtime,
-        config(users=("old-user", "new-user")),
+        config(routes=(("old-user", "egress-1"), ("new-user", "egress-1"))),
         new_username="new-user",
     )
 
@@ -251,7 +289,7 @@ def test_first_reload_exception_triggers_full_rollback_and_fails_closed() -> Non
     runtime = Runtime(reload_errors={1: original_error})
     disabled, alerts, audits, raised = _apply_with_recorders(
         runtime,
-        config(users=("old-user", "new-user")),
+        config(routes=(("old-user", "egress-1"), ("new-user", "egress-1"))),
         new_username="new-user",
     )
 
@@ -291,7 +329,7 @@ def test_main_post_reload_health_exception_triggers_full_rollback_and_fails_clos
     runtime = Runtime(health=[original_error, True])
     disabled, alerts, audits, raised = _apply_with_recorders(
         runtime,
-        config(users=("old-user", "new-user")),
+        config(routes=(("old-user", "egress-1"), ("new-user", "egress-1"))),
         new_username="new-user",
     )
 
@@ -331,7 +369,7 @@ def test_rollback_restore_exception_fails_closed_without_claiming_recovery() -> 
     runtime = Runtime(health=[False], restore_error=original_error)
     disabled, alerts, audits, raised = _apply_with_recorders(
         runtime,
-        config(users=("old-user", "new-user")),
+        config(routes=(("old-user", "egress-1"), ("new-user", "egress-1"))),
         new_username="new-user",
     )
 
@@ -370,7 +408,7 @@ def test_rollback_second_reload_exception_fails_closed_without_claiming_recovery
     runtime = Runtime(health=[False], reload_errors={2: original_error})
     disabled, alerts, audits, raised = _apply_with_recorders(
         runtime,
-        config(users=("old-user", "new-user")),
+        config(routes=(("old-user", "egress-1"), ("new-user", "egress-1"))),
         new_username="new-user",
     )
 
@@ -407,7 +445,7 @@ def test_rollback_health_check_exception_fails_closed_without_claiming_recovery(
     runtime = Runtime(health=[False, original_error])
     disabled, alerts, audits, raised = _apply_with_recorders(
         runtime,
-        config(users=("old-user", "new-user")),
+        config(routes=(("old-user", "egress-1"), ("new-user", "egress-1"))),
         new_username="new-user",
     )
 
@@ -445,7 +483,7 @@ def test_rollback_reload_succeeds_but_rollback_health_unhealthy_fails_closed() -
     runtime = Runtime(health=[False, False])
     disabled, alerts, audits, raised = _apply_with_recorders(
         runtime,
-        config(users=("old-user", "new-user")),
+        config(routes=(("old-user", "egress-1"), ("new-user", "egress-1"))),
         new_username="new-user",
     )
 
@@ -474,21 +512,282 @@ def test_rollback_reload_succeeds_but_rollback_health_unhealthy_fails_closed() -
     assert "unhealthy" in str(raised).lower()
 
 
-def test_preservation_rejects_missing_existing_user_and_outbound() -> None:
-    runtime = Runtime()
-    candidate = config(users=())
-    candidate["outbounds"] = [{"tag": "BLOCK", "protocol": "blackhole"}]
+def test_validate_accepts_legal_route_and_outbound_deletion_without_current_read() -> None:
+    runtime = Runtime(
+        forbid_current=True,
+    )
+    candidate = config(routes=(("route-a", "egress-a"),))
+
     result = XrayFileProvider(runtime).validate(CandidateConfig(candidate, "v3"))
-    assert not result.valid
-    assert any("missing existing users" in error for error in result.errors)
-    assert any("missing existing outbounds" in error for error in result.errors)
+
+    assert result.valid
+    assert runtime.current_calls == 0
+    assert runtime.events == ["xray_test"]
+
+
+def test_legal_deletion_is_installed_and_passes_exact_post_reload_check() -> None:
+    runtime = Runtime()
+    candidate = config(routes=(("route-a", "egress-a"),))
+
+    result = XrayFileProvider(runtime).apply(CandidateConfig(candidate, "legal-delete"))
+
+    assert result.applied
+    current = cast(dict[str, object], runtime._current)
+    outbounds = cast(list[dict[str, object]], current["outbounds"])
+    assert {item["tag"] for item in outbounds} == {"BLOCK", "egress-a"}
+    routing = cast(dict[str, object], current["routing"])
+    rules = cast(list[dict[str, object]], routing["rules"])
+    assert all(rule.get("outboundTag") != "egress-b" for rule in rules)
+    assert all(rule.get("user") != ["route-b"] for rule in rules)
+
+
+class InstalledMutatingRuntime(Runtime):
+    def __init__(
+        self,
+        initial: dict[str, object],
+        mutate_after_install: Callable[[dict[str, object]], None],
+    ) -> None:
+        super().__init__(health=[True, True])
+        self._current = initial
+        self._mutate_after_install = mutate_after_install
+
+    def install(self, content: Mapping[str, object]) -> None:
+        super().install(content)
+        self._mutate_after_install(cast(dict[str, object], self._current))
+
+
+def _assert_post_reload_mismatch_rolls_back(
+    initial: dict[str, object],
+    candidate: dict[str, object],
+    mutate_after_install: Callable[[dict[str, object]], None],
+) -> Runtime:
+    runtime = InstalledMutatingRuntime(initial, mutate_after_install)
+    audits: list[str] = []
+    provider = XrayFileProvider(
+        runtime,
+        audit=lambda event, _details: audits.append(event),
+    )
+
+    with pytest.raises(XrayReloadError):
+        provider.apply(CandidateConfig(candidate, "projection-mismatch"))
+
+    assert runtime.events == [
+        "backup",
+        "xray_test",
+        "install",
+        "reload:1",
+        "health",
+        "restore",
+        "reload:2",
+        "health",
+    ]
+    assert runtime._current == runtime._backup
+    assert "post_reload_projection_failed" in audits
+    return runtime
+
+
+def test_stale_extra_route_and_outbound_fail_exact_check_and_roll_back() -> None:
+    def retain_deleted_state(current: dict[str, object]) -> None:
+        current.clear()
+        current.update(config(routes=(("route-a", "egress-a"), ("route-b", "egress-b"))))
+
+    runtime = _assert_post_reload_mismatch_rolls_back(
+        config(routes=(("route-a", "egress-a"), ("route-b", "egress-b"))),
+        config(routes=(("route-a", "egress-a"),)),
+        retain_deleted_state,
+    )
+    assert runtime.reload_calls == 2
+
+
+def test_missing_candidate_owned_state_fails_exact_check_and_rolls_back() -> None:
+    def drop_candidate_state(current: dict[str, object]) -> None:
+        current.clear()
+        current.update(config(routes=(("route-a", "egress-a"),)))
+
+    runtime = _assert_post_reload_mismatch_rolls_back(
+        config(routes=(("route-a", "egress-a"), ("route-b", "egress-b"))),
+        config(routes=(("route-a", "egress-a"), ("route-b", "egress-b"))),
+        drop_candidate_state,
+    )
+    assert runtime.reload_calls == 2
+
+
+def test_post_reload_current_read_failure_rolls_back_closed() -> None:
+    runtime = Runtime(health=[True, True], forbid_current=True)
+    candidate = config()
+
+    with pytest.raises(XrayReloadError):
+        XrayFileProvider(runtime).apply(CandidateConfig(candidate, "current-read-failure"))
+
+    assert runtime.current_calls == 1
+    assert runtime.events == [
+        "backup",
+        "xray_test",
+        "install",
+        "reload:1",
+        "health",
+        "restore",
+        "reload:2",
+        "health",
+    ]
+
+
+def _mutate_projection_field(field: str) -> Callable[[dict[str, object]], None]:
+    def mutate(config_value: dict[str, object]) -> None:
+        inbound = cast(list[dict[str, object]], config_value["inbounds"])[0]
+        settings = cast(dict[str, object], inbound["settings"])
+        stream = cast(dict[str, object], inbound["streamSettings"])
+        reality = cast(dict[str, object], stream["realitySettings"])
+        if field == "protocol":
+            inbound["protocol"] = "tcp"
+        elif field == "listen":
+            inbound["listen"] = "127.0.0.1"
+        elif field == "port":
+            inbound["port"] = 9443
+        elif field == "loglevel":
+            cast(dict[str, object], config_value["log"])["loglevel"] = "error"
+        elif field == "dest":
+            reality["dest"] = "other.example.invalid:443"
+        elif field == "serverNames":
+            reality["serverNames"] = ["other.example.invalid"]
+        elif field == "privateKey":
+            reality["privateKey"] = "drifted-private-key"
+        elif field == "shortIds":
+            reality["shortIds"] = ["drifted-short-id"]
+        elif field == "tag":
+            inbound["tag"] = "drifted-tag"
+        elif field == "decryption":
+            settings["decryption"] = "none-but-different"
+        elif field == "network":
+            stream["network"] = "ws"
+        elif field == "security":
+            stream["security"] = "tls"
+        elif field == "show":
+            reality["show"] = True
+        elif field == "xver":
+            reality["xver"] = 1
+        elif field == "domainStrategy":
+            cast(dict[str, object], config_value["routing"])["domainStrategy"] = "IPIfNonMatch"
+        elif field == "clients":
+            settings["clients"] = [{"id": "runtime-client"}]
+        elif field == "unknown":
+            cast(dict[str, object], config_value["log"])["unknown"] = True
+        else:
+            raise AssertionError(f"unhandled projection field: {field}")
+
+    return mutate
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "protocol",
+        "listen",
+        "port",
+        "loglevel",
+        "dest",
+        "serverNames",
+        "privateKey",
+        "shortIds",
+        "tag",
+        "decryption",
+        "network",
+        "security",
+        "show",
+        "xver",
+        "domainStrategy",
+        "clients",
+        "unknown",
+    ],
+)
+def test_full_file_projection_drift_fails_closed_and_rolls_back(field: str) -> None:
+    candidate = config(routes=(("route-a", "egress-a"),))
+    runtime = _assert_post_reload_mismatch_rolls_back(
+        deepcopy(candidate), candidate, _mutate_projection_field(field)
+    )
+    assert runtime.reload_calls == 2
+
+
+def _mutate_invalid_candidate(field: str) -> dict[str, object]:
+    candidate = config(routes=(("route-a", "egress-a"), ("route-b", "egress-b")))
+    inbound = cast(list[dict[str, object]], candidate["inbounds"])[0]
+    settings = cast(dict[str, object], inbound["settings"])
+    routing = cast(dict[str, object], candidate["routing"])
+    rules = cast(list[dict[str, object]], routing["rules"])
+    outbounds = cast(list[dict[str, object]], candidate["outbounds"])
+    outbound_settings = cast(dict[str, object], outbounds[1]["settings"])
+    servers = cast(list[dict[str, object]], outbound_settings["servers"])
+    server = servers[0]
+    if field == "unknown-top-level":
+        candidate["unexpected"] = True
+    elif field == "malformed-log":
+        candidate["log"] = {"level": "warning"}
+    elif field == "missing-inbound-protocol":
+        del inbound["protocol"]
+    elif field == "invalid-clients":
+        settings["clients"] = [{"id": "runtime-client"}]
+    elif field == "duplicate-outbound":
+        outbounds.append(deepcopy(outbounds[1]))
+    elif field == "missing-route-outbound":
+        rules.insert(1, {"type": "field", "user": ["route-c"], "outboundTag": "missing"})
+    elif field == "block-collision":
+        outbounds[1]["tag"] = "BLOCK"
+    elif field == "missing-block":
+        del outbounds[0]
+    elif field == "unsupported-outbound-protocol":
+        outbounds[1]["protocol"] = "http"
+    elif field == "invalid-host":
+        server["address"] = ""
+    elif field == "invalid-port":
+        server["port"] = 0
+    elif field == "invalid-principal":
+        rules[1]["user"] = [""]
+    elif field == "duplicate-principal":
+        rules.insert(2, deepcopy(rules[1]))
+    elif field == "direct-route":
+        outbounds[1]["tag"] = "DIRECT"
+    elif field == "private-block-order":
+        rules[0], rules[1] = rules[1], rules[0]
+    elif field == "fallback-order":
+        rules[-1], rules[-2] = rules[-2], rules[-1]
+    else:
+        raise AssertionError(f"unhandled invalid candidate: {field}")
+    return candidate
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "unknown-top-level",
+        "malformed-log",
+        "missing-inbound-protocol",
+        "invalid-clients",
+        "duplicate-outbound",
+        "missing-route-outbound",
+        "block-collision",
+        "missing-block",
+        "unsupported-outbound-protocol",
+        "invalid-host",
+        "invalid-port",
+        "invalid-principal",
+        "duplicate-principal",
+        "direct-route",
+        "private-block-order",
+        "fallback-order",
+    ],
+)
+def test_invalid_canonical_candidate_fails_closed_before_xray_test(field: str) -> None:
+    candidate = _mutate_invalid_candidate(field)
+    runtime = _apply_rejection(candidate)
+    assert runtime.events == ["backup"]
+    assert runtime.current_calls == 0
 
 
 def _apply_rejection(
     candidate: dict[str, object],
     *,
     new_username: str | None = None,
-    match: str = "",
+    match: str | None = None,
 ) -> Runtime:
     runtime = Runtime()
     with pytest.raises(XrayValidationError, match=match):
@@ -502,71 +801,43 @@ def _apply_rejection(
 
 def test_missing_inbound_client_is_rejected_before_reload() -> None:
     runtime = Runtime()
-    runtime._current = {
-        **config(),
-        "inbounds": [{"settings": {"clients": [{"id": "old-client"}]}}],
-    }
-    candidate = dict(runtime._current)
-    candidate["inbounds"] = [{"settings": {"clients": []}}]
+    candidate = config()
+    inbound = cast(list[dict[str, object]], candidate["inbounds"])[0]
+    settings = cast(dict[str, object], inbound["settings"])
+    settings["clients"] = [{"id": "old-client"}]
 
-    with pytest.raises(XrayValidationError, match="inbound clients"):
+    with pytest.raises(XrayValidationError, match="clients skeleton"):
         XrayFileProvider(runtime).apply(CandidateConfig(candidate, "missing-client"))
 
     assert runtime.reload_calls == 0
 
 
 def test_missing_complete_old_route_is_rejected_before_reload() -> None:
-    runtime = Runtime()
     candidate = config()
-    candidate["outbounds"] = [
-        {"tag": "BLOCK", "protocol": "blackhole"},
-        {"tag": "egress-1", "protocol": "socks"},
-        {"tag": "egress-2", "protocol": "socks"},
-    ]
-    candidate["routing"] = {
-        "rules": [
-            {"type": "field", "ip": ["geoip:private"], "outboundTag": "BLOCK"},
-            {"type": "field", "user": ["old-user"], "outboundTag": "egress-2"},
-            {"type": "field", "network": "tcp,udp", "outboundTag": "BLOCK"},
-        ]
-    }
+    routing = cast(dict[str, object], candidate["routing"])
+    rules = cast(list[object], routing["rules"])
+    rules.insert(0, {"unexpected": "route"})
 
-    runtime = _apply_rejection(candidate, match="existing routing rules")
+    runtime = _apply_rejection(candidate, match="private BLOCK rule")
     assert runtime.reload_calls == 0
 
 
 def test_missing_candidate_outbound_is_rejected_before_reload() -> None:
     candidate = config()
-    candidate["routing"] = {
-        "rules": [
-            {"type": "field", "ip": ["geoip:private"], "outboundTag": "BLOCK"},
-            {"type": "field", "user": ["old-user"], "outboundTag": "egress-1"},
-            {"type": "field", "user": ["new-user"], "outboundTag": "missing-egress"},
-            {"type": "field", "network": "tcp,udp", "outboundTag": "BLOCK"},
-        ]
-    }
+    routing = cast(dict[str, object], candidate["routing"])
+    rules = cast(list[dict[str, object]], routing["rules"])
+    rules.insert(1, {"type": "field", "user": ["new-user"], "outboundTag": "missing-egress"})
 
-    runtime = _apply_rejection(candidate, match="missing outbounds")
+    runtime = _apply_rejection(candidate, match="missing outbound")
     assert runtime.reload_calls == 0
 
 
 def test_direct_fallback_is_rejected_before_reload() -> None:
     candidate = config()
-    candidate["outbounds"] = [
-        {"tag": "BLOCK", "protocol": "blackhole"},
-        {"tag": "egress-1", "protocol": "socks"},
-        {"tag": "DIRECT", "protocol": "freedom"},
-    ]
-    candidate["routing"] = {
-        "rules": [
-            {"type": "field", "ip": ["geoip:private"], "outboundTag": "BLOCK"},
-            {"type": "field", "user": ["old-user"], "outboundTag": "egress-1"},
-            {"type": "field", "domain": ["example.com"], "outboundTag": "DIRECT"},
-            {"type": "field", "network": "tcp,udp", "outboundTag": "BLOCK"},
-        ]
-    }
+    outbounds = cast(list[dict[str, object]], candidate["outbounds"])
+    outbounds[1]["tag"] = "DIRECT"
 
-    runtime = _apply_rejection(candidate, match="DIRECT fallback")
+    runtime = _apply_rejection(candidate, match="DIRECT")
     assert runtime.reload_calls == 0
 
 
