@@ -2,12 +2,14 @@
 
 **Last reconciled with main baseline:** `de96406db1081835681798db282810d1fd64028f`
 (verified 2026-09-15 UTC after PR #104 was manually merged). PR #104 is now
-merged and TASK-T16 Phase 2B-remain-3 is complete. The current Phase 2B
-implementation vehicle is the Reality canonical persistence/ownership slice;
-only independent PASS plus manual merge completes that slice. The remaining
-Phase 2B frontier is preservation/legal-deletion, writer-guard/drift baseline,
-and existing-data reconciliation. Phase 2B remains **NOT COMPLETE** and Phase
-2C remains **BLOCKED**. Dates in this document are UTC unless stated otherwise.
+merged and TASK-T16 Phase 2B-remain-3 is complete. PR #105 is the
+implementation vehicle for the Reality canonical persistence/ownership slice;
+while it is open, only independent PASS plus manual merge completes that slice.
+When PR #105 is present on main, Reality canonical persistence/ownership is
+complete and the active Phase 2B frontier becomes preservation/legal-deletion,
+writer-guard/drift baseline, and existing-data reconciliation. Phase 2B remains
+**NOT COMPLETE** and Phase 2C remains **BLOCKED**. Dates in this document are
+UTC unless stated otherwise.
 
 This document is maintained by whichever agent last touched a section
 below; if it looks stale, the next agent should refresh the relevant
@@ -452,10 +454,11 @@ decays quickly.
   `outbound_tags -> outbounds` cutover with current-read freshness,
   credential precedence, and full Xray outbound rendering. Only independent
   PASS followed by manual merge completes remain-3; once that change is on
-  main, the full snapshot/outbound cutover is complete. Reality persistence/
-  ownership is now the active implementation slice; preservation-rule rewrite,
-  writer-guard/drift baseline, and existing-data reconciliation remain
-  outstanding. Phase 2B is still **not COMPLETE**.
+  main, the full snapshot/outbound cutover is complete. PR #105 is the Reality
+  canonical persistence/ownership implementation vehicle; when it is on main,
+  that slice is complete and the active Phase 2B frontier is
+  preservation/legal-deletion, writer-guard/drift baseline, and existing-data
+  reconciliation. Phase 2B is still **not COMPLETE**.
   Issue #97 and PR #98 are historical Phase 2C attempt artifacts, both closed;
   PR #98 was never merged. Issue #101 is also closed as Not planned. Phase 2C
   remains technically **BLOCKED**, and `GATEWAY_PROVIDER=xray_file` registry

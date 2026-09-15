@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import os
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -16,7 +17,7 @@ import backend.app.models  # noqa: F401
 import ops.gateway.render_xray_routes as reality_renderer
 from backend.app.core.config import Settings
 from backend.app.core.database import Base, build_engine
-from backend.app.core.secrets import put_secret
+from backend.app.core.secrets import put_secret, reveal_secret_for_purpose
 from backend.app.infra.credential_resolver import SqlAlchemyCredentialResolver
 from backend.app.infra.gateway_route_lock import gateway_route_binding_write
 from backend.app.infra.provisioning_state import SqlAlchemyProvisioningState
@@ -431,7 +432,7 @@ def test_mysql_concurrent_reality_bootstrap_keeps_one_identity(
         xray_reality_dest="shared.example:443",
         xray_reality_server_name="shared.example",
     )
-    base = {
+    base_template = {
         "inbounds": [
             {
                 "streamSettings": {
@@ -449,18 +450,36 @@ def test_mysql_concurrent_reality_bootstrap_keeps_one_identity(
 
     def render() -> dict[str, object]:
         with Session(mysql_engine) as db:
-            return reality_renderer._reality_settings(base, db, settings)
+            result = reality_renderer._reality_settings(
+                copy.deepcopy(base_template), db, settings
+            )
+            return copy.deepcopy(result)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(executor.map(lambda _: render(), range(2)))
 
     assert len(candidates) == 2
-    assert results[0] == results[1]
-    assert results[0]["privateKey"] in candidates
-    assert results[0]["privateKey"] != "template-bogus-key"
-
     with Session(mysql_engine) as db:
         stored = db.scalars(
             select(Secret).where(Secret.secret_ref == reality_renderer.REALITY_IDENTITY_SECRET_REF)
         ).all()
+        persisted = reality_renderer._parse_reality_identity(
+            reveal_secret_for_purpose(
+                db,
+                reality_renderer.REALITY_IDENTITY_SECRET_REF,
+                reality_renderer.REALITY_IDENTITY_PURPOSE,
+            )
+        )
+
+    worker_identities = [
+        {"privateKey": result["privateKey"], "shortIds": result["shortIds"]}
+        for result in results
+    ]
+    assert len(set(candidates)) == 2
+    assert results[0] is not results[1]
+    assert worker_identities == [persisted, persisted]
     assert len(stored) == 1
+    assert stored[0].purpose == reality_renderer.REALITY_IDENTITY_PURPOSE
+    assert persisted["privateKey"] in candidates
+    assert set(candidates) - {persisted["privateKey"]}
+    assert persisted["privateKey"] != "template-bogus-key"

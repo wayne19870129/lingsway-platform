@@ -2063,9 +2063,9 @@ active route、endpoint、binding 与 credential ref 的全量 current-read 快�
 
 ## Phase 2B — Reality canonical persistence / ownership
 
-本阶段的 implementation vehicle 是从 main
-`de96406db1081835681798db282810d1fd64028f` 创建的独立 PR；本 TASK 不创建
-Issue、不自动 merge、不开始 registry wiring。目标是关闭 Reality identity
+本阶段的 implementation vehicle 是 PR #105，基线为 main
+`de96406db1081835681798db282810d1fd64028f`；本 TASK 不创建 Issue、不自动
+merge、不开始 registry wiring。PR #105 只负责关闭 Reality identity
 ownership gap，同时保持 PR #104 已完成的 full-snapshot/outbound cutover。
 
 - `XRAY_REALITY_DEST` 与 `XRAY_REALITY_SERVER_NAME` 由中央 `Settings` 读取；
@@ -2088,5 +2088,8 @@ ownership gap，同时保持 PR #104 已完成的 full-snapshot/outbound cutover
 验收必须包含 template bogus-value 忽略、missing Settings fail-closed、首次/重复
 render 稳定性、session restart、malformed/decrypt/purpose/unknown-key redaction、
 以及真实 MySQL 8.4 concurrent first bootstrap；既有 route/outbound parity 继续
-通过。只有独立审查 PASS 且人工合并后，本阶段才完成；在此之前 Phase 2B 仍为
+通过。PR #105 只有独立审查 PASS 且人工合并后，Reality slice 才完成；当该
+change 位于 main 时，Reality canonical persistence/ownership 已完成，后续
+active Phase 2B frontier 为 preservation/legal-deletion、writer-guard/drift
+baseline、existing-data reconciliation。即使 PR #105 已合并，Phase 2B 仍为
 **NOT COMPLETE**，Phase 2C 仍为 **BLOCKED**。
