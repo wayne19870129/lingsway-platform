@@ -886,4 +886,3 @@ def test_close_permanently_surfaces_failure_when_the_owned_transport_close_raise
     assert transport.close_calls == 1  # never actually retried -- httpx would just no-op
 
     assert provider._client.is_closed is True  # noqa: SLF001
-

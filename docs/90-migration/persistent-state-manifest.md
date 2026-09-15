@@ -26,4 +26,3 @@ then the explicitly triggered existing-data reconciliation tool. Reconciliation
 is never a startup hook, Alembic migration, scheduler action, or automatic
 deployment step. A missing or ambiguous state item fails closed and requires an
 operator decision.
-

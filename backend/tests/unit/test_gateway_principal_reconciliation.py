@@ -258,4 +258,3 @@ def test_missing_subscription_is_fail_closed() -> None:
         reconciliation._active_snapshot(cast(Session, session))
 
     assert raised.value.reason_code == "subscription_missing"
-
