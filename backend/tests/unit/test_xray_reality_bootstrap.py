@@ -104,6 +104,7 @@ def test_invalid_existing_identity_never_regenerates(
     with Session(engine) as db:
         if seed is not None:
             put_secret(db, REALITY_IDENTITY_SECRET_REF, seed, purpose)
+            db.commit()
         else:
             db.add(
                 Secret(
@@ -114,14 +115,20 @@ def test_invalid_existing_identity_never_regenerates(
             )
             db.commit()
 
-    def fail(_: str) -> str:
-        raise AssertionError("generator must not run")
+    generator_calls = 0
 
-    monkeypatch.setattr(reality_bootstrap, "_new_reality_identity", fail)
+    def generate(_: str) -> str:
+        nonlocal generator_calls
+        generator_calls += 1
+        return json.dumps({"privateKey": "unexpected-private-key", "shortIds": ["unexpected-id"]})
+
+    monkeypatch.setattr(reality_bootstrap, "_new_reality_identity", generate)
     with Session(engine) as db, pytest.raises(XrayRealityBootstrapError) as raised:
         bootstrap_reality_identity(db, xray_binary="unused-xray")
 
-    assert "private-key" not in str(raised.value)
-    assert "short-id" not in str(raised.value)
+    assert generator_calls == 0
+    assert "privateKey" not in str(raised.value)
+    assert "shortIds" not in str(raised.value)
+    assert "unexpected-private-key" not in str(raised.value)
+    assert "unexpected-id" not in str(raised.value)
     assert "ciphertext-sentinel" not in str(raised.value)
-
