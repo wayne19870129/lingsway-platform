@@ -55,6 +55,52 @@ ensure_marzban_internal_tls() {
     die 'Marzban internal TLS files are incomplete; refusing to overwrite an existing half-pair'
 }
 
+port_is_listening() {
+  local port="$1"
+  ss -ltnH | awk -v port=":$port" '$4 ~ port "$" { found = 1 } END { exit !found }'
+}
+
+verify_and_promote_xray() {
+  local expected_sha="$1" baseline_path container_id state health deadline
+  baseline_path="${XRAY_CONTAINER_BASELINE_PATH:-/app/data/marzban/xray_config.last_applied.json}"
+  deadline=$((SECONDS + ${XRAY_APPLY_VERIFY_TIMEOUT_SECONDS:-120}))
+  require_cmd ss
+
+  while (( SECONDS < deadline )); do
+    container_id="$(compose ps -q marzban 2>/dev/null | head -n 1)" || container_id=''
+    if [[ -z "$container_id" ]]; then
+      sleep 1
+      continue
+    fi
+    state="$(docker inspect --format '{{.State.Status}}' "$container_id")" || state=''
+    health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' \
+      "$container_id")" || health=''
+    if [[ "$state" != running || "$health" != healthy ]]; then
+      sleep 1
+      continue
+    fi
+    if ! port_is_listening 8443; then
+      sleep 1
+      continue
+    fi
+    if ! compose exec -T backend-api xray run -test \
+      -config "${XRAY_CONTAINER_CONFIG_FILE:-/app/data/marzban/xray_config.json}"; then
+      sleep 1
+      continue
+    fi
+    compose run --rm --no-deps \
+      -e "XRAY_APPLIED_STATE_PATH=$baseline_path" \
+      backend-api python -m ops.gateway.promote_xray_baseline \
+      --expected-sha "$expected_sha" \
+      --config "${XRAY_CONTAINER_CONFIG_FILE:-/app/data/marzban/xray_config.json}" \
+      --baseline "$baseline_path" || \
+      die 'verified Xray config differs from the rendered candidate; baseline not promoted'
+    log "Xray apply verified; promoted APPLIED baseline sha=$expected_sha"
+    return 0
+  done
+  die 'Xray/Marzban startup verification timed out; baseline was not promoted'
+}
+
 main() {
   while (($# > 0)); do
     case "$1" in
@@ -85,13 +131,24 @@ main() {
   ensure_marzban_internal_tls "$marzban_dir"
   log 'rendering Xray runtime config from the migrated database before Marzban'
   compose build backend-api
-  compose run --rm --no-deps backend-api \
-    python -m ops.gateway.render_xray_routes
+  local baseline_path render_output expected_sha
+  baseline_path="${XRAY_CONTAINER_BASELINE_PATH:-/app/data/marzban/xray_config.last_applied.json}"
+  render_output="$(compose run --rm --no-deps \
+    -e "XRAY_APPLIED_STATE_PATH=$baseline_path" \
+    backend-api python -m ops.gateway.render_xray_routes)" || \
+    die 'Xray runtime rendering failed; baseline was not promoted'
+  expected_sha="$(printf '%s\n' "$render_output" | \
+    sed -n 's/.*expected_repo_owned_sha=\([0-9a-f]\{64\}\).*/\1/p' | tail -n 1)"
+  [[ "$expected_sha" =~ ^[0-9a-f]{64}$ ]] || \
+    die 'renderer did not return a valid expected repo-owned Xray fingerprint'
   validate_runtime_files
   compose up --detach
   if is_true "${RESTART_TRANSPORT:-false}"; then
-    compose up --detach marzban mihomo
+    compose restart marzban mihomo
+  else
+    compose restart marzban
   fi
+  verify_and_promote_xray "$expected_sha"
   log 'Compose stack started with the configured profiles'
 }
 

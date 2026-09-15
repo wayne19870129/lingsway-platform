@@ -1,13 +1,13 @@
 # Project Continuity / Handoff
 
-**Last reconciled with main baseline:** `5c67aba469f7beb82df13750247c90e2d1820e7a`
-(verified 2026-09-15 UTC after PR #107 was manually merged). PR #107 is now
-merged and full-config Xray composition is complete. This PR is the
-preservation/legal-deletion implementation vehicle. While this PR is open,
-preservation/legal-deletion is the active frontier. When this change is present
-on `main`, that slice is complete and the active order becomes writer-guard/
-drift baseline, existing-data reconciliation, and final Phase 2B current-main
-review. Phase 2B remains **NOT COMPLETE** and Phase 2C remains **BLOCKED**.
+**Last reconciled with main baseline:** `994fe50416afdbc00648eaf48a65b415b658df3b`
+(verified 2026-09-15 UTC after PR #108 was manually merged). PR #108 is now
+merged; full-config composition and preservation/legal-deletion are complete.
+This PR is the writer-guard/three-state drift baseline implementation vehicle.
+While this PR is open, writer-guard/drift is the active frontier. When this
+change is present on `main`, that slice is complete and the active order becomes
+existing-data reconciliation and final Phase 2B current-main review. Phase 2B
+remains **NOT COMPLETE** and Phase 2C remains **BLOCKED**.
 Dates in this document are UTC unless stated otherwise.
 
 This document is maintained by whichever agent last touched a section
@@ -447,20 +447,21 @@ decays quickly.
   `GITHUB_TOKEN`, even when the same-SHA `workflow_dispatch` CI/Security/
   Risk trio is green — see section 5's correction. The zero-manual-
   approval acceptance criterion is not yet satisfied.
-- **Current technical frontier**: TASK-T16 Phase 2B preservation/legal-deletion.
+- **Current technical frontier**: TASK-T16 Phase 2B writer-guard/three-state drift baseline.
   PR #103/remain-1B and PR #104/remain-3 are already merged. PR #105 was the
   Reality canonical persistence/ownership implementation vehicle and PR #106
   accepted ADR-020 on main. PR #107 was the full-config composition
   implementation vehicle and is now merged on main at
-  `5c67aba469f7beb82df13750247c90e2d1820e7a`.
+  `5c67aba469f7beb82df13750247c90e2d1820e7a`. PR #108 then completed
+  preservation/legal-deletion and merged on main at
+  `994fe50416afdbc00648eaf48a65b415b658df3b`.
   PR #104 performed the one coherent full-snapshot and
   `outbound_tags -> outbounds` cutover with current-read freshness,
   credential precedence, and full Xray outbound rendering. The Reality slice
   and ADR-020 are complete on main. Full-config composition is also complete on
-  main. This preservation/legal-deletion PR is the current frontier; when its
-  change is present on main, the active order becomes writer-guard/drift
-  baseline, existing-data reconciliation, and final Phase 2B current-main
-  review. Phase 2B is still **not COMPLETE**.
+  main. This writer-guard/drift PR is the current frontier; when its change is
+  present on main, the active order becomes existing-data reconciliation and
+  final Phase 2B current-main review. Phase 2B is still **not COMPLETE**.
   Issue #97 and PR #98 are historical Phase 2C attempt artifacts, both closed;
   PR #98 was never merged. Issue #101 is also closed as Not planned. Phase 2C
   remains technically **BLOCKED**, and `GATEWAY_PROVIDER=xray_file` registry
@@ -471,11 +472,12 @@ decays quickly.
   record; do not create a separate Issue unless explicitly requested.
 
 - **Current Phase 2B gate**: PR #106 is merged and ADR-020 is accepted. PR #107
-  is merged on main at `5c67aba469f7beb82df13750247c90e2d1820e7a`; full-config
-  composition is complete. While this preservation/legal-deletion PR is open,
-  it is the active frontier; when its change is present on `main`, the active
-  order becomes writer-guard/drift baseline, existing-data reconciliation, and
-  final Phase 2B current-main review.
+  and PR #108 are merged on main; the current main baseline is
+  `994fe50416afdbc00648eaf48a65b415b658df3b`. Full-config composition and
+  preservation/legal-deletion are complete. While this writer-guard/drift PR is
+  open, it is the active frontier; when its change is present on `main`, the
+  active order becomes existing-data reconciliation and final Phase 2B
+  current-main review.
   The concrete process-lifetime Xray provider may hold only immutable non-secret
   skeleton/deployment configuration. Each render receives the operation-scoped
   resolver through the existing `GatewayProvider.render()` argument and reads
@@ -489,6 +491,9 @@ decays quickly.
   runtime-only dynamic membership remains outside repo-owned equality. Phase 2B
   remains **NOT COMPLETE**; Phase 2C remains **BLOCKED**; no registry wiring is
   permitted.
+  The Xray applied-state sidecar is part of the persistent VPS migration,
+  backup, and restore set alongside the database, Secrets/Reality identity, and
+  `xray_config.json`.
 - **Issue #87 / TASK-T23 replaces the abandoned custom-App proposal.**
   The minimal workflow is implemented in PR #88 and needs post-merge
   live validation with a new Issue comment. TASK-T22 is retained only as
@@ -523,3 +528,4 @@ does not pre-commit to an ordering the user hasn't set.
 - If a future agent detects drift between this document and the
   authoritative source (ADR, `AGENTS.md`, current code, or a merged PR),
   fix this document in the same PR that notices the drift.
+

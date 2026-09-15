@@ -2203,20 +2203,58 @@ writer-guard/drift、reconciliation、registry wiring、schema/migration、deplo
 或真实 Xray reload。Phase 2B 仍为 **NOT COMPLETE**，Phase 2C 仍为
 **BLOCKED**。
 
-## Current Phase 2B — Xray preservation / legal-deletion implementation
+## Current Phase 2B — Xray writer-guard / three-state drift baseline
 
 PR #107 已人工合并到 `main` `5c67aba469f7beb82df13750247c90e2d1820e7a`，
-full-config composition 已完成。本 PR 是 preservation/legal-deletion 的实现
+full-config composition 已完成；PR #108 随后已人工合并到 `main`
+`994fe50416afdbc00648eaf48a65b415b658df3b`，preservation/legal-deletion
+也已完成。本 PR 是 writer-guard / three-state drift baseline 的实现
 vehicle；在本 PR OPEN 期间，该 slice 是当前 Phase 2B frontier；当 change 位于
-`main` 时，该 slice 完成，后续顺序为 writer-guard/drift baseline →
-existing-data reconciliation → Phase 2B final current-main review。
+`main` 时，该 slice 完成，后续顺序为 existing-data reconciliation →
+Phase 2B final current-main review。
 
-本 slice 的约束是：pre-apply 只验证 canonical full candidate、安全不变量和
-`xray run -test`，不读取 `runtime.current()` 进行 superset preservation；
-post-reload 只比较完整 repo-owned projection 的 exact equality。合法删除由
-fresh desired snapshot 决定，runtime stale extra、missing candidate-owned state
-以及任何 repo-owned full-file drift 都必须 fail closed 并走既有 rollback。
+本 slice 严格区分 `last_applied_state`、`current_disk_state` 和
+`new_db_desired_state`：只有 `current_disk_state != last_applied_state`
+才是 drift；正常的 `last_applied_state != new_db_desired_state` 允许继续
+apply。baseline 复用 `repo_owned_xray_projection()` 的确定性序列化和 SHA-256
+fingerprint，覆盖完整 repo-owned Xray object；Marzban 动态 clients 不纳入，
+磁盘 `settings.clients=[]` skeleton 仍纳入。
 
-本 PR 不开始 writer-guard/drift、reconciliation、registry wiring、deployment 或
+本实现使用 concrete Xray sidecar baseline store（默认
+`xray_config.last_applied.json`）。当前 `XRAY_APPLIED_STATE_PATH` 只由
+standalone renderer 读取；`LocalXrayRuntime` 从 `config_path` 派生默认路径，
+或由 caller 显式传入 `baseline_path`。deployment promotion 使用同一个
+container-side baseline path。sidecar 只保存严格 schema 的
+`schema_version`、`projection_version`、`state` 和 `sha256` 元数据：
+`state=applied` 表示已验证的 fingerprint，`state=degraded` 表示后续 writer
+无条件 fail closed。它不保存 Reality privateKey、shortIds、Socks password、
+ciphertext 或 raw Secret ref。文件通过同目录临时文件、flush/fsync、replace
+原子更新。
+
+baseline malformed/unreadable、disk malformed/unreadable、已有 disk 但 baseline
+缺失，均 fail closed；不自动 adopt。只有文件缺失且 baseline 缺失时允许首次
+render。standalone `ops/gateway/render_xray_routes.py` 只执行 guard、backup 和
+atomic file write，不推进 `last_applied_state`。
+
+真正的 deployment owner 是 `deploy/lib/40_stack_up.sh`：renderer 输出本次
+candidate 的 `EXPECTED_SHA`，随后 `compose up`；只有 Marzban healthy、8443
+ready、`xray run -test` 成功且当前共享文件 fingerprint 与 `EXPECTED_SHA` 完全
+一致时，concrete `ops/gateway/promote_xray_baseline.py` 才写入
+`state=applied`。因此 file write 不会冒充 apply/health evidence。deployment
+失败时不推进 candidate baseline；已有 APPLIED baseline 也不会被未经验证的
+当前文件自动 adopt。
+
+writer guard 在 provider install 前执行；provider baseline 只在 install、reload、
+health 和 post-reload exact projection 全部成功后推进。baseline 持久化失败
+继续按既有策略 rollback；rollback 完整成功时旧 APPLIED baseline 保持不变，
+rollback 任一环节无法验证时写入 DEGRADED。DEGRADED 即使磁盘恰好等于旧 hash
+也拒绝后续 writer。首次 apply 的 rollback 无法验证时同样持久化 DEGRADED，
+避免下次被当作全新机器。
+
+该 sidecar 属于后续 VPS migration / backup / restore 必须携带的 persistent
+state，与 DB、Secrets/Reality identity、Xray config 一起处理；本 PR 不实现
+Vultr → 搬瓦工迁移。当前 PR 不开始 existing-data reconciliation、registry
+wiring、provider default changes、deployment automation 之外的真实部署或
 真实 Xray reload；不创建 Issue、不自动 merge。即使本 PR 合并，Phase 2B 仍为
 **NOT COMPLETE**，Phase 2C 仍为 **BLOCKED**。
+
