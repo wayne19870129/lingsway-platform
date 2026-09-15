@@ -32,7 +32,11 @@ from backend.app.providers.gateway.xray_composition import (
     XrayDeploymentConfig,
     XrayRealityConfig,
 )
-from backend.app.providers.gateway.xray_file import XrayFileProvider, XrayValidationError
+from backend.app.providers.gateway.xray_file import (
+    XrayFileProvider,
+    XrayRuntime,
+    XrayValidationError,
+)
 
 
 @pytest.fixture
@@ -235,13 +239,13 @@ def test_gateway_providers_accept_operation_scoped_resolver() -> None:
 
     mock_candidate = MockGatewayProvider().render(desired, resolver)
     xray_candidate = XrayFileProvider(
-        runtime=None,
+        runtime=cast(XrayRuntime, None),
         deployment_config=XrayDeploymentConfig(
             xray_log_level="warning",
             reality_dest="dest.example:443",
             reality_server_names=("dest.example",),
         ),
-    ).render(desired, resolver)  # type: ignore[arg-type]
+    ).render(desired, resolver)
 
     assert mock_candidate.version == "gateway-mock-v1"
     assert xray_candidate.version
@@ -288,13 +292,13 @@ def test_xray_renderer_resolves_each_full_outbound_and_keeps_block_fixed() -> No
     )
 
     candidate = XrayFileProvider(
-        runtime=None,
+        runtime=cast(XrayRuntime, None),
         deployment_config=XrayDeploymentConfig(
             xray_log_level="warning",
             reality_dest="dest.example:443",
             reality_server_names=("dest.example",),
         ),
-    ).render(desired, resolver)  # type: ignore[arg-type]
+    ).render(desired, resolver)
 
     assert resolver.refs == ["ref-a", "ref-b"]
     assert candidate.content["outbounds"] == [

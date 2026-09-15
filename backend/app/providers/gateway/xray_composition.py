@@ -78,6 +78,7 @@ class XrayStaticSkeleton:
     """Immutable validated projection of the accepted template skeleton."""
 
     __slots__ = ("_inbounds",)
+    _inbounds: tuple[Mapping[str, object], ...]
 
     def __init__(self, inbounds: Sequence[Mapping[str, object]]) -> None:
         if not inbounds:
@@ -205,6 +206,9 @@ class XrayDeploymentConfig:
     """Immutable, non-secret Settings projection used by Xray composition."""
 
     __slots__ = ("_xray_log_level", "_reality_dest", "_reality_server_names")
+    _xray_log_level: str
+    _reality_dest: str
+    _reality_server_names: tuple[str, ...]
 
     def __init__(
         self,
@@ -264,6 +268,8 @@ class XrayRealityConfig:
     """Immutable persisted Reality identity with a secret-safe representation."""
 
     __slots__ = ("_private_key", "_short_ids")
+    _private_key: str
+    _short_ids: tuple[str, ...]
 
     def __init__(self, private_key: str, short_ids: Sequence[str]) -> None:
         if isinstance(short_ids, (str, bytes)):
@@ -310,6 +316,11 @@ class XrayFullConfigInput:
     """Immutable per-render input; its representation never recurses into secrets."""
 
     __slots__ = ("_skeleton", "_deployment", "_reality", "_desired", "_credentials")
+    _skeleton: XrayStaticSkeleton
+    _deployment: XrayDeploymentConfig
+    _reality: XrayRealityConfig
+    _desired: DesiredRoutingState
+    _credentials: Mapping[str, CredentialDTO]
 
     def __init__(
         self,

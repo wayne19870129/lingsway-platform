@@ -64,10 +64,10 @@ def test_composer_emits_all_canonical_owners_and_ignores_template_values() -> No
 
     assert candidate.version == "xray-full-v1"
     assert candidate.content["log"] == {"loglevel": "warning"}
-    inbound = candidate.content["inbounds"][0]  # type: ignore[index]
+    inbound = candidate.content["inbounds"][0]
     assert inbound["tag"] == "vless-reality"
-    assert inbound["settings"]["clients"] == []  # type: ignore[index]
-    assert inbound["streamSettings"]["realitySettings"]["privateKey"] == "private-key"  # type: ignore[index]
+    assert inbound["settings"]["clients"] == []
+    assert inbound["streamSettings"]["realitySettings"]["privateKey"] == "private-key"
     assert candidate.content["routing"]["domainStrategy"] == "AsIs"  # type: ignore[index]
 
 
@@ -97,9 +97,9 @@ def test_secret_bearing_composition_types_are_not_generic_dataclasses() -> None:
     assert "sentinel-short-id" not in repr(reality)
     assert repr(input_value) == "XrayFullConfigInput(<redacted>)"
     with pytest.raises(TypeError):
-        asdict(reality)  # type: ignore[arg-type]
+        asdict(reality)  # type: ignore[call-overload]
     with pytest.raises(TypeError):
-        asdict(input_value)  # type: ignore[arg-type]
+        asdict(input_value)  # type: ignore[call-overload]
 
 
 def test_provider_requires_xray_resolver_capability_before_any_secret_read() -> None:
@@ -108,7 +108,7 @@ def test_provider_requires_xray_resolver_capability_before_any_secret_read() -> 
             raise AssertionError(f"must not resolve {secret_ref}")
 
     with pytest.raises(XrayValidationError, match="capability"):
-        _provider().render(DesiredRoutingState(), GenericOnlyResolver())  # type: ignore[arg-type]
+        _provider().render(DesiredRoutingState(), GenericOnlyResolver())
 
 
 def test_pure_composer_has_no_runtime_dependency() -> None:

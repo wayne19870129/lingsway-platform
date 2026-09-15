@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from typing import cast
 
 from backend.app.core.config import Settings
 from backend.app.providers.base import CredentialDTO, DesiredRoutingState, XrayOutboundDTO
@@ -14,7 +15,7 @@ from ops.gateway.render_xray_routes import render_config
 
 def _template() -> dict[str, object]:
     path = Path(__file__).parents[3] / "infrastructure/marzban/xray_config.base.json"
-    return json.loads(path.read_text(encoding="utf-8"))
+    return cast(dict[str, object], json.loads(path.read_text(encoding="utf-8")))
 
 
 class _Resolver:
