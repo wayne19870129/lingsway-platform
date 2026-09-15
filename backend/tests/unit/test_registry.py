@@ -4,7 +4,6 @@ from dataclasses import dataclass, field
 import pytest
 
 from backend.app.core.config import Settings
-from backend.app.providers.accounting import marzban
 from backend.app.providers.accounting.marzban import (
     MarzbanAccountingProvider,
     MarzbanContractError,
@@ -302,13 +301,13 @@ def test_registry_selects_marzban_from_settings_without_http(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client = _NoIoClient()
-    monkeypatch.setattr(marzban.httpx, "Client", lambda **_kwargs: client)
+    monkeypatch.setattr("backend.app.providers.accounting.marzban.httpx.Client", lambda **_kwargs: client)
 
     registry = build_registry(_marzban_settings())
 
     assert isinstance(registry.accounting, MarzbanAccountingProvider)
     assert client.request_calls == 0
-    assert registry.accounting._base_url == "https://marzban.example.invalid"  # type: ignore[attr-defined]
+    assert registry.accounting._base_url == "https://marzban.example.invalid"
     assert registry.accounting._admin_username == "admin"  # type: ignore[attr-defined]
 
     registry.close()
@@ -333,8 +332,7 @@ def test_blank_marzban_settings_fail_closed_before_client_creation(
     monkeypatch: pytest.MonkeyPatch, overrides: dict[str, object]
 ) -> None:
     monkeypatch.setattr(
-        marzban.httpx,
-        "Client",
+        "backend.app.providers.accounting.marzban.httpx.Client",
         lambda **_kwargs: pytest.fail("client must not be created for invalid settings"),
     )
 
