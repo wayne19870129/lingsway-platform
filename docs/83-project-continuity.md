@@ -2,10 +2,13 @@
 
 **Last reconciled with main baseline:** `866bc63d70f6785cfef5877724e81105ce1d7316`
 (verified 2026-09-15 UTC after PR #105 was manually merged). PR #105 is now
-merged and the Reality canonical persistence/ownership slice is complete. The
-active Phase 2B frontier is the ADR-020 full-config composition boundary before
-preservation/legal-deletion, followed by writer-guard/drift baseline and
-existing-data reconciliation. Phase 2B remains **NOT COMPLETE** and Phase 2C
+merged and the Reality canonical persistence/ownership slice is complete. PR
+#106 is the ADR-020 vehicle. While PR #106 is open, ADR-020 remains the current
+architecture gate before preservation/legal-deletion. When this change is
+present on `main`, ADR-020 is complete and the active Phase 2B order becomes
+provider-neutral full-config composition implementation, preservation/legal-
+deletion, writer-guard/drift baseline, existing-data reconciliation, and final
+Phase 2B current-main review. Phase 2B remains **NOT COMPLETE** and Phase 2C
 remains **BLOCKED**. Dates in this document are UTC unless stated otherwise.
 
 This document is maintained by whichever agent last touched a section
@@ -454,9 +457,12 @@ decays quickly.
   main, the full snapshot/outbound cutover is complete. PR #105 was the Reality
   canonical persistence/ownership implementation vehicle and is now merged on
   main at `866bc63d70f6785cfef5877724e81105ce1d7316`; that slice is complete.
-  ADR-020 is now the active architecture gate before preservation/legal-deletion,
-  followed by writer-guard/drift baseline and existing-data reconciliation.
-  Phase 2B is still **not COMPLETE**.
+  PR #106 is the ADR-020 vehicle. While it is open, ADR-020 is the current
+  architecture gate before preservation/legal-deletion. When this change is
+  present on `main`, ADR-020 is complete and the next order is provider-neutral
+  full-config composition implementation, preservation/legal-deletion,
+  writer-guard/drift baseline, existing-data reconciliation, and final Phase
+  2B current-main review. Phase 2B is still **not COMPLETE**.
   Issue #97 and PR #98 are historical Phase 2C attempt artifacts, both closed;
   PR #98 was never merged. Issue #101 is also closed as Not planned. Phase 2C
   remains technically **BLOCKED**, and `GATEWAY_PROVIDER=xray_file` registry
@@ -468,17 +474,16 @@ decays quickly.
 
 - **Current Phase 2B gate**: PR #105 is merged at
   `866bc63d70f6785cfef5877724e81105ce1d7316` and the Reality canonical
-  persistence/ownership slice is complete. The next docs-only decision is
-  ADR-020, which fixes the mismatch between the provider's current
-  routing/outbound fragment and `LocalXrayRuntime.install()` replacing the
-  complete file. ADR-020 selects application/infra typed full-config input plus
-  one shared pure canonical composer; `XrayFileProvider` becomes the long-term
-  full-config renderer, while `ops/gateway/render_xray_routes.py` becomes a
-  thin adapter. `runtime.current()` remains observation/rollback/drift only,
-  and Marzban dynamic clients remain outside repo-owned candidate/projection.
-  Preservation/legal-deletion implementation is blocked until this ADR is
-  independently reviewed and manually merged. Phase 2B remains **NOT COMPLETE**;
-  Phase 2C remains **BLOCKED**; no registry wiring is permitted.
+  persistence/ownership slice is complete. PR #106 is the ADR-020 vehicle.
+  While PR #106 is open, ADR-020 remains the architecture gate before
+  preservation/legal-deletion. When this change is present on `main`, ADR-020
+  is complete and the active order is provider-neutral full-config composition
+  implementation, preservation/legal-deletion, writer-guard/drift baseline,
+  existing-data reconciliation, and final Phase 2B current-main review.
+  `runtime.current()` remains observation/rollback/drift only, and Marzban
+  dynamic clients remain outside repo-owned candidate/projection. Phase 2B
+  remains **NOT COMPLETE**; Phase 2C remains **BLOCKED**; no registry wiring is
+  permitted.
 - **Issue #87 / TASK-T23 replaces the abandoned custom-App proposal.**
   The minimal workflow is implemented in PR #88 and needs post-merge
   live validation with a new Issue comment. TASK-T22 is retained only as

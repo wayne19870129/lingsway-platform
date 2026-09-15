@@ -2110,16 +2110,24 @@ ADR-020 收敛 full-config composition boundary。
 production Python，不开始 preservation/legal-deletion，不创建 Issue，不
 开始 registry wiring，不做 deploy/reload，不自动 merge。
 
-ADR-020 的唯一决策是 **Option B + shared pure canonical composer**：
+PR #106 是 ADR-020 的 implementation vehicle；在 PR OPEN 期间，ADR-020
+仍是 preservation/legal-deletion 的 architecture gate。ADR-020 的唯一
+决策是 **Option B + provider-neutral renderer port + shared pure canonical
+composer**：
 
+- generic `GatewayCandidateRenderer` 只接收 `DesiredRoutingState`、
+  `CredentialResolver` 并返回 `CandidateConfig`；generic
+  `GatewayProvider` 只负责 `validate`/`apply`/`health`，或保留完全
+  provider-neutral 的 render signature；
 - application/infra composition boundary 在同一 operation-scoped Session
-  中读取 static skeleton、中央 `Settings`、持久化 Reality identity 与 fresh
-  `DesiredRoutingState`，并构造同一 operation 的 `CredentialResolver`；
-- provider-side `XrayFullConfigInput` 与 `XrayRealityConfig` 是无 Session/ORM
-  的 typed DTO；resolver 仍以显式参数传入，registry 不持有 resolver；
-- 一个纯 `xray_composition` 模块负责完整 inbound/Reality/routing/outbounds
-  组合与 BLOCK invariants；`XrayFileProvider` 的长期 contract 是 full-config
-  renderer，`CandidateConfig.content` 必须可直接 test/install/reload；
+  中读取并校验 explicit Xray static projection、中央 `Settings`、持久化
+  Reality identity 与 fresh `DesiredRoutingState`，并构造同一 operation 的
+  `CredentialResolver`；
+- Xray-specific `XrayStaticSkeleton`、secret-safe `XrayRealityConfig` 和
+  `XrayFullConfigInput` 只存在于 concrete Xray adapter；一个纯
+  `xray_composition` 模块负责完整 inbound/Reality/routing/outbounds 组合与
+  BLOCK invariants；`XrayCandidateRenderer` 返回的 `CandidateConfig.content`
+  必须可直接 test/install/reload；
 - `ops/gateway/render_xray_routes.py` 只保留运维入口，必须复用同一 assembler/
   pure composer，不得保留第二套 composition semantics；
 - `runtime.current()` 只用于 backup/rollback、drift 与 post-reload exact
@@ -2135,13 +2143,15 @@ fields 分开；stale deleted route/outbound 必须不存在，缺失 repo-owned
 必须 fail closed。ADR-017 的事务边界不变，Reality identity 的 read 使用同一
 operation Session；既有 create-once bootstrap 仍是独立 Secret lifecycle。
 
-验收必须覆盖 full-candidate/provider-ops parity、credential/Secret redaction、
+PR #106 合并到 `main` 后，ADR-020 即完成；下一顺序变为
+provider-neutral full-config composition implementation -> preservation/legal-
+deletion -> writer-guard/drift baseline -> existing-data reconciliation ->
+final Phase 2B current-main review。验收必须覆盖
+full-candidate/provider-ops parity、credential/Secret redaction、
 deleted/stale/missing route 和 outbound、static skeleton/Reality drift、
 malformed/decrypt/purpose failure、dynamic Marzban client exclusion、xray
 run-test 前置拒绝以及 rollback。此 docs-only PR 合并后只表示 composition
 boundary 已收敛，不表示 preservation 已开始；Phase 2B 仍为 **NOT COMPLETE**，
-Phase 2C 仍为 **BLOCKED**。PR #105 的 Reality slice 已完成，后续顺序为：
-ADR-020 merge -> full-config composer/provider contract implementation ->
-preservation/legal-deletion -> writer-guard/drift baseline -> existing-data
-reconciliation -> independent review/manual merge gates -> 才能评估 Phase 2C。
+Phase 2C 仍为 **BLOCKED**。PR #105 的 Reality slice 已完成；PR #106
+仍须人工审查和人工合并，禁止自动 merge。
 
