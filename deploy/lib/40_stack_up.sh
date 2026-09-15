@@ -143,10 +143,12 @@ main() {
     die 'renderer did not return a valid expected repo-owned Xray fingerprint'
   validate_runtime_files
   compose up --detach
-  verify_and_promote_xray "$expected_sha"
   if is_true "${RESTART_TRANSPORT:-false}"; then
-    compose up --detach marzban mihomo
+    compose restart marzban mihomo
+  else
+    compose restart marzban
   fi
+  verify_and_promote_xray "$expected_sha"
   log 'Compose stack started with the configured profiles'
 }
 
