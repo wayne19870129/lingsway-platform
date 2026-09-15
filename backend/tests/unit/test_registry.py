@@ -1,7 +1,6 @@
 import socket
 from dataclasses import dataclass, field
 
-import httpx
 import pytest
 
 from backend.app.core.config import Settings
@@ -288,7 +287,7 @@ class _NoIoClient:
 def _marzban_settings(**overrides: object) -> Settings:
     values: dict[str, object] = {
         "accounting_provider": "marzban",
-        "marzban_base_url": "https://marzban.example.invalid",
+        "marzban_base_url": "https://marzban.test",
         "marzban_admin_username": "admin",
         "marzban_admin_password": "test-password",
         "marzban_default_protocol": "vless",
