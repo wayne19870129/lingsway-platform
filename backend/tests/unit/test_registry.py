@@ -286,7 +286,7 @@ class _NoIoClient:
 def _marzban_settings(**overrides: object) -> Settings:
     values: dict[str, object] = {
         "accounting_provider": "marzban",
-        "marzban_base_url": "https://marzban.test",
+        "marzban_base_url": "https://marzban.example.invalid",
         "marzban_admin_username": "admin",
         "marzban_admin_password": "test-password",
         "marzban_default_protocol": "vless",
@@ -301,14 +301,17 @@ def test_registry_selects_marzban_from_settings_without_http(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client = _NoIoClient()
-    monkeypatch.setattr("backend.app.providers.accounting.marzban.httpx.Client", lambda **_kwargs: client)
+    monkeypatch.setattr(
+        "backend.app.providers.accounting.marzban.httpx.Client",
+        lambda **_kwargs: client,
+    )
 
     registry = build_registry(_marzban_settings())
 
     assert isinstance(registry.accounting, MarzbanAccountingProvider)
     assert client.request_calls == 0
-    assert registry.accounting._base_url == "https://marzban.example.invalid"
-    assert registry.accounting._admin_username == "admin"  # type: ignore[attr-defined]
+    assert registry.accounting._base_url == "https://marzban.test"
+    assert registry.accounting._admin_username == "admin"
 
     registry.close()
     registry.close()
@@ -351,8 +354,7 @@ def test_malformed_marzban_contract_fails_closed_before_client_creation(
     monkeypatch: pytest.MonkeyPatch, overrides: dict[str, object]
 ) -> None:
     monkeypatch.setattr(
-        marzban.httpx,
-        "Client",
+        "backend.app.providers.accounting.marzban.httpx.Client",
         lambda **_kwargs: pytest.fail("client must not be created for invalid contract"),
     )
 
@@ -368,7 +370,7 @@ def test_production_default_marzban_credential_fails_closed() -> None:
                 "ACCOUNTING_PROVIDER": "marzban",
                 "JWT_SECRET": "J" * 32,
                 "SECRET_ENCRYPTION_KEY": "S" * 44,
-                "MARZBAN_BASE_URL": "https://marzban.example.invalid",
+                "MARZBAN_BASE_URL": "https://marzban.test",
                 "MARZBAN_ADMIN_USERNAME": "admin",
                 "MARZBAN_ADMIN_PASSWORD": "CHANGE_ME",
                 "MARZBAN_DEFAULT_PROTOCOL": "vless",
