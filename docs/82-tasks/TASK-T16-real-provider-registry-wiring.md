@@ -2118,11 +2118,28 @@ canonical composer**：
 - generic `GatewayProvider.render(DesiredRoutingState, CredentialResolver)`
   保持为唯一 render contract，并继续与 `validate`/`apply`/`health` 共存；
   不新增重复的 generic renderer Protocol；
+- `ProviderRegistry.gateway` 与 `XrayFileProvider` 是
+  process/application-lifetime 的 stateless provider owner，只能持有
+  immutable、non-secret 的 validated `XrayStaticSkeleton`、固定
+  `XRAY_RENDERER_CONSTANT` 与 `XrayDeploymentConfig`；不得持有 Session、
+  operation-scoped resolver、Reality plaintext 或 mutable operation context；
+- concrete Xray module 定义 Xray-only `XrayRenderResolver` capability，继承
+  既有 `CredentialResolver` 并提供 `resolve_reality_identity()`；同一
+  operation Session-backed infra resolver 实现该 capability，按每次
+  `GatewayProvider.render(desired, resolver)` 读取 Reality identity，render
+  后不缓存并释放引用。Xray provider 对不具备该 capability 的 resolver
+  fail closed，不 downcast Session；禁止 ContextVar、global/thread-local
+  hidden state、runtime.current() 恢复 Reality 以及 process-lifetime secret
+  cache；
+- `Settings.xray_log_level: str = "warning"` 从 `XRAY_LOG_LEVEL` 读取，
+  `strip()` 后 lowercase，严格允许 `debug`/`info`/`warning`/`error`/`none`；
+  blank 或 invalid fail closed，不复用 application `log_level`，本 PR 不改
+  `config.py`；
 - application/infra composition boundary 在同一 operation-scoped Session
-  中读取并校验 explicit Xray static projection、中央 `Settings`、持久化
-  Reality identity 与 fresh `DesiredRoutingState`，并构造同一 operation 的
-  `CredentialResolver`；
-- Xray-specific `XrayStaticSkeleton`、secret-safe `XrayRealityConfig` 和
+  中读取并校验 explicit Xray static projection、中央 `Settings` 与 fresh
+  `DesiredRoutingState`，并构造同一 operation 的 `CredentialResolver`；
+- Xray-specific `XrayStaticSkeleton`、immutable non-secret
+  `XrayDeploymentConfig`、secret-safe `XrayRealityConfig` 和
   `XrayFullConfigInput` 只存在于 concrete Xray adapter；一个纯
   `xray_composition` 模块负责完整 inbound/Reality/routing/outbounds 组合与
   BLOCK invariants；具体 Xray provider 的 `render()` 返回的
@@ -2142,8 +2159,9 @@ resolve/render/validate/apply -> reload/health/exact repo-owned projection ->
 caller commit or rollback -> RELEASE_LOCK`。比较边界必须把 repo-owned
 routing/outbounds、static inbound skeleton、Reality fields 与 Marzban dynamic
 fields 分开；stale deleted route/outbound 必须不存在，缺失 repo-owned field
-必须 fail closed。ADR-017 的事务边界不变，Reality identity 的 read 使用同一
-operation Session；既有 create-once bootstrap 仍是独立 Secret lifecycle。
+必须 fail closed。ADR-017 的事务边界不变，Reality identity 通过
+`XrayRenderResolver` 使用同一 operation Session read；既有 create-once
+bootstrap 仍是独立 Secret lifecycle。
 
 PR #106 合并到 `main` 后，ADR-020 即完成；下一顺序变为
 full-config Xray composition implementation under the concrete adapter -> preservation/legal-

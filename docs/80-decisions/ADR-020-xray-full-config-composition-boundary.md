@@ -14,26 +14,30 @@ Xray candidate from fresh desired inputs before validation or installation. The
 composition boundary is split deliberately:
 
 1. An application/infra assembler owns operation-scoped data collection and
-   lifecycle. It reads the static skeleton, central `Settings`, the persisted
-   Reality identity, the fresh `DesiredRoutingState`, and constructs the
-   operation-scoped `CredentialResolver`.
+   lifecycle. It supplies the process-stable non-secret Xray configuration, the
+   fresh `DesiredRoutingState`, and an operation-scoped `CredentialResolver`.
+   The concrete Xray resolver capability reads the persisted Reality identity
+   on each render; the assembler/provider does not cache that identity.
 2. A pure canonical Xray composer owns deterministic structural composition. It
    overlays the canonical Reality fields, renders resolved outbounds, renders
    routing, preserves the fixed skeleton, and returns a complete JSON object.
 3. The existing `GatewayProvider.render(DesiredRoutingState,
-   CredentialResolver)` remains the single generic render API. The concrete
-   `XrayFileProvider` implementation may use an operation-fresh Xray
-   composition context supplied by application/infra and returns a complete
+   CredentialResolver)` remains the single generic render API. The
+   process-lifetime `XrayFileProvider` holds only immutable non-secret Xray
+   configuration; its concrete render path requires the Xray-only resolver
+   capability, reads Reality identity for that call, and returns a complete
    `CandidateConfig`. Neither generic domain code nor the provider base
    contract knows Xray, Reality, Marzban, or a filesystem path.
 
-The selected alternative is **Option B: application/infra supplies an
-operation-fresh Xray composition context to the concrete Xray implementation,
-which uses one shared pure canonical composer behind the existing
-`GatewayProvider.render` contract**. This keeps data ownership and
-secret/session lifetime outside generic domain and base contracts while making
-the provider/runtime path and standalone ops path use exactly one composition
-semantics. No second generic renderer Protocol is introduced.
+The selected alternative is **Option B: the process-lifetime concrete Xray
+provider holds immutable non-secret configuration, while
+`GatewayProvider.render(DesiredRoutingState, CredentialResolver)` receives the
+operation-scoped resolver and the Xray-only resolver capability supplies
+Reality identity for that call; one shared pure canonical composer produces the
+candidate**. This keeps data ownership and secret/session lifetime outside
+generic domain and base contracts while making the provider/runtime path and
+standalone ops path use exactly one composition semantics. No second generic
+renderer Protocol is introduced.
 
 This ADR does not implement the composer, change production Python, wire the
 registry, or start the preservation rewrite. Those are the next implementation
@@ -106,18 +110,50 @@ or a current key not listed above, fails closed and requires an explicit
 ownership update in a reviewed ADR; it is never inherited by a broad
 `deepcopy(template)` rule.
 
-### 3.2 Central Settings
+### 3.2 Process-stable Xray configuration
 
-The deployment Settings owner supplies `log.loglevel` as well as the Reality
-deployment values below. A template value is never a fallback for a missing or
-invalid Settings value.
+`XrayFileProvider` may be process/application-lifetime owner of immutable,
+non-secret configuration only:
+
+- the validated `XrayStaticSkeleton` projection;
+- fixed `XRAY_RENDERER_CONSTANT` values; and
+- an immutable `XrayDeploymentConfig` containing the validated Settings
+  values needed for rendering, including `xray_log_level`, Reality `dest`,
+  and Reality `serverNames`.
+
+This configuration is read and validated when the concrete provider is built.
+Changing deployment configuration requires constructing a new provider or
+restarting the process; it is not a hidden mutable operation context.
+Neither this configuration nor the provider contains Reality `privateKey` or
+`shortIds`.
+
+### 3.3 Central Settings
+
+The deployment Settings contract includes:
+
+```python
+Settings.xray_log_level: str = "warning"
+```
+
+It is read from `XRAY_LOG_LEVEL`, defaults to `warning`, and is the sole
+desired source for `log.loglevel`. Its normalized value is `strip()` followed
+by lowercase; the result must be exactly one of `debug`, `info`, `warning`,
+`error`, or `none`. Blank or invalid input fails closed. It is deliberately
+not an alias for the application log-level setting: Xray logging and
+application logging have separate operational ownership and may not be
+coupled by this ADR. This is a decision-only contract; this docs-only PR does
+not modify `config.py`.
+
+The deployment Settings owner also supplies the Reality deployment values
+below. A template value is never a fallback for a missing or invalid Settings
+value.
 
 `Settings.xray_reality_dest` and
 `Settings.xray_reality_server_name` are the sole desired sources for Reality
 deployment parameters. Blank or whitespace-only values fail closed. Template
 or runtime values are not fallbacks.
 
-### 3.3 Persisted Reality identity
+### 3.4 Persisted Reality identity
 
 The identity remains owned by the Secret infrastructure under:
 
@@ -136,25 +172,45 @@ operation. During a route apply, the assembler performs a current read of the
 already-owned identity. If the identity is absent or invalid, composition fails
 closed; route mutation is not made to depend on an implicit regeneration.
 
-### 3.4 Fresh desired routing
+### 3.5 Fresh desired routing
 
 The application/domain boundary obtains a fresh `DesiredRoutingState` after the
 route mutation and flush required by ADR-017. It contains the authoritative
 route principals and complete outbound DTO set from the current operation
 snapshot. It is not derived from `runtime.current()`.
 
-### 3.5 Egress credentials
+### 3.6 Egress credentials
 
 Egress credential refs continue to be resolved through the explicit
-operation-scoped `CredentialResolver` from ADR-019. The resolver is built by
-the application/infra boundary with the same provisioning `Session` used for
-the fresh route/outbound read. The concrete Xray render path may use the resolver
-only for the duration of `render()`; it never stores it. Plaintext credential material
+operation-scoped `CredentialResolver` from ADR-019. The concrete Xray module
+defines one Xray-only capability over that existing resolver:
+
+```python
+@runtime_checkable
+class XrayRenderResolver(CredentialResolver, Protocol):
+    def resolve_reality_identity(self) -> XrayRealityConfig: ...
+```
+
+The operation-scoped infra resolver implements both the generic egress
+credential operation and this Xray-only capability, using the same provisioning
+`Session` for the fresh route/outbound read and the purpose-bound Reality
+identity read. `XrayFileProvider.render()` requires this capability and fails
+closed if the supplied resolver cannot provide it; it never downcasts to a
+Session or ORM object. The concrete Xray render path uses the resolver only for
+the duration of `render()` and never stores it. Plaintext credential material
 may exist transiently in the composer/provider call, but DTO reprs, exceptions,
 logs, and audit payloads must remain redacted.
 
 The registry constructs neither a resolver nor a cached operation/session
 object.
+
+The lifecycle prohibition is explicit: `ProviderRegistry.gateway` is a
+process/application-lifetime stateless provider owner; it stores no
+`Session`, resolver, Reality plaintext, or mutable operation context.
+`XrayFileProvider` stores no operation-scoped mutable state. `ContextVar`,
+global mutable context, thread-local hidden state, downcasting to obtain a
+SQLAlchemy `Session`, using `runtime.current()` to restore Reality, and any
+process-lifetime plaintext cache are forbidden.
 
 ## 4. Provider-neutral and Xray-specific contracts
 
@@ -180,10 +236,13 @@ this signature provider-neutral (`DesiredRoutingState` plus
 `backend/app/providers/base.py` or generic domain contracts. The domain
 provisioning service depends only on `GatewayProvider`,
 `DesiredRoutingState`, `CredentialResolver`, and `CandidateConfig`; it never
-imports Xray, Reality, Marzban, or filesystem concepts. The concrete Xray
-adapter may use an operation-fresh Xray context internally, but that context
-is supplied at the application/infra boundary and is not a second public
-rendering interface.
+imports Xray, Reality, Marzban, or filesystem concepts. The process-lifetime
+concrete Xray provider may hold only the immutable non-secret
+`XrayStaticSkeleton`, `XrayDeploymentConfig`, and fixed renderer constants
+described in §3.2. Its `render()` call receives the operation-scoped resolver
+through the existing generic argument and obtains the Reality identity through
+the Xray-only capability in §3.6. This is the concrete data channel; it is not
+a second public rendering interface.
 
 The concrete Xray adapter lives under `backend/app/providers/gateway/` or an
 application/infra adapter module and may define the following custom immutable
@@ -196,6 +255,12 @@ class XrayStaticSkeleton:
     ...
 
 
+class XrayDeploymentConfig:
+    # Immutable non-secret Settings projection: xray_log_level,
+    # Reality dest, and Reality serverNames.
+    ...
+
+
 class XrayRealityConfig:
     # Immutable validated values; implementation uses private slots and
     # properties, not @dataclass or a generic serializable record.
@@ -204,17 +269,23 @@ class XrayRealityConfig:
 
 class XrayFullConfigInput:
     # Immutable composition input containing XrayStaticSkeleton,
-    # XrayRealityConfig, and the generic DesiredRoutingState.
+    # XrayDeploymentConfig, XrayRealityConfig, and generic desired state.
     ...
+
+
 
 
 ```
 
-The concrete Xray `GatewayProvider.render()` path is supplied per operation
-with a validated `XrayStaticSkeleton` and persisted `XrayRealityConfig`. It
-forms `XrayFullConfigInput`, invokes the shared pure Xray composer, resolves
-credentials through the explicit resolver, and returns a complete candidate.
-The process/application-lifetime registry may hold the runtime adapter, but it
+The concrete Xray `GatewayProvider.render()` path receives the generic
+operation-scoped resolver, verifies that it implements `XrayRenderResolver`,
+calls `resolve_reality_identity()` for that render, and forms a local
+`XrayFullConfigInput` from the provider-held non-secret configuration, the
+returned Reality identity, and fresh desired state. It then invokes the shared
+pure Xray composer and returns a complete candidate. The identity and resolver
+are local to the call and are not cached or placed on the provider; normal
+return or failure releases those references. The process/application-lifetime
+registry may hold the provider and its immutable non-secret configuration, but
 must not hold an operation-scoped Xray context, resolver, Session, or plaintext.
 
 `XrayRealityConfig` is normative as a custom immutable non-dataclass. Its
@@ -228,24 +299,24 @@ must return a redacted representation for nested Reality values. No recursive
 `repr`, `asdict`, logging, exception, audit, or PR serialization may expose
 Reality identity or resolved credential material.
 
-The assembler's lifecycle is:
+The operation lifecycle is:
 
 ```text
-same operation Session
-  -> read and validate explicit XrayStaticSkeleton projection
-  -> read Settings Reality deploy values
-  -> current-read persisted Reality identity
-  -> fresh DesiredRoutingState
-  -> construct operation-scoped CredentialResolver
-  -> concrete Xray GatewayProvider.render(DesiredRoutingState, resolver)
+caller-owned operation Session
+  -> fresh DesiredRoutingState + operation resolver implementing XrayRenderResolver
+  -> GatewayProvider.render(DesiredRoutingState, resolver)
+     -> provider uses immutable skeleton/deployment config
+     -> XrayFileProvider reads Reality identity through resolver
+     -> local XrayFullConfigInput + pure composition
   -> complete CandidateConfig
 ```
 
 No SQLAlchemy `Session`, ORM model, Secret row, raw Secret ref lookup, or
 provider-specific DTO is placed in a generic domain/base contract. The
-operation-scoped resolver is still created and owned at the application/infra
-boundary exactly as ADR-019 requires; the registry never constructs or caches
-it.
+operation-scoped resolver is created and owned by application/infra, implements
+the concrete Xray capability without exposing its Session, and is passed into
+`render()` explicitly. The registry never constructs or caches it; the
+provider never stores it.
 
 ### 4.1 Portability rule
 
@@ -320,8 +391,10 @@ algorithm, but not the data-access lifecycle.
 Selected. It gives the assembler one operation lifecycle and keeps route,
 Settings, static-skeleton, and Secret reads explicit. The generic application
 uses the existing `GatewayProvider.render(DesiredRoutingState,
-CredentialResolver)` call. The concrete Xray implementation receives its
-validated Xray context at operation scope, forms the Xray-specific input, and
+CredentialResolver)` call. The concrete Xray implementation holds only the
+validated immutable non-secret configuration; it verifies that the supplied
+operation resolver implements `XrayRenderResolver`, reads the Reality identity
+through that method for this render, forms the local Xray-specific input, and
 returns the full candidate. The shared pure composer makes this choice
 deterministic without adding a second renderer interface, while
 `GatewayProvider` remains replaceable for non-Xray gateways.
@@ -352,10 +425,11 @@ this ADR removes.
 There is one canonical pure composer and one existing provider contract:
 
 - `XrayFileProvider.render(desired, resolver)` remains the single generic
-  entrypoint. Its concrete Xray implementation uses the operation-fresh
-  `XrayStaticSkeleton`/`XrayRealityConfig` context supplied by application/infra,
-  delegates to the pure composer, and wraps the resulting full JSON object in
-  `CandidateConfig`.
+  entrypoint. The provider holds only immutable non-secret
+  `XrayStaticSkeleton`/`XrayDeploymentConfig`; its concrete implementation
+  obtains the operation-fresh Reality identity from the Xray-only resolver
+  capability, delegates to the pure composer, and wraps the resulting full JSON
+  object in `CandidateConfig`.
 - `XrayFileProvider` consumes only the complete `CandidateConfig` for
   `validate`, `apply`, and `health`; it never accepts or installs a routing
   fragment. The Xray context is an internal concrete-adapter concern, not a
@@ -419,10 +493,11 @@ The preservation rewrite must use this algorithm:
 
 1. Acquire the existing named GatewayRouteBinding lock.
 2. Perform the route mutation and flush, without an early business commit.
-3. Read a fresh desired snapshot using the same operation Session, supply the
-   operation-fresh Xray context at the application/infra boundary, resolve
-   credentials, and call the existing `GatewayProvider.render()` to compose a
-   full candidate. The domain sees only the generic provider contract.
+3. Read a fresh desired snapshot using the same operation Session, construct the
+   operation-scoped resolver implementing the Xray-only capability, and call the
+   existing `GatewayProvider.render()` with it to compose a full candidate. The
+   domain sees only the generic provider contract; Reality identity is read
+   inside the concrete Xray render call.
 4. Parse the candidate, run all structural invariants, and invoke `xray run
    -test` before installation.
 5. Back up the current file, install the complete candidate, reload, and run
@@ -446,11 +521,11 @@ or missing repo-owned Reality state are all failures. Marzban dynamic clients
 are evaluated by their separate owner and are not a reason to enlarge the
 candidate.
 
-The persisted Reality identity read is a read-only current read in the same
-operation Session as the fresh routing/credential snapshot. The existing
-create-once identity bootstrap is an independent Secret-provisioning lifecycle
-and is not a pre-apply route commit. ADR-017's lock span and caller-owned
-commit/rollback boundary remain unchanged.
+The persisted Reality identity read is a read-only current read performed by
+`XrayRenderResolver` in the same operation Session as the fresh
+routing/credential snapshot. The existing create-once identity bootstrap is an
+independent Secret-provisioning lifecycle and is not a pre-apply route commit.
+ADR-017's lock span and caller-owned commit/rollback boundary remain unchanged.
 
 ## 10. Implementation handoff
 
@@ -461,9 +536,12 @@ The next implementation PR must be limited to the following concrete work:
   together with `validate`/`apply`/`health`; keep it provider-neutral and do
   not add Xray DTOs or a second renderer Protocol here.
 - `backend/app/providers/gateway/xray_file.py` or the concrete Xray adapter
-  module: add the custom immutable `XrayStaticSkeleton`, `XrayRealityConfig`,
-  and `XrayFullConfigInput` types plus the concrete Xray composition path;
-  these are not generic domain contracts.
+  module: add the custom immutable `XrayStaticSkeleton`, non-secret
+  `XrayDeploymentConfig`, secret-safe `XrayRealityConfig`, and
+  `XrayFullConfigInput` types plus the concrete Xray-only
+  `XrayRenderResolver` capability and composition path; these are not generic
+  domain contracts. The provider may retain only the first two as immutable
+  process-stable configuration.
 - `backend/app/providers/gateway/xray_composition.py`: add the pure canonical
   full-config composer and invariant helpers.
 - `backend/app/providers/gateway/xray_file.py`: make the concrete Xray adapter's
@@ -474,8 +552,10 @@ The next implementation PR must be limited to the following concrete work:
 - `backend/app/domain/provisioning.py` and the application composition
   boundary: continue to call the generic `GatewayProvider.render()` contract;
   application/infra assembles fresh desired state, validates the explicit Xray
-  skeleton, reads Reality identity, and constructs the same-operation resolver
-  without exposing Session/ORM or Xray JSON to generic domain code.
+  skeleton and Settings, and constructs the same-operation resolver
+  implementing `XrayRenderResolver`. The resolver reads Reality identity inside
+  the concrete render call without exposing Session/ORM or Xray JSON to generic
+  domain code.
 - `ops/gateway/render_xray_routes.py`: use the shared assembler/composer and
   remove duplicate structural semantics while retaining its operational entry
   point until the provider path is live.

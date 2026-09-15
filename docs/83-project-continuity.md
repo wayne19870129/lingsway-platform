@@ -481,6 +481,14 @@ decays quickly.
   is complete and the active order is full-config Xray composition implementation
   under the concrete adapter, preservation/legal-deletion, writer-guard/drift baseline,
   existing-data reconciliation, and final Phase 2B current-main review.
+  The concrete process-lifetime Xray provider may hold only immutable non-secret
+  skeleton/deployment configuration. Each render receives the operation-scoped
+  resolver through the existing `GatewayProvider.render()` argument and reads
+  Reality identity through the Xray-only resolver capability; the provider and
+  registry retain no Session, resolver, plaintext, or mutable operation state.
+  `Settings.xray_log_level` is sourced from `XRAY_LOG_LEVEL`, normalized by
+  trim/lowercase, and limited to `debug`/`info`/`warning`/`error`/`none`; blank or
+  invalid values fail closed and it is independent from application `log_level`.
   `runtime.current()` remains observation/rollback/drift only; the candidate's
   repo-owned file skeleton includes `settings.clients=[]`, while Marzban
   runtime-only dynamic membership remains outside repo-owned equality. Phase 2B
