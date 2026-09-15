@@ -98,7 +98,7 @@ def get_or_create_secret(
         result = cast(
             CursorResult[Any], db.execute(insert(Secret).values(values).prefix_with("IGNORE"))
         )
-        winner = db.scalar(statement)
+        winner = db.scalar(statement.with_for_update())
         if winner is None:
             raise SecretStoreError("Secret insert did not produce a readable row")
         return winner, result.rowcount == 1
