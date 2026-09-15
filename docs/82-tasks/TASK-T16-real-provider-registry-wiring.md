@@ -2035,8 +2035,9 @@ Phase 2C attempt，现均已关闭；PR #98 从未 merge，不能恢复。Xray g
 
 ## Phase 2B-remain-3 — Atomic full desired-state snapshot and outbound cutover
 
-本阶段的实现载体为 PR #104，基线为已人工合并 PR #103 后的 main
-`2bc58c57de72da16583286c7d507eab882769da0`。该变更将 live
+本阶段的实现载体为 PR #104，基线为当时已人工合并 PR #103 后的 main
+`2bc58c57de72da16583286c7d507eab882769da0`。PR #104 已于 2026-09-15
+人工合并到当前 main `de96406db1081835681798db282810d1fd64028f`，该变更将 live
 `DesiredRoutingState` 一次性切换为 `user_routes` 与完整
 `tuple[XrayOutboundDTO, ...]`，并在同一 provisioning Session/事务中完成
 active route、endpoint、binding 与 credential ref 的全量 current-read 快照。
@@ -2058,3 +2059,37 @@ active route、endpoint、binding 与 credential ref 的全量 current-read 快�
   preservation rewrite、Reality persistence/ownership、writer-guard/drift
   baseline、existing-data reconciliation 仍是后续工作；Phase 2B 仍未
   COMPLETE，Phase 2C 继续 BLOCKED。
+
+
+## Phase 2B — Reality canonical persistence / ownership
+
+本阶段的 implementation vehicle 是 PR #105，基线为 main
+`de96406db1081835681798db282810d1fd64028f`；本 TASK 不创建 Issue、不自动
+merge、不开始 registry wiring。PR #105 只负责关闭 Reality identity
+ownership gap，同时保持 PR #104 已完成的 full-snapshot/outbound cutover。
+
+- `XRAY_REALITY_DEST` 与 `XRAY_REALITY_SERVER_NAME` 由中央 `Settings` 读取；
+  两者 blank 时 fail closed，static template 的同名字段永不作为 fallback。
+- 当前部署拓扑是单一 repo-owned shared Xray/Marzban config，Reality identity
+  使用稳定 Secret ref `gateway/xray/reality-identity`，purpose 为
+  `XRAY_REALITY_IDENTITY`；不新增 DB column 或 migration。
+- Secret payload 是严格 JSON object，仅允许 `privateKey`（nonblank string）和
+  `shortIds`（至少一项、每项 nonblank string）；unknown key、malformed JSON、
+  purpose mismatch、解密失败和 invalid payload 全部 fail closed，不重新生成。
+- 第一次缺失 Secret 时只生成一次 privateKey/shortIds 并立即持久化；并发
+  bootstrap 使用 create-once winner/loser semantics，loser 读取 winner，不覆盖
+  winner。后续 render 和 process/session restart 都复用同一 identity。
+- renderer 的 Reality composition 只消费 fixed skeleton、Settings deploy values
+  和持久化 identity；runtime `xray_config.json` 不是 desired-state source。
+- 本阶段不修改 `GatewayRouteBinding` named-lock / Phase A-B transaction ownership，
+  不实现 registry wiring、preservation/legal-deletion、writer-guard/drift baseline、
+  existing-data reconciliation、schema migration、deploy 或生产 Xray reload。
+
+验收必须包含 template bogus-value 忽略、missing Settings fail-closed、首次/重复
+render 稳定性、session restart、malformed/decrypt/purpose/unknown-key redaction、
+以及真实 MySQL 8.4 concurrent first bootstrap；既有 route/outbound parity 继续
+通过。PR #105 只有独立审查 PASS 且人工合并后，Reality slice 才完成；当该
+change 位于 main 时，Reality canonical persistence/ownership 已完成，后续
+active Phase 2B frontier 为 preservation/legal-deletion、writer-guard/drift
+baseline、existing-data reconciliation。即使 PR #105 已合并，Phase 2B 仍为
+**NOT COMPLETE**，Phase 2C 仍为 **BLOCKED**。

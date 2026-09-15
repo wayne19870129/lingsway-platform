@@ -29,6 +29,8 @@ class Settings:
     marzban_default_protocol: str = "vless"
     marzban_default_inbounds_json: str = "{}"
     marzban_verify_tls: bool = True
+    xray_reality_dest: str = ""
+    xray_reality_server_name: str = ""
     accounting_sync_batch_size: int = 100
     grace_period_hours: int = 24
     subscription_base_url: str = "http://localhost:8000"
