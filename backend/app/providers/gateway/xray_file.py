@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import NoReturn, Protocol
 
+from backend.app.core.config import Settings
 from backend.app.providers.base import (
     ApplyResult,
     CandidateConfig,
@@ -21,6 +22,14 @@ from backend.app.providers.base import (
     DesiredRoutingState,
     HealthReport,
     ValidationResult,
+)
+from backend.app.providers.gateway.xray_composition import (
+    XrayCompositionError,
+    XrayDeploymentConfig,
+    XrayFullConfigInput,
+    XrayRenderResolver,
+    XrayStaticSkeleton,
+    compose_xray_config,
 )
 
 
@@ -46,15 +55,44 @@ AuditCallback = Callable[[str, Mapping[str, object]], None]
 
 
 class XrayFileProvider:
+    @classmethod
+    def from_template(
+        cls,
+        runtime: XrayRuntime,
+        template: Mapping[str, object],
+        settings: Settings,
+        *,
+        disable_user: Callable[[str], None] = lambda _username: None,
+        alert: Callable[[str], None] = lambda _message: None,
+        audit: AuditCallback = lambda _event, _details: None,
+    ) -> XrayFileProvider:
+        """Build a provider from validated process-stable template/Settings projections."""
+
+        return cls(
+            runtime,
+            static_skeleton=XrayStaticSkeleton.from_template(template),
+            deployment_config=XrayDeploymentConfig.from_settings(settings),
+            disable_user=disable_user,
+            alert=alert,
+            audit=audit,
+        )
+
     def __init__(
         self,
         runtime: XrayRuntime,
         *,
+        static_skeleton: XrayStaticSkeleton | None = None,
+        deployment_config: XrayDeploymentConfig | None = None,
         disable_user: Callable[[str], None] = lambda _username: None,
         alert: Callable[[str], None] = lambda _message: None,
         audit: AuditCallback = lambda _event, _details: None,
     ) -> None:
         self._runtime = runtime
+        # These are process-stable, non-secret projections.  The optional
+        # defaults preserve construction for validation-only callers; a live
+        # render must supply a validated deployment projection.
+        self._static_skeleton = static_skeleton or XrayStaticSkeleton.canonical()
+        self._deployment_config = deployment_config
         self._disable_user = disable_user
         self._alert = alert
         self._audit = audit
@@ -62,83 +100,29 @@ class XrayFileProvider:
     def render(
         self, desired: DesiredRoutingState, resolver: CredentialResolver
     ) -> CandidateConfig:
-        outbound_tag_set: set[str] = set()
-        rendered_outbounds: list[dict[str, object]] = [
-            {"tag": "BLOCK", "protocol": "blackhole"}
-        ]
-        for outbound in desired.outbounds:
-            if (
-                not isinstance(outbound.tag, str)
-                or not outbound.tag.strip()
-                or outbound.tag == "BLOCK"
-            ):
-                raise XrayValidationError("invalid desired outbound tag")
-            if outbound.tag in outbound_tag_set:
-                raise XrayValidationError("duplicate desired outbound tag")
-            if not isinstance(outbound.host, str) or not outbound.host.strip():
-                raise XrayValidationError("invalid desired outbound host")
-            if not isinstance(outbound.port, int) or isinstance(outbound.port, bool):
-                raise XrayValidationError("invalid desired outbound port")
-            if (
-                not isinstance(outbound.protocol, str)
-                or not isinstance(outbound.port, int)
-                or isinstance(outbound.port, bool)
-                or not 1 <= outbound.port <= 65535
-            ):
-                raise XrayValidationError("invalid desired outbound connection")
-            protocol = outbound.protocol.lower()
-            if protocol not in {"socks", "socks5"}:
-                raise XrayValidationError("unsupported desired outbound protocol")
-            credential = resolver.resolve(outbound.credential_secret_ref)
-            outbound_tag_set.add(outbound.tag)
-            rendered_outbounds.append(
-                {
-                    "tag": outbound.tag,
-                    "protocol": "socks",
-                    "settings": {
-                        "servers": [
-                            {
-                                "address": outbound.host,
-                                "port": outbound.port,
-                                "users": [
-                                    {
-                                        "username": credential.username,
-                                        "password": credential.password,
-                                    }
-                                ],
-                            }
-                        ]
-                    },
-                }
-            )
+        if self._deployment_config is None:
+            raise XrayValidationError("Xray deployment configuration is not configured")
+        if not isinstance(resolver, XrayRenderResolver):
+            raise XrayValidationError("Xray render resolver capability is required")
 
-        if any(
-            not isinstance(principal, str)
-            or not principal.strip()
-            or not isinstance(target, str)
-            or not target.strip()
-            or target == "BLOCK"
-            or target not in outbound_tag_set
-            for principal, target in desired.user_routes.items()
-        ):
-            raise XrayValidationError("desired route references missing outbound")
-        rules: list[dict[str, object]] = [
-            {"type": "field", "ip": ["geoip:private"], "outboundTag": "BLOCK"}
-        ]
-        rules.extend(
-            {"type": "field", "user": [user], "outboundTag": outbound}
-            for user, outbound in sorted(desired.user_routes.items())
-        )
-        rules.append(
-            {"type": "field", "network": "tcp,udp", "outboundTag": "BLOCK"}
-        )
-        return CandidateConfig(
-            content={
-                "routing": {"rules": rules},
-                "outbounds": rendered_outbounds,
-            },
-            version=datetime.now(UTC).strftime("%Y%m%d%H%M%S%f"),
-        )
+        try:
+            reality = resolver.resolve_reality_identity()
+            credentials = {
+                outbound.credential_secret_ref: resolver.resolve(
+                    outbound.credential_secret_ref
+                )
+                for outbound in desired.outbounds
+            }
+            input_value = XrayFullConfigInput(
+                self._static_skeleton,
+                self._deployment_config,
+                reality,
+                desired,
+                credentials,
+            )
+            return compose_xray_config(input_value)
+        except XrayCompositionError as exc:
+            raise XrayValidationError(str(exc)) from None
 
     def validate(
         self, candidate: CandidateConfig, *, new_username: str | None = None
@@ -476,3 +460,4 @@ class LocalXrayRuntime:
         if not isinstance(backup, Path):
             raise TypeError("backup must be a Path")
         shutil.copy2(backup, self.config_path)
+

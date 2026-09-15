@@ -28,6 +28,10 @@ from backend.app.providers.base import (
     XrayOutboundDTO,
 )
 from backend.app.providers.gateway.mock import MockGatewayProvider
+from backend.app.providers.gateway.xray_composition import (
+    XrayDeploymentConfig,
+    XrayRealityConfig,
+)
 from backend.app.providers.gateway.xray_file import XrayFileProvider, XrayValidationError
 
 
@@ -216,6 +220,9 @@ def test_gateway_providers_accept_operation_scoped_resolver() -> None:
         def resolve(self, secret_ref: str) -> CredentialDTO:
             return CredentialDTO("resolver-user", "resolver-password")
 
+        def resolve_reality_identity(self) -> XrayRealityConfig:
+            return XrayRealityConfig("reality-private-key", ["reality-short-id"])
+
     resolver = Resolver()
     desired = DesiredRoutingState(
         user_routes={"user": "egress"},
@@ -227,7 +234,14 @@ def test_gateway_providers_accept_operation_scoped_resolver() -> None:
     )
 
     mock_candidate = MockGatewayProvider().render(desired, resolver)
-    xray_candidate = XrayFileProvider(runtime=None).render(desired, resolver)  # type: ignore[arg-type]
+    xray_candidate = XrayFileProvider(
+        runtime=None,
+        deployment_config=XrayDeploymentConfig(
+            xray_log_level="warning",
+            reality_dest="dest.example:443",
+            reality_server_names=("dest.example",),
+        ),
+    ).render(desired, resolver)  # type: ignore[arg-type]
 
     assert mock_candidate.version == "gateway-mock-v1"
     assert xray_candidate.version
@@ -261,6 +275,9 @@ def test_xray_renderer_resolves_each_full_outbound_and_keeps_block_fixed() -> No
             self.refs.append(secret_ref)
             return CredentialDTO(f"user-{secret_ref}", f"password-{secret_ref}")
 
+        def resolve_reality_identity(self) -> XrayRealityConfig:
+            return XrayRealityConfig("reality-private-key", ["reality-short-id"])
+
     resolver = RecordingResolver()
     desired = DesiredRoutingState(
         user_routes={"principal-b": "egress-b", "principal-a": "egress-a"},
@@ -270,7 +287,14 @@ def test_xray_renderer_resolves_each_full_outbound_and_keeps_block_fixed() -> No
         ),
     )
 
-    candidate = XrayFileProvider(runtime=None).render(desired, resolver)  # type: ignore[arg-type]
+    candidate = XrayFileProvider(
+        runtime=None,
+        deployment_config=XrayDeploymentConfig(
+            xray_log_level="warning",
+            reality_dest="dest.example:443",
+            reality_server_names=("dest.example",),
+        ),
+    ).render(desired, resolver)  # type: ignore[arg-type]
 
     assert resolver.refs == ["ref-a", "ref-b"]
     assert candidate.content["outbounds"] == [
@@ -336,3 +360,4 @@ def test_xray_renderer_fails_closed_for_invalid_outbound_inputs(
         XrayFileProvider(runtime=None).render(desired, Resolver())  # type: ignore[arg-type]
 
     assert "secret/ref" not in str(raised.value)
+

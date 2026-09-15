@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import copy
 import json
 import os
-import secrets
-import subprocess
 import tempfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -14,15 +11,19 @@ from typing import Any
 
 from sqlalchemy import select
 
-from backend.app.core.config import Settings, get_settings
+from backend.app.core.config import get_settings
 from backend.app.core.database import SessionLocal
-from backend.app.core.secrets import (
-    SecretStoreError,
-    get_or_create_secret,
-    reveal_secret,
-    reveal_secret_for_purpose,
-)
+from backend.app.infra.credential_resolver import SqlAlchemyCredentialResolver
 from backend.app.models import EgressBinding, EgressEndpoint, GatewayRouteBinding
+from backend.app.providers.base import CredentialDTO, DesiredRoutingState, XrayOutboundDTO
+from backend.app.providers.gateway.xray_composition import (
+    XrayCompositionError,
+    XrayDeploymentConfig,
+    XrayFullConfigInput,
+    XrayRealityConfig,
+    XrayStaticSkeleton,
+    compose_xray_config,
+)
 
 
 class XrayRenderError(RuntimeError):
@@ -35,123 +36,6 @@ BASE_CONFIG = Path(
 OUTPUT_CONFIG = Path(
     os.getenv("XRAY_RUNTIME_CONFIG_PATH", "/app/data/marzban/xray_config.json")
 )
-REALITY_IDENTITY_SECRET_REF = "gateway/xray/reality-identity"
-REALITY_IDENTITY_PURPOSE = "XRAY_REALITY_IDENTITY"
-
-
-def _x25519_private_key(binary: str) -> str:
-    result = subprocess.run(
-        [binary, "x25519"], check=False, capture_output=True, text=True
-    )
-    if result.returncode != 0:
-        raise XrayRenderError("xray x25519 key generation failed")
-    for line in (result.stdout + result.stderr).splitlines():
-        label, separator, value = line.partition(":")
-        normalized_label = "".join(label.lower().split())
-        if separator and normalized_label == "privatekey" and value.strip():
-            return value.strip()
-    raise XrayRenderError("xray x25519 output did not contain a private key")
-
-
-def _parse_reality_identity(value: str) -> dict[str, Any]:
-    try:
-        payload = json.loads(value)
-    except (TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise XrayRenderError("XRAY_REALITY_IDENTITY_MALFORMED") from exc
-    if not isinstance(payload, dict) or set(payload) != {"privateKey", "shortIds"}:
-        raise XrayRenderError("XRAY_REALITY_IDENTITY_MALFORMED")
-    private_key = payload["privateKey"]
-    short_ids = payload["shortIds"]
-    if (
-        not isinstance(private_key, str)
-        or not private_key.strip()
-        or not isinstance(short_ids, list)
-        or not short_ids
-        or any(not isinstance(short_id, str) or not short_id.strip() for short_id in short_ids)
-    ):
-        raise XrayRenderError("XRAY_REALITY_IDENTITY_MALFORMED")
-    return {"privateKey": private_key, "shortIds": short_ids}
-
-
-def _new_reality_identity(binary: str) -> str:
-    private_key = _x25519_private_key(binary)
-    return json.dumps(
-        {"privateKey": private_key, "shortIds": [secrets.token_hex(8)]},
-        separators=(",", ":"),
-    )
-
-
-def _reality_identity(db: Any) -> dict[str, Any]:
-    try:
-        secret, created = get_or_create_secret(
-            db,
-            REALITY_IDENTITY_SECRET_REF,
-            lambda: _new_reality_identity(os.getenv("XRAY_BINARY", "/usr/local/bin/xray")),
-            REALITY_IDENTITY_PURPOSE,
-        )
-        if created:
-            db.commit()
-        identity = _parse_reality_identity(
-            reveal_secret_for_purpose(db, secret.secret_ref, REALITY_IDENTITY_PURPOSE)
-        )
-    except (SecretStoreError, XrayRenderError) as exc:
-        if isinstance(exc, XrayRenderError):
-            raise
-        raise XrayRenderError("XRAY_REALITY_IDENTITY_UNREADABLE") from exc
-    return identity
-
-
-def _compose_reality_settings(
-    skeleton: Mapping[str, Any], settings: Settings, identity: Mapping[str, Any]
-) -> dict[str, Any]:
-    dest = settings.xray_reality_dest.strip()
-    server_name = settings.xray_reality_server_name.strip()
-    if not dest or not server_name:
-        raise XrayRenderError("XRAY_REALITY_DEST and XRAY_REALITY_SERVER_NAME are required")
-    result = copy.deepcopy(dict(skeleton))
-    result.setdefault("show", False)
-    result.setdefault("xver", 0)
-    result["dest"] = dest
-    result["serverNames"] = [server_name]
-    result["privateKey"] = identity["privateKey"]
-    result["shortIds"] = identity["shortIds"]
-    return result
-
-
-def _reality_settings(config: dict[str, Any], db: Any, settings: Settings) -> dict[str, Any]:
-    for inbound in config.get("inbounds", []):
-        if not isinstance(inbound, dict):
-            continue
-        stream = inbound.get("streamSettings")
-        if not isinstance(stream, dict) or stream.get("security") != "reality":
-            continue
-        reality = stream.get("realitySettings")
-        if not isinstance(reality, dict):
-            raise XrayRenderError("Reality inbound has no realitySettings object")
-        if not settings.xray_reality_dest.strip() or not settings.xray_reality_server_name.strip():
-            raise XrayRenderError("XRAY_REALITY_DEST and XRAY_REALITY_SERVER_NAME are required")
-        identity = _reality_identity(db)
-        composed = _compose_reality_settings(reality, settings, identity)
-        reality.clear()
-        reality.update(composed)
-        return reality
-    raise XrayRenderError("base config has no Reality inbound")
-
-
-def _credential(db: Any, secret_ref: str) -> dict[str, str]:
-    try:
-        value = json.loads(reveal_secret(db, secret_ref))
-    except (TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise XrayRenderError(f"credential secret is not valid JSON: {secret_ref}") from exc
-    if not isinstance(value, dict):
-        raise XrayRenderError(f"credential secret is not an object: {secret_ref}")
-    username = value.get("username")
-    password = value.get("password")
-    if not isinstance(username, str) or not isinstance(password, str):
-        raise XrayRenderError(f"credential secret has no username/password: {secret_ref}")
-    return {"username": username, "password": password}
-
-
 def _active_routes(db: Any) -> list[tuple[GatewayRouteBinding, EgressEndpoint, str]]:
     rows = db.execute(
         select(GatewayRouteBinding, EgressEndpoint)
@@ -183,38 +67,43 @@ def _active_routes(db: Any) -> list[tuple[GatewayRouteBinding, EgressEndpoint, s
 def render_config(
     base_config: Mapping[str, Any],
     routes: Sequence[tuple[str, str, str, int, str, dict[str, str]]],
+    *,
+    xray_log_level: str = "warning",
+    reality_dest: str = "",
+    reality_server_name: str = "",
+    reality_identity: XrayRealityConfig | None = None,
 ) -> dict[str, Any]:
-    config = copy.deepcopy(dict(base_config))
-    config["outbounds"] = [{"tag": "BLOCK", "protocol": "blackhole"}]
-    user_rules: list[dict[str, Any]] = []
+    if reality_identity is None:
+        raise XrayRenderError("Xray Reality identity is required")
+    desired_routes: dict[str, str] = {}
+    outbounds: list[XrayOutboundDTO] = []
+    credentials: dict[str, CredentialDTO] = {}
     for principal, outbound_tag, protocol, port, host, credential in routes:
-        if protocol.lower() not in {"socks", "socks5"}:
-            raise XrayRenderError(f"unsupported egress protocol: {protocol}")
-        config["outbounds"].append(
-            {
-                "tag": outbound_tag,
-                "protocol": "socks",
-                "settings": {
-                    "servers": [
-                        {
-                            "address": host,
-                            "port": port,
-                            "users": [credential],
-                        }
-                    ]
-                },
-            }
+        ref = f"ops-render/{outbound_tag}"
+        outbounds.append(XrayOutboundDTO(outbound_tag, host, port, protocol, ref))
+        desired_routes[principal] = outbound_tag
+        credentials[ref] = CredentialDTO(
+            credential.get("username", ""), credential.get("password", "")
         )
-        user_rules.append(
-            {"type": "field", "user": [principal], "outboundTag": outbound_tag}
+    try:
+        skeleton = XrayStaticSkeleton.from_template(base_config)
+        deployment = XrayDeploymentConfig(
+            xray_log_level=xray_log_level,
+            reality_dest=reality_dest,
+            reality_server_names=(reality_server_name,),
         )
-    config["routing"] = dict(config.get("routing", {}))
-    config["routing"]["rules"] = [
-        {"type": "field", "ip": ["geoip:private"], "outboundTag": "BLOCK"},
-        *user_rules,
-        {"type": "field", "network": "tcp,udp", "outboundTag": "BLOCK"},
-    ]
-    return config
+        candidate = compose_xray_config(
+            XrayFullConfigInput(
+                skeleton,
+                deployment,
+                reality_identity,
+                DesiredRoutingState(desired_routes, tuple(outbounds)),
+                credentials,
+            )
+        )
+    except (XrayCompositionError, TypeError, ValueError) as exc:
+        raise XrayRenderError("Xray full configuration composition failed") from exc
+    return dict(candidate.content)
 
 
 def render_from_database() -> Path:
@@ -226,9 +115,11 @@ def render_from_database() -> Path:
         raise XrayRenderError("base Xray config must be a JSON object")
     settings = get_settings()
     with SessionLocal() as db:
-        _reality_settings(base_config, db, settings)
+        resolver = SqlAlchemyCredentialResolver(db)
+        reality = resolver.resolve_reality_identity()
         rows = []
         for route, endpoint, secret_ref in _active_routes(db):
+            credential = resolver.resolve(secret_ref)
             rows.append(
                 (
                     route.gateway_principal,
@@ -236,10 +127,17 @@ def render_from_database() -> Path:
                     endpoint.protocol,
                     endpoint.port,
                     endpoint.host,
-                    _credential(db, secret_ref),
+                    {"username": credential.username, "password": credential.password},
                 )
             )
-        rendered = render_config(base_config, rows)
+        rendered = render_config(
+            base_config,
+            rows,
+            xray_log_level=settings.xray_log_level,
+            reality_dest=settings.xray_reality_dest,
+            reality_server_name=settings.xray_reality_server_name,
+            reality_identity=reality,
+        )
     OUTPUT_CONFIG.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
         "w", dir=OUTPUT_CONFIG.parent, prefix=".xray_config.", suffix=".json", delete=False
@@ -260,3 +158,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
