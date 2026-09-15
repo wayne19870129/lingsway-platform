@@ -2094,6 +2094,57 @@ active Phase 2B frontier 为 preservation/legal-deletion、writer-guard/drift
 baseline、existing-data reconciliation。即使 PR #105 已合并，Phase 2B 仍为
 **NOT COMPLETE**，Phase 2C 仍为 **BLOCKED**。
 
+本轮 reconciliation wording 补充：Compose 中 `marzban_data` volume 与
+`${MARZBAN_DB_FILE}` / `data/marzban/db.sqlite3` 是两个必须分别迁移的
+persistent state；清单已逐项对照 `infrastructure/compose/*.yml`。若 DB
+commit 成功但 named-lock release 未确认，结果必须是
+`committed_with_warning / lock_release_unverified`，保留真实 updated count，
+不得伪称 rollback 或 zero write；CLI 返回 non-zero，供 operator 人工确认。
+
+## Current Phase 2B — Existing-data reconciliation
+
+PR #109 已人工合并到 `main`；当前基线为
+`4bbcf585bf0fbfae885bec077645828dc7b58776`，writer-guard/drift slice 已在
+main 完成。本 PR 是现有 active `GatewayRouteBinding` 的
+existing-data reconciliation vehicle；它不表示 TASK-T16 已完成。
+
+本 slice 只提供独立、人工触发的 `ops.reconciliation.gateway_principals`
+工具。无 `--confirm` 时只执行 Phase A dry-run；只有显式 `--confirm` 才能
+进入 Phase B。它不由 startup、Alembic、deployment 或 scheduler 自动调用，
+也不执行真实部署或真实 Marzban/Xray reload。
+
+- Phase A 在不持有 named lock 时读取完整 active binding + Subscription
+  snapshot，严格拒绝缺失 subscription、空白/异常 `accounting_user_id`、旧
+  principal 异常、重复输入或重复目标；每个 identity 通过 Marzban
+  `GET /api/user/{accounting_user_id}` 读取已存在的 `routing_principal`，不在
+  本地拼接或从 DB/runtime fallback。任一外部读取失败即整体中止且零写入。
+- Phase B 获取既有 `gateway_route_binding_write()` named lock，重新读取并逐字段
+  比较完整 snapshot；随后只用带原值条件的单行 UPDATE，rowcount 必须为 1，
+  全部成功后单次 commit，再释放 lock。任何 snapshot drift、唯一冲突、锁/写入
+  异常都 rollback 并 fail closed；目标已相等的行是安全 no-op。
+- audit 只记录时间、模式、计数、状态和 reason code，不记录 username、
+  principal、URL、凭据、Secret plaintext/ciphertext 或 API payload。工具可安全
+  重跑；现有 MySQL 两会话 named-lock integration tests 继续作为并发契约证明。
+
+Reality bootstrap 仍遵循独立的 create-once Secret lifecycle。没有 standalone
+live verification 的安全证据时不自动 bootstrap/adopt；迁移所需的 DB、Marzban
+volume、Xray candidate/baseline、Reality Secret 和其他持久态清单见
+`docs/90-migration/persistent-state-manifest.md`，该清单不执行 SCP/rsync。
+
+本 slice 不改 schema/migration、workflow、AGENTS.md、registry wiring、
+writer-guard/drift 或 reconciliation 之外的 Phase 2C 工作。Phase 2B 仍为
+**NOT COMPLETE**，Phase 2C 仍为 **BLOCKED**；PR 必须保持 OPEN，等待人工独立
+审查后再决定是否手工合并。
+
+## Latest handoff — Existing-data reconciliation
+
+以上历史阶段记录保留作审计背景；当前 authoritative baseline 是 main
+`4bbcf585bf0fbfae885bec077645828dc7b58776`，PR #109 已合并，writer-guard/
+drift 已完成。当前 vehicle 是 PR #110 / branch
+`task/t16-2b-existing-data-reconciliation`，其 exact head 由 PR 状态与 CI
+记录维护。该 vehicle 只执行 ADR-016 的显式 reconciliation；Phase 2B
+仍 **NOT COMPLETE**，Phase 2C 仍 **BLOCKED**，PR 保持 OPEN 等待独立审查。
+
 ## Phase 2B-remain-4 — ADR-020: Xray full-config composition boundary
 
 PR #105 已人工合并到当前 `main`
@@ -2257,4 +2308,3 @@ Vultr → 搬瓦工迁移。当前 PR 不开始 existing-data reconciliation、r
 wiring、provider default changes、deployment automation 之外的真实部署或
 真实 Xray reload；不创建 Issue、不自动 merge。即使本 PR 合并，Phase 2B 仍为
 **NOT COMPLETE**，Phase 2C 仍为 **BLOCKED**。
-

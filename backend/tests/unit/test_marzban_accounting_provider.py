@@ -583,6 +583,33 @@ def test_get_connection_links_maps_and_validates() -> None:
     assert links == ["vless://uuid@host:443"]
 
 
+def test_get_routing_principal_reads_the_patched_field_from_marzban() -> None:
+    requests: list[httpx.Request] = []
+    provider = _provider(_recording_handler(requests))
+
+    assert provider.get_routing_principal("alice") == "42.alice"
+    user_request = next(request for request in requests if request.url.path != "/api/admin/token")
+    assert user_request.method == "GET"
+    assert user_request.url.path == "/api/user/alice"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"username": "alice", "status": "active", "routing_principal": ""},
+        {"username": "someone-else", "status": "active", "routing_principal": "42.alice"},
+    ],
+)
+def test_get_routing_principal_fails_closed_on_invalid_identity(payload: dict[str, object]) -> None:
+    def user_response(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    provider = _provider(_recording_handler([], user_response=user_response))
+
+    with pytest.raises(MarzbanContractError, match="routing_principal|username"):
+        provider.get_routing_principal("alice")
+
+
 def test_get_connection_links_malformed_fails_closed() -> None:
     def user_response(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=_user_payload(links="not-a-list"))
