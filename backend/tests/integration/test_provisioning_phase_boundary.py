@@ -78,6 +78,11 @@ from backend.app.providers.egress.mock import MockEgressProvider
 from backend.app.providers.email.noop import NoopEmailProvider
 from backend.app.providers.forwarder.mock import MockForwarderProvider
 from backend.app.providers.gateway.mock import MockGatewayProvider
+from backend.app.providers.gateway.xray_composition import (
+    XrayDeploymentConfig,
+    XrayRealityConfig,
+    XrayStaticSkeleton,
+)
 from backend.app.providers.gateway.xray_file import XrayFileProvider
 from backend.app.providers.notify.noop import NoopNotifyProvider
 from backend.app.providers.payment.mock import MockPaymentProvider
@@ -268,6 +273,9 @@ def _request(order_id: int, customer_id: int, *, username: str) -> ProvisionRequ
 class _FakeCredentialResolver:
     def resolve(self, secret_ref: str) -> CredentialDTO:
         return CredentialDTO("resolver-user", "resolver-password")
+
+    def resolve_reality_identity(self) -> XrayRealityConfig:
+        return XrayRealityConfig("resolver-private-key", ("resolver-short-id",))
 
 
 def confirm_payment_and_provision(*args: Any, **kwargs: Any) -> ProvisionOutcome | None:
@@ -1575,7 +1583,15 @@ def test_production_xray_render_uses_routing_principal_as_the_user_routes_key(
             ),
         )
 
-    candidate = XrayFileProvider(runtime=None).render(  # type: ignore[arg-type]
+    candidate = XrayFileProvider(
+        runtime=None,  # type: ignore[arg-type]
+        static_skeleton=XrayStaticSkeleton.canonical(),
+        deployment_config=XrayDeploymentConfig(
+            xray_log_level="warning",
+            reality_dest="resolver.example:443",
+            reality_server_names=("resolver.example",),
+        ),
+    ).render(
         desired, _FakeCredentialResolver()
     )
     rules = candidate.content["routing"]["rules"]  # type: ignore[index]
@@ -2243,3 +2259,4 @@ def test_production_pre_epoch_expire_never_dispatches_or_disables(engine: Engine
     # Named lock was never acquired -- a fresh acquisition succeeds immediately.
     with Session(engine) as db, gateway_route_binding_write(db, timeout_seconds=5):
         pass
+
