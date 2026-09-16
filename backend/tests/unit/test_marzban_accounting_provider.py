@@ -780,6 +780,52 @@ def test_401_error_message_never_exposes_bearer_token() -> None:
     assert "token-2" not in str(excinfo.value)
 
 
+
+def test_owned_client_loads_explicit_ca_only_on_first_operation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[object, float]] = []
+
+    class _OwnedClient:
+        def __init__(self, *, verify: object, timeout: float) -> None:
+            calls.append((verify, timeout))
+
+        def post(self, *_args: object, **_kwargs: object) -> httpx.Response:
+            return _token_response()
+
+        def close(self) -> None:
+            return None
+
+    sentinel_context = object()
+    monkeypatch.setattr(
+        "backend.app.providers.accounting.marzban.build_marzban_tls_verify",
+        lambda *, verify_tls, ca_cert_path: (
+            calls.append((ca_cert_path, float(verify_tls))) or sentinel_context
+        ),
+    )
+    monkeypatch.setattr(
+        "backend.app.providers.accounting.marzban.httpx.Client",
+        _OwnedClient,
+    )
+    provider = MarzbanAccountingProvider(
+        base_url=_BASE_URL,
+        admin_username=_ADMIN_USERNAME,
+        admin_password=_ADMIN_PASSWORD,
+        default_protocol="vless",
+        default_inbounds_json=_INBOUNDS_JSON,
+        ca_cert_path="/explicit/internal.crt",
+        timeout_seconds=7.0,
+    )
+
+    assert calls == []
+    assert provider.health_check() is True
+
+    assert calls == [
+        ("/explicit/internal.crt", 1.0),
+        (sentinel_context, 7.0),
+    ]
+    provider.close()
+
 # ---------------------------------------------------------------------------
 # TASK-T16 Phase 2B8: provider resource lifecycle (_owns_client / close()).
 # ---------------------------------------------------------------------------
