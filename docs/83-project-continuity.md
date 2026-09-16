@@ -900,3 +900,11 @@ ADR-022 remains `Proposed`, not Accepted. It now rejects the current provider's 
 `_marzban_from_settings()` now passes `settings.marzban_ca_cert_path`. `MarzbanAccountingProvider` uses one minimal lock around lazy owned-client creation and close, preserving zero-I/O construction and injected-client ownership. PR #114 remains OPEN and unmerged; no deployment or real Marzban/Xray side effect occurred.
 
 Phase status: Phase 2B COMPLETE; Phase 2C ACTIVE; Phase 2C1 COMPLETE; Phase 2C2 COMPLETE; Phase 2C3A COMPLETE; Phase 2C3B remains ACTIVE/GATED by ADR-022. Mihomo remains separately blocked.
+
+## Latest authoritative handoff — PR #114 ADR-022 Direction B wording review
+
+The renewed review of exact head `aadd9670242e3806f7961ab10f82cd5b2071501e` (canonical review `5223626712`) found no Critical, three documentation Majors, and no Minors. This docs-only follow-up unifies ADR-022 around the selected Direction B commit-first ordering, states its precise partial supersession of ADR-017, and corrects the prospective-versus-live projection writer boundary.
+
+The final ADR sequence is Phase A prospective preparation without the projection lock; projection lock plus fresh read and active-route establishment; first durable commit of DB B, required token state, and pending reconciliation; runtime render/apply/verify; second durable finalization of pending/Subscription/Order; unlock; then best-effort NOTIFY. Gateway failure after commit leaves DB B authoritative and pending/degraded; it does not trigger ordinary rollback or automatic accounting-user disable. The Direction-B-only crash matrix, corrected host/port/protocol credential-source inventory, and future Webshare write gate are documented.
+
+ADR-022 remains `Proposed` and no implementation is included. PR #114 remains OPEN and unmerged. Phase 2B COMPLETE; Phase 2C ACTIVE; Phase 2C1 COMPLETE; Phase 2C2 COMPLETE; Phase 2C3A COMPLETE; Phase 2C3B remains ACTIVE/GATED by ADR-022. Mihomo remains separately architecture-blocked.

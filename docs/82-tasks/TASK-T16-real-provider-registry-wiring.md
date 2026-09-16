@@ -2590,3 +2590,11 @@ Renewed review found no Critical, and three Majors: (1) the prior apply-before-c
 This follow-up keeps ADR-022 `Proposed`, compares durable staged apply/finalization with commit-first durable reconciliation, and proposes the latter for crash consistency. It defines the baseline as projection evidence only, a fresh-DB recovery authority, an A-H crash matrix, a projection-wide writer inventory, and the existing gateway named lock as the single-writer boundary. No domain/base reconciliation contract, schema, durable job, or reconciliation implementation is added here. The code changes only pass the configured CA path into manual reconciliation and serialize lazy Marzban client initialization/close; tests cover both.
 
 Phase status: Phase 2B COMPLETE; Phase 2C ACTIVE; Phase 2C1 COMPLETE; Phase 2C2 COMPLETE; Phase 2C3A COMPLETE; Phase 2C3B remains ACTIVE/GATED by ADR-022. Mihomo remains separately blocked.
+
+## Latest authoritative handoff — PR #114 ADR-022 Direction B wording review
+
+Reviewed exact head: `aadd9670242e3806f7961ab10f82cd5b2071501e`; canonical review: `5223626712`. PR #114 remains OPEN and unmerged on `task/t16-2c3b-xray-runtime-provider-wiring`.
+
+This docs-only follow-up addresses three Majors: ADR-022 no longer contains an old apply-before-commit normative writer contract; it explicitly partially supersedes ADR-017 only for real gateway reconciliation transaction/finalization ordering; and it distinguishes prospective Phase A endpoint/binding/Secret data from live projection mutation. Direction B is now a concrete commit-first state machine: durable DB B plus pending first, runtime render/apply/verify, then durable finalization and only then customer-facing success. Retryable gateway failure keeps DB B authoritative and does not automatically disable the accounting user. NOTIFY occurs after releasing the projection lock.
+
+ADR-022 remains `Proposed`. No implementation, domain/base change, schema, workflow, provider, deployment, Webshare, or Mihomo change is included. Phase 2C3B remains ACTIVE/GATED by ADR-022.

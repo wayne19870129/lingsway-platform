@@ -32,229 +32,208 @@ This ADR is a proposed architecture decision only. It does not change domain
 contracts, provisioning orchestration, release signatures, provider
 interfaces, or production behavior in this slice.
 
-## Authoritative Xray projection inputs and writers audited
+## Supersession relationship with ADR-017
 
-The repo-owned Xray candidate is a projection of more than
-`GatewayRouteBinding`. The complete input inventory for this decision is:
+If this ADR is accepted, it **partially supersedes ADR-017 only for real
+gateway reconciliation transaction and finalization ordering**. It supersedes
+these four ADR-017 clauses for a real gateway projection mutation:
+
+1. ADR-017's steps 1-9 sharing one eventual commit/rollback is replaced by
+   two durable commits: the authoritative desired-state-plus-pending commit,
+   followed by the runtime-success/customer-activation finalization commit.
+2. ADR-017's rule that gateway apply happens before the success DB commit is
+   replaced by commit-first: DB desired state B and pending reconciliation
+   are durable before runtime apply.
+3. ADR-017's rule that gateway failure after mutation rolls back the same
+   business transaction is replaced by DB B remaining authoritative with
+   pending retry or DEGRADED/MANUAL state; ordinary gateway failure does not
+   roll back B.
+4. ADR-017's rule that successful Phase-B business commit occurs only after
+   `provision_apply_gateway()` returns is replaced by the explicit runtime
+   reconcile and finalization contract below.
+
+All other ADR-017 conclusions remain effective: Phase A external calls do not
+hold the projection lock for their full duration; one MySQL named lock remains
+the serialization primitive; lock acquisition/release is fail-closed; durable
+run/job status ordering remains required; ProviderRegistry owns providers; and
+failure handling remains secret-safe. This ADR does not modify ADR-017 itself.
+
+## Authoritative Xray projection inputs and writer classification
+
+The repo-owned full Xray candidate is a projection of these inputs:
 
 - `GatewayRouteBinding`: `gateway_principal`, `outbound_tag`,
   `enabled`, `released_at`, and `egress_id`.
-- `EgressEndpoint`: `host`, `port`, `protocol`,
-  `credential_secret_ref`, and active/status selection.
-- `EgressBinding`: `subscription_id`, `egress_id`,
-  `released_at`, and its optional `credential_secret_ref` override.
-- The purpose-bound Secret rows referenced by those bindings: the actual
-  username/password values are candidate inputs; ciphertext, refs, and
-  purpose are ownership/integrity metadata.
-- Reality/deployment settings: Reality `privateKey`/`shortIds` resolved from
+- `EgressEndpoint` candidate fields: `host`, `port`, and `protocol`.
+  `status` and `current_count` are allocation/lifecycle state, not direct
+  fields of the current full Xray candidate.
+- Credential reference selection: active `EgressBinding.credential_secret_ref`
+  has priority; otherwise the active endpoint's
+  `EgressEndpoint.credential_secret_ref` is used.
+- The referenced purpose-bound Secret's actual username/password values.
+  Ciphertext, reference, and purpose remain integrity/ownership metadata, not
+  candidate values.
+- Reality/deployment inputs: Reality `privateKey`/`shortIds` resolved from
   the purpose-bound identity, `XRAY_REALITY_DEST`,
-  `XRAY_REALITY_SERVER_NAME`, and `XRAY_LOG_LEVEL`, plus the accepted
-  process-stable Xray skeleton/constants.
+  `XRAY_REALITY_SERVER_NAME`, `XRAY_LOG_LEVEL`, and accepted static
+  skeleton/renderer constants.
 
-The audit classifies every discovered authoritative mutation as follows.
+Projection relevance depends on committed active-route reference. A value made
+for a new provisioning attempt is prospective until the authoritative commit
+activates a route that references it.
 
-### Class A — must use the gateway reconciliation contract
+### Prospective Phase A state — not a live Class A writer
 
-1. `SqlAlchemyProvisioningState.allocate_endpoint()` and
-   `save_credentials()` mutate `EgressEndpoint`, `EgressBinding`, and
-   the referenced Secret during provisioning. Its
-   `ensure_gateway_route_binding()` path creates/updates/enables
-   `GatewayRouteBinding`.
-2. `accounting_sync.release_egress()` mutates `EgressBinding`,
-   `EgressEndpoint`, and the active `GatewayRouteBinding` during expiry
-   release.
-3. Confirmed `ops/reconciliation/gateway_principals.py` updates
-   `GatewayRouteBinding.gateway_principal`.
-4. Any future endpoint replacement, binding reassignment, credential
-   reference/value rotation, or release/disable writer that can alter the
-   candidate must enter the same contract, including an operation that
-   calls `put_secret()` for an Xray-referenced credential.
+`allocate_endpoint()` and `save_credentials()` may create or update
+prospective `EgressEndpoint`, `EgressBinding`, and credential Secret rows
+while the new data is not referenced by a committed active
+`GatewayRouteBinding`. They remain inside the uncommitted business
+transaction and do not take the projection lock during Phase A. The same is
+true of other preparation steps before the route activation boundary.
 
-The admin provisioning wrapper delegates to the provisioning state; it is not
-a second independent writer. `credential_resolver.py`,
-`backend/app/workers/drift_check.py`, the Webshare provider, and the admin
-queries are read-only for this projection.
+The admin provisioning wrapper delegates to the provisioning state rather than
+creating a second writer. `credential_resolver.py`, the drift checker, the
+Webshare provider's current inventory reads, and admin queries are read-only
+for this projection.
+
+### Class A — live or activating projection writers
+
+Once an active route references an input, or the current operation is about to
+commit that input as the active route's desired state, the following are Class
+A and must use the projection reconciliation contract:
+
+- Active-route mutation through
+  `ensure_gateway_route_binding()`, including principal, outbound tag,
+  endpoint reassignment, enable/disable, and release.
+- `accounting_sync.release_egress()` when it changes an active referenced
+  binding, endpoint, or route.
+- Confirmed `ops/reconciliation/gateway_principals.py` principal updates.
+- Endpoint host/port/protocol changes, selected credential-reference changes,
+  referenced credential plaintext rotation, and Reality identity rotation.
+- Any operation that activates the prospective Phase A endpoint/binding/Secret
+  set and creates the durable pending reconciliation record.
+
+`put_secret()` is context-sensitive: a subscription token or an unreferenced
+prospective credential is not itself a live projection write; a value written
+to a Secret referenced by an active route is Class A.
 
 ### Class B — setup/bootstrap only
 
 `bootstrap_reality_identity()` is an explicit create-once setup operation.
-Its `get_or_create_secret()` winner semantics never replace an existing,
+Its `get_or_create_secret()` winner semantics never replace an existing
 malformed, wrong-purpose, or unreadable identity. It may run before real
-gateway enablement, but any future identity rotation or repair is not
-bootstrap and must use Class A's contract.
+gateway enablement. Any identity repair or rotation is Class A.
 
 ### Class C — future provider or operational path
 
-The current Webshare provider exposes inventory reads; no production endpoint
-replacement or credential-rotation writer is implemented here. Any future
-Webshare endpoint replacement, sub-user credential rotation, or upstream
-provider SDK writer must be gated by this ADR before real wiring. Likewise,
-future operational changes to the Reality destination/server name or Xray log
-level that affect a live candidate must use the same durable gate before
-production enablement.
+The current Webshare provider exposes inventory reads only. Any future Webshare
+endpoint replacement, sub-user credential rotation, or upstream-provider SDK
+writer must adopt this contract before real wiring. Inventory-only reads do not
+write the projection; a change to an active route's endpoint or credential is
+Class A. Future live changes to Reality destination/server name or Xray log
+level must also use the contract before production enablement.
 
 ### Class D — destructive/manual maintenance
 
 No direct SQL, file, Secret deletion, purge, or manual endpoint-maintenance
-writer is part of the current application paths. If one is introduced, it is
-a destructive/manual maintenance operation and must require an explicit
-operator gate, the same projection-writer serialization, post-change
-verification, and secret-safe audit. It may not bypass the reconciliation
-contract.
+writer is present in the current application paths. If introduced, it requires
+an explicit operator gate, the same projection-writer serialization,
+post-change verification, and secret-safe audit; it may not bypass this ADR.
 
-No other current application writer was found in the inspected API, service,
-worker, provider, reconciliation, bootstrap, or maintenance paths. Model
-definitions and read-only queries are not writers. This inventory supersedes
-the earlier GatewayRouteBinding-only wording and must be re-audited before
-production wiring if a new writer is added.
+The existing named gateway lock is the single Xray projection-writer boundary.
+It is acquired when a mutation can change the committed/live projection or when
+the operation is formally activating prospective inputs. It is not acquired at
+the start of Phase A and must not span CAPACITY, ALLOCATE_ENDPOINT,
+CREATE_TENANT, STORE_CREDENTIALS, APPLY_FORWARDER, or
+CREATE_ACCOUNTING_USER slow external calls. No intersecting lock may be added
+without one documented global ordering.
 
-The existing named gateway lock is the single-writer serialization boundary
-for the entire repo-owned Xray projection, not merely one table. All Class A
-mutations must acquire it, and credential/Reality changes must not use an
-intersecting lock with an unspecified order. If a future durable worker uses
-another internal lock, it must serialize behind this boundary with one
-documented global ordering.
-## Required contract for every writer
+## Direction B — commit-first provisioning state machine
 
-Every authoritative writer must handle the DB mutation and the repo-owned
-Xray projection as one reconciliation contract. It may not finish after
-changing only the database.
+Direction B is the selected crash-safe architecture. The normal sequence is:
 
-The named gateway writer lock must remain held continuously across:
+1. Phase A prepares prospective resources: CAPACITY, ALLOCATE_ENDPOINT,
+   CREATE_TENANT, STORE_CREDENTIALS, APPLY_FORWARDER, and
+   CREATE_ACCOUNTING_USER. The new route is not yet committed live Xray
+   desired state. Prospective endpoint/binding/credential rows remain in the
+   same uncommitted business transaction and do not take the projection lock.
+2. Before the gateway boundary, generate and store the subscription token or
+   other required pure DB activation state. The customer must not receive its
+   URL yet. This removes the new token-after-runtime compensation window.
+3. Acquire `gateway_route_binding_write()`. While holding it, reread fresh
+   committed projection truth, establish the active GatewayRouteBinding for B,
+   compose the prospective post-mutation desired state, and create the durable
+   gateway reconciliation `PENDING` record.
+4. Commit once. This first authoritative commit makes all of the following
+   durable DB truth B together: Phase A prospective endpoint/binding/Secret
+   state, active GatewayRouteBinding, required token state, and the pending
+   reconciliation record. DB B is not rolled back to A for an ordinary
+   post-commit gateway failure.
+5. Still under the projection lock, reread the freshly committed DB B and
+   construct DesiredRoutingState. Then call `gateway.render()`,
+   `gateway.validate()`, `gateway.apply()`, health checks, and repo
+   projection verification. `runtime/file = B` and `APPLIED B` are valid
+   only after these checks succeed; APPLIED remains projection evidence, never
+   DB authority.
+6. Perform the second durable finalization transaction: pending becomes
+   APPLIED/SYNCED, Subscription becomes ACTIVE, Order becomes ACTIVATED, and
+   other customer-facing success state is committed together. Only after
+   this commit may the run be SUCCEEDED, a subscription URL be returned, or
+   customer success be reported.
+7. Release the projection lock. Only then perform best-effort NOTIFY.
 
-1. Fresh operation-scoped reads of the currently committed desired state and
-   any required previous projection/baseline.
-2. The DB mutation and flush.
-3. Fresh desired-state composition for the post-mutation state.
-4. Gateway render, validate, and apply.
-5. The DB commit when the apply is successful.
-6. DB rollback and any external accounting-user compensation when the apply or
-   later business step fails.
-7. Re-render/apply compensation to the previous committed desired state when
-   a later DB/business step invalidates the first apply.
+After the first commit, Subscription/Order remain PROVISIONING plus durable
+`GATEWAY_RECONCILIATION_PENDING` (or an equivalent explicit state). An
+accounting user, egress tenant, and forwarder may already exist; that is
+intentional and recoverable. Customer success is withheld until finalization.
 
-The lock must not be released before compensation completes or a durable
-DEGRADED/manual-intervention outcome has been recorded. A second writer must
-not enter between rollback and runtime restoration.
+## Runtime failure and compensation semantics
 
-A future implementation must obtain a process-lifetime provider from the
-existing registry and construct operation-scoped resolver/context from the
-same operation Session. `accounting_sync.py` must not instantiate a second
-registry or provider. Providers must not query ORM state or infer desired
-state from runtime.
+If runtime apply, health, or projection verification fails after DB B commits,
+DB B remains authoritative. The operation enters `PENDING_RETRY` or durable
+`DEGRADED/MANUAL` according to error classification. Recovery rereads fresh
+DB B, re-renders from DB, and retries idempotently; it never reconstructs B
+from baseline, infers desired state from runtime, or blindly rolls back to A.
 
-## Crash-consistency problem
+A retryable gateway failure must not automatically disable the already-created
+accounting user while DB B still references it. Explicit cancellation, operator
+abort, or terminal destructive compensation is a new serialized projection
+mutation. It may disable the accounting user, release the egress, and remove
+or disable the desired route only through this same contract.
 
-The earlier apply-before-commit description is not crash-safe as currently
-implemented and is not sufficient for production. The current concrete
-gateway provider can persist an `APPLIED` baseline while applying a candidate
-before the surrounding SQL transaction commits. A process crash can therefore
-leave fresh DB desired state A, runtime/file B, and baseline B. The writer
-guard can see runtime/file/baseline agreement and incorrectly treat that
-state as normal. `finally`, an in-memory flag, or best-effort compensation
-cannot repair a process that has stopped.
+If finalization commit fails, fresh DB still shows B plus pending state and
+runtime may already be B. Restart/recovery verifies or reapplies B and retries
+finalization; it never restores A merely because the finalization transaction
+was interrupted.
 
-The baseline is projection evidence only. It is never DB authority and is
-never used after restart to infer desired state. Recovery must read a fresh
-committed DB desired-state snapshot and compare/reconcile from that truth.
+NOTIFY is outside the projection-lock correctness span. Notification failure
+cannot change completed DB B, runtime B, APPLIED B, or Subscription ACTIVE.
 
-## Options considered
+## Direction B process-crash recovery matrix
 
-### Direction A — Durable staged apply, then post-commit finalization
+Every restart begins with a fresh committed DB desired-state read. Baseline is
+projection evidence only. Recovery is fail-closed until the stated evidence
+and convergence are complete.
 
-A crash-safe version of apply-before-commit would need a durable two-phase
-projection protocol, not the current `GatewayProvider.apply()` call alone:
-
-1. Persist a durable `PREVIOUS_APPLIED` record for A and a
-   `PENDING_APPLY` record for candidate B before the external apply.
-2. Apply and verify B while the named single-writer lock remains held.
-3. Commit the business DB transaction.
-4. Perform an explicit, idempotent finalization that records `APPLIED` B
-   only after the DB commit is durable; clear the pending record as part of
-   that finalization.
-5. On restart, recover from the durable pending/finalization records and a
-   fresh DB desired-state read. The recovery path cannot depend on request
-   cleanup, `finally`, or process memory.
-
-The current provider saves `APPLIED` from inside `apply()`, before the
-application knows whether the DB commit completed. Before implementation, the
-ownership must be chosen explicitly: a provider-specific staged/finalize
-contract, an application-owned durable projection-state record that makes
-provider `apply()` non-finalizing, or an equivalent mechanism. Simply adding
-another application call after the current `apply()` is not sufficient.
-
-Direction A can be crash-safe if every state transition and recovery rule is
-durable and the external apply/finalize operations are idempotent. It has a
-large external side-effect window and still needs explicit compensation when
-a later business step fails.
-
-### Direction B — Commit-first durable reconciliation
-
-This direction commits the DB desired state B together with a durable pending
-reconciliation record before applying the runtime projection:
-
-1. Under the single-writer lock, compose B from a fresh operation snapshot and
-   create an idempotent pending record.
-2. Commit DB desired state B and the pending marker.
-3. Apply, validate, and verify B; then persist `APPLIED` B and clear the
-   pending marker in a separate durable finalization.
-4. Customer-facing provisioning success is not returned at step 2. It is
-   returned only after runtime/file verification and finalization succeed.
-   Between those points the operation is `PENDING`/non-success; an apply or
-   verification failure becomes a durable `DEGRADED`/manual state.
-5. Retries use the pending operation identity and candidate fingerprint as
-   idempotency keys. Recovery always reads fresh DB desired state B, never a
-   baseline to reconstruct B, and retries or quarantines the pending work
-   deterministically.
-6. The named lock covers pending creation, commit, runtime mutation,
-   verification, and finalization/recovery. A failed runtime apply is a real
-   route-risk event; it is never hidden by claiming the DB commit was
-   rolled back.
-
-Direction B has the stronger process-crash property because committed DB
-desired state remains the authority and the durable pending record survives
-process loss. It requires new durable application/domain state and changes
-customer success timing, so it is not implemented by this ADR-only slice.
-
-## Proposed direction and deferred implementation
-
-For crash consistency, this ADR proposes Direction B, commit-first durable
-reconciliation, over the currently described Option 1/apply-before-commit
-flow. This is a crash-safety decision, not a claim that it is the smallest
-implementation. Direction A remains a valid design only after its durable
-staging/finalization ownership is explicitly accepted; the current provider
-contract cannot be treated as Direction A.
-
-The follow-up implementation must define the durable pending/finalization
-state, idempotency key, recovery ownership, success/error states, baseline
-promotion rules, lock span, and route-risk/manual policy before enabling a
-real gateway. It must not add a new generic gateway framework or provider-
-neutral DTO merely to express this contract.
-
-## Process-crash recovery matrix
-
-For every row below, restart authority is a fresh committed DB desired-state
-read; the baseline is evidence only. The writer remains fail-closed until the
-listed convergence/evidence is complete.
-
-| Crash point | Fresh DB / runtime interpretation | Restart recovery and next-writer rule |
+| Crash point | Authoritative interpretation | Recovery and next-writer rule |
 | --- | --- | --- |
-| A. Before gateway apply | DB is A; no committed B exists. | Discard/close uncommitted pending work, verify or restore A if needed; no next writer until the lock/recovery check completes, then allow a serialized writer. |
-| B. During gateway apply | DB is A or committed B depending on the selected direction; runtime is unknown. | Mark pending/degraded, never trust a partial apply or baseline; read DB fresh, verify/restore its projection, and block writers until convergence or manual clearance. |
-| C. Runtime B applied but baseline/finalization is not durable | Runtime B is untrusted evidence; baseline may still say A. | Fail closed, read fresh DB, apply/verify the DB-authoritative candidate, then finalize its marker; no writer until this is durable. |
-| D. Runtime B and baseline B exist but DB commit is incomplete | Baseline B cannot promote B to authority; fresh DB is A. | Fail closed and converge runtime/file to A, quarantine the stale B evidence, then allow the next serialized writer only after A is verified. |
-| E. DB commit B is complete but baseline finalization is incomplete | Fresh DB B is authoritative; pending B survives. | Retry the same idempotent apply/verify/finalize for B, or enter durable DEGRADED/manual; no later writer bypasses the pending record. |
-| F. DB rollback A is complete but runtime restore is incomplete | Fresh DB A is authoritative; runtime may be B/unknown. | Keep fail-closed pending-restore state, restore/verify A, and block all writers until A is evidenced. |
-| G. Compensation apply crashes | DB authority is the fresh committed state (normally A after rollback); compensation result is unknown. | Treat compensation as incomplete, re-read DB, retry idempotently or require manual intervention, and permit no writer while the projection is uncertain. |
-| H. Compensation succeeds but final marker is not persisted | Runtime A may be correct but the projection evidence is incomplete. | Fail closed, verify A from fresh DB, persist the final APPLIED evidence, then release the writer gate; no writer may rely on the unpersisted assumption. |
+| A. Before first authoritative commit | Fresh DB is old state A; no committed B exists. | Discard uncommitted work, verify/restore A if needed, finish the lock/recovery check, then allow a serialized writer. |
+| B. After DB B + pending commit, before runtime apply | Fresh DB B and pending state are authoritative; runtime is still old/unknown. | Keep pending, apply/verify B idempotently, and block later writers until finalization or durable degraded/manual handling. |
+| C. During runtime apply | Fresh DB B is authoritative; runtime outcome is unknown/partial. | Fail closed, retain pending/degraded state, reread B, and converge/verify B before any next writer. |
+| D. Runtime B applied, baseline/finalization incomplete | Fresh DB B is authoritative; runtime B is evidence pending verification/finalization. | Verify B and persist final evidence/finalization, or enter durable manual state; no writer bypasses pending. |
+| E. APPLIED B exists, business finalization not committed | Fresh DB B plus pending is authoritative; APPLIED B is only projection evidence. | Retry finalization after verifying B; do not recover A; block later writers until pending resolves. |
+| F. Business finalization committed before lock release/process crash | Fresh DB B and Subscription ACTIVE are authoritative; runtime B is expected but must be checked. | Verify B after restart, repair fail-closed if needed, then release/reacquire the gate only after evidence is durable. |
+| G. Retry/recovery crashes | Fresh DB B remains authoritative; pending/degraded recovery state survives. | Resume idempotently from B and the durable operation identity, or require manual intervention; no baseline-derived desired state and no bypass writer. |
+| H. Operator cancellation/terminal compensation during projection mutation | Fresh committed DB state and its durable cancellation/pending marker are authoritative. | Serialize cancellation, reread DB, complete disable/release/route mutation and verification, or remain degraded/manual; no concurrent writer enters. |
 
-No recovery branch may infer desired state from `APPLIED`, runtime,
-filesystem, or a candidate fingerprint alone.
+No row uses apply-before-commit as the normal contract. No recovery branch
+infers desired state from APPLIED, runtime, filesystem, or fingerprint alone.
 
 ## Deferred implementation boundary
 
-This ADR remains `Proposed`. It does not implement
-`current_desired_routing_state()`, a new domain protocol, gateway finalize
-API, durable reconciliation job/schema, provisioning compensation, release
-orchestration, or any other reconciliation contract. Those changes require a
-separate implementation slice and independent exact-head review.
+This ADR remains `Proposed`. It does not implement the state machine or any
+new reconciliation table/model, enum, schema/Alembic migration,
+`current_desired_routing_state()`, new domain protocol, provider finalize API,
+provisioning-state/service ordering, token-step move, accounting compensation
+change, scheduler worker, or release orchestration. Those changes require a
+separate implementation slice after independent review and human acceptance.
