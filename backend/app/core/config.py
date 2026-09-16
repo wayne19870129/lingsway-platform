@@ -94,7 +94,9 @@ class Settings:
             )
         if self.app_env == "production" and self.secret_encryption_key.startswith("MDAwMDAw"):
             raise ValueError("Production SECRET_ENCRYPTION_KEY must be configured")
-        marzban_runtime_selected = self.accounting_provider == "marzban" or self.gateway_provider == "xray_file"
+        marzban_runtime_selected = (
+            self.accounting_provider == "marzban" or self.gateway_provider == "xray_file"
+        )
         if marzban_runtime_selected:
             if not self.marzban_base_url.strip():
                 raise ValueError("MARZBAN_BASE_URL must not be blank when Marzban is selected")
@@ -108,7 +110,8 @@ class Settings:
                 )
             if self.marzban_verify_tls and not self.marzban_ca_cert_path.strip():
                 raise ValueError(
-                    "MARZBAN_CA_CERT_PATH must not be blank when Marzban TLS verification is enabled"
+                    "MARZBAN_CA_CERT_PATH must not be blank when Marzban TLS "
+                    "verification is enabled"
                 )
             if self.app_env == "production":
                 if "example.invalid" in self.marzban_base_url:
