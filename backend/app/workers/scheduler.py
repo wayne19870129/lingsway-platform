@@ -125,7 +125,8 @@ def run_batch(
     now only ever runs at the actual process ownership boundary, ``main()``.
     """
     with db_factory() as db:
-        reconcile_gateway_job(registry, db_factory=db_factory)
+        if get_settings().gateway_provider == "xray_file":
+            reconcile_gateway_job(registry, db_factory=db_factory)
         transport_records = sync_transport_capacity_and_inventory(db, registry)
         reconciled = run_pending_reconcile(
             db, registry.accounting, get_settings().accounting_sync_batch_size

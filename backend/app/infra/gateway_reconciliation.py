@@ -11,6 +11,7 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
@@ -165,14 +166,20 @@ def _claim_job(db: Session, now: datetime) -> Job | None:
     return job
 
 
-def _record_failure(db: Session, job_id: int, error: BaseException, now: datetime) -> GatewayReconciliationResult:
+def _record_failure(
+    db: Session, job_id: int, error: BaseException, now: datetime
+) -> GatewayReconciliationResult:
     db.rollback()
     job = db.get(Job, job_id)
     if job is None:
         raise GatewayReconciliationError("GATEWAY_RECONCILIATION_JOB_MISSING") from error
     payload = _job_payload(job)
     subscription_id = payload.get("subscription_id")
-    subscription = db.get(Subscription, int(subscription_id)) if isinstance(subscription_id, int) else None
+    subscription = (
+        db.get(Subscription, int(subscription_id))
+        if isinstance(subscription_id, int)
+        else None
+    )
     exhausted = job.attempts >= job.max_attempts
     reason_code = _safe_reason(error)
     job.status = JobStatus.FAILED
@@ -188,7 +195,9 @@ def _record_failure(db: Session, job_id: int, error: BaseException, now: datetim
             provision_run.last_error_code = reason_code[:80]
 
     if subscription is not None:
-        subscription.reconcile_state = ReconcileState.FAILED if exhausted else ReconcileState.PENDING
+        subscription.reconcile_state = (
+            ReconcileState.FAILED if exhausted else ReconcileState.PENDING
+        )
         subscription.provision_error = (
             "gateway reconciliation requires manual intervention"
             if exhausted

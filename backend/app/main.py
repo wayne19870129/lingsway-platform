@@ -2,7 +2,7 @@
 
 import asyncio
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
 
@@ -19,11 +19,8 @@ from backend.app.providers.registry import ProviderRegistry, build_registry
 async def _gateway_reconciliation_loop(registry: ProviderRegistry, stop: asyncio.Event) -> None:
     """Recover durable gateway intents without owning another provider registry."""
     while not stop.is_set():
-        try:
+        with suppress(Exception):
             await asyncio.to_thread(reconcile_gateway_job, registry)
-        except Exception:
-            # The durable Job remains available for the next bounded attempt.
-            pass
         try:
             await asyncio.wait_for(stop.wait(), timeout=5.0)
         except TimeoutError:
@@ -55,10 +52,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         stop.set()
         if recovery_task is not None:
             recovery_task.cancel()
-            try:
+            with suppress(asyncio.CancelledError):
                 await recovery_task
-            except asyncio.CancelledError:
-                pass
         registry.close()
 
 
