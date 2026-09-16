@@ -41,7 +41,8 @@ PY
 }
 
 ensure_marzban_internal_tls() {
-  local marzban_dir="$1" certificate="$marzban_dir/internal.crt" key="$marzban_dir/internal.key"
+  local marzban_dir="$1"
+  local certificate="$marzban_dir/internal.crt" key="$marzban_dir/internal.key"
   require_cmd openssl
   if [[ ! -e "$certificate" && ! -e "$key" ]]; then
     openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 3650 \
