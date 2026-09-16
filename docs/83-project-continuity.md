@@ -1,11 +1,13 @@
 # Project Continuity / Handoff
 
-**Last reconciled with main baseline:** `5bdf5655d67da1185686d8560609874e4979f5c5`
-(verified 2026-09-15 UTC after PR #111 was manually merged). PR #109, PR #110,
-and PR #111 are merged; Phase 2B is **COMPLETE** and Phase 2C is **ACTIVE**.
-The active vehicle is Phase 2C2 patched Marzban image path on branch
-`task/t16-2c2-patched-marzban-image`; PR #112 remains open pending renewed
-exact-SHA review.
+**Last reconciled with main baseline:** `3943bfdb149bfdfa204ad627d11e37c1ce161abe`
+(verified 2026-09-16 UTC after PR #113 was manually merged). PR #112 and
+PR #113 are complete for their accepted slices; Phase 2B is **COMPLETE** and
+Phase 2C is **ACTIVE**. The active vehicle is Phase 2C3B Xray runtime provider
+wiring on branch `task/t16-2c3b-xray-runtime-provider-wiring`; its PR is
+open pending independent exact-SHA review. Codex / GPT-5.6 Luna High is the
+sole writer, Claude Code Web is fully stopped, ChatGPT is the independent
+reviewer, and the User performs manual merge and production approval.
 Dates in this document are UTC unless stated otherwise.
 
 This document is maintained by whichever agent last touched a section
@@ -835,3 +837,25 @@ were corrected: `xray run -test` and `xray_config.json`.
 Phase status remains unchanged: Phase 2B COMPLETE; Phase 2C ACTIVE; Phase 2C1
 COMPLETE; Phase 2C2 COMPLETE; Phase 2C3A awaits renewed independent review;
 Mihomo remains blocked.
+
+
+## Latest authoritative handoff — Phase 2C3B Xray runtime provider wiring
+
+The Phase 2C3A ADR was manually accepted through PR #113 and is effective
+from main `3943bfdb149bfdfa204ad627d11e37c1ce161abe`. This slice wires only
+`GATEWAY_PROVIDER=xray_file` through the existing provider contract. The
+concrete runtime uses Marzban's authenticated `PUT /api/core/config` for
+the exact installed candidate, authenticated `GET /api/core` plus TCP
+`marzban:8443` for health, and the existing XrayFileProvider backup,
+rollback, projection, writer-baseline, and APPLIED/DEGRADED semantics.
+
+Central `MARZBAN_CA_CERT_PATH` is shared configuration for accounting and
+Xray control TLS only; providers do not share clients, bearer tokens,
+Sessions, or mutable operation state. CA loading and accounting client
+creation are lazy, while registry construction remains zero external I/O.
+Fresh internal TLS generation now includes `DNS:marzban`,
+`DNS:localhost`, and `IP:127.0.0.1`; an existing certificate without
+`DNS:marzban`, or an incomplete pair, fails closed with no automatic
+rotation. The default provider selections remain mock/noop, Mihomo remains
+architecture-blocked, and no real Marzban operation or deployment is part of
+this slice.
