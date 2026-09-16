@@ -358,13 +358,31 @@ responsibility:
   verifies the checkout's HEAD against `PINNED_COMMIT`, runs
   `verify_local_source_tree.py`, applies this patch via
   `apply_patch.sh --check`/`apply_patch.sh`, verifies the patch result
-  actually exposes `routing_principal`, then `docker build`s the
-  unmodified upstream `Dockerfile` with five immutable OCI labels
-  attached (`org.lingsway.marzban.upstream-commit`, `-upstream-tag`,
+  actually exposes `routing_principal`, applies
+  `0002-pin-build-setuptools.patch` (see below), then `docker build`s the
+  resulting `Dockerfile` with five immutable OCI labels attached
+  (`org.lingsway.marzban.upstream-commit`, `-upstream-tag`,
   `-routing-principal-patch`, `-patch-id`, `-contract-version` -- see
   `pinned_upstream_manifest.REQUIRED_IMAGE_LABELS`). Default tag:
   `lingsway/marzban:v0.8.4-routing-principal`. No Marzban source is
   committed to Git by this process.
+- `0002-pin-build-setuptools.patch` -- a build-environment
+  *compatibility* patch, **not** part of the routing_principal/ADR-016
+  contract and not covered by `apply_patch.sh` or its contract tests
+  (`build_patched_image.sh` applies it directly via `git apply`, since
+  `apply_patch.sh` is hardcoded to `0001`'s own target file). The pinned
+  commit's `Dockerfile` runs `pip install --upgrade pip setuptools` with
+  no version pin, which resolves whatever setuptools is newest on the
+  build day; setuptools `>=81` dropped `pkg_resources`, which the pinned
+  `apscheduler==3.9.1.post1` dependency still imports unconditionally
+  (via `marzban-cli`'s own import chain), breaking the final
+  `marzban-cli completion install --shell bash` build step with
+  `ModuleNotFoundError: No module named 'pkg_resources'` -- confirmed by
+  reproducing the failure in CI before this patch existed. The patch
+  pins that one `RUN` step to `setuptools<81`. See
+  `tests/test_build_compat_patch.py` for its fail-closed drift-guard
+  coverage (same pattern as `test_patch_drift_guard.py`, against the
+  real fetched pinned `Dockerfile`, not a hand-written fixture).
 - `../verify_patched_image.py <image-ref>` -- `docker inspect`s a
   candidate image's labels and fails closed (non-zero exit) unless every
   one of `REQUIRED_IMAGE_LABELS` is present with its exact value. Called

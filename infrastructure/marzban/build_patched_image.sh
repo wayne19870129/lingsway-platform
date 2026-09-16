@@ -98,6 +98,25 @@ grep -q 'routing_principal: str = Field(default="", exclude=True)' "${USER_PY}" 
   exit 1
 }
 
+# Build-environment compatibility patch: unrelated to the routing_principal
+# contract, applied the same fail-closed way. The pinned commit's own
+# Dockerfile does `pip install --upgrade pip setuptools` with no version
+# pin, which resolves whatever setuptools is newest on the day this image
+# is built; setuptools >=81 dropped `pkg_resources`, which the pinned
+# apscheduler==3.9.1.post1 dependency (via marzban-cli's own import chain)
+# still imports unconditionally, breaking the build. Pinning
+# `setuptools<81` for this one RUN step is the minimal fix; see
+# 0002-pin-build-setuptools.patch's own header for detail. This does not
+# touch routing_principal/ADR-016 in any way and is not part of that
+# contract or its tests.
+BUILD_COMPAT_PATCH="${PATCHES_DIR}/0002-pin-build-setuptools.patch"
+echo "[build_patched_image] applying build-environment compatibility patch (unrelated to routing_principal)"
+if ! (cd "${SRC_DIR}" && git apply --check "${BUILD_COMPAT_PATCH}"); then
+  echo "FAIL-CLOSED: ${BUILD_COMPAT_PATCH} does not apply cleanly to the pinned Dockerfile (upstream drift)." >&2
+  exit 1
+fi
+(cd "${SRC_DIR}" && git apply "${BUILD_COMPAT_PATCH}")
+
 echo "[build_patched_image] step 8-9/10: building patched image ${IMAGE_TAG} with immutable identity labels"
 docker build \
   --tag "${IMAGE_TAG}" \
