@@ -69,7 +69,7 @@ resolve_accounting_provider() {
   # container will use -- not a re-derivation of it. Requires backend-api
   # already built (main() does `compose build backend-api` earlier).
   local raw_output provider
-  raw_output="$(compose run --rm --no-deps backend-api python -c '
+  raw_output="$(compose run -T --rm --no-deps backend-api python -c '
 from backend.app.core.config import Settings
 
 provider = Settings.from_env().accounting_provider

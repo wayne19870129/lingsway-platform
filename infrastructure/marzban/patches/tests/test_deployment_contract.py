@@ -190,7 +190,8 @@ def test_probe_uses_settings_from_env_and_exact_sentinel_contract() -> None:
     assert _SENTINEL_PREFIX + "marzban" in script
     assert "tail -n 1" not in resolver
     assert "config --format json" not in resolver
-    assert "compose run --rm --no-deps backend-api" in resolver
+    assert "compose run -T --rm --no-deps backend-api" in resolver
+    assert "compose run --rm --no-deps backend-api" not in resolver
 
 
 def test_real_marzban_selects_patched_image_and_mock_does_not_override() -> None:
