@@ -1,6 +1,6 @@
 # ADR-021 — Xray runtime control boundary
 
-- Status: Proposed (Accepted candidate; not formally accepted before human merge)
+- Status: Accepted
 - Date: 2026-09-16
 - Decision owners: repository owner / human approval
 - Scope: TASK-T16 Phase 2C3A
@@ -252,7 +252,7 @@ reload, Docker call, or deployment-side effect.
 
 The TLS trust configuration is shared by all Lingsway clients that access
 the same Marzban internal HTTPS endpoint. This includes the existing
-`MarzbanAccountingProvider` and the future Xray Marzban-control helper.
+`MarzbanAccountingProvider` and the concrete Xray Marzban-control helper.
 Provider categories remain independent: neither provider depends on the other,
 and they do not share a concrete client instance or token cache. They share
 only central Settings-derived connection and TLS configuration. Before
@@ -262,8 +262,8 @@ same explicit `ssl.SSLContext` (or strictly equivalent httpx trust
 configuration) when `MARZBAN_VERIFY_TLS=true`. A split-brain state in
 which gateway TLS succeeds but accounting TLS fails is not permitted.
 
-The current deployment certificate generator creates a self-signed pair
-with SAN `DNS:localhost,IP:127.0.0.1`. That localhost-only pair is not
+Before Phase 2C3B, the deployment certificate generator created a self-signed
+pair with SAN `DNS:localhost,IP:127.0.0.1`. That localhost-only pair is not
 valid for `https://marzban:8000`. An existing certificate must never be
 silently overwritten or replaced behind a live process. Before a future
 implementation/deployment uses internal TLS, it must inspect the existing
@@ -279,7 +279,7 @@ must generate a new pair that already satisfies the SAN contract.
 
 
 
-A later implementation slice may allow `GATEWAY_PROVIDER=xray_file` while
+The Phase 2C3B implementation allows `GATEWAY_PROVIDER=xray_file` while
 leaving the default `GATEWAY_PROVIDER=mock` unchanged. Even with
 `ACCOUNTING_PROVIDER=mock`, a real gateway selection must fail closed when
 the required Marzban runtime-control credentials are missing or invalid,
@@ -317,11 +317,10 @@ existing gateway contract. It also makes the current `systemctl` default
 an explicit topology mismatch rather than an implicitly accepted production
 path.
 
-Before the later registry implementation PR, that PR must add contract tests
-for exact-payload activation, authenticated operation-time behavior,
-Marzban acceptance, internal-DNS health, rollback through the same endpoint,
-and fail-closed handling. This ADR itself performs none of those runtime
-operations.
+The Phase 2C3B implementation adds contract tests for exact-payload
+activation, authenticated operation-time behavior, Marzban acceptance,
+internal-DNS health, rollback through the same endpoint, and fail-closed
+handling. This ADR itself performs none of those runtime operations.
 
 Mihomo is deliberately not addressed here. Its desired-state boundary and
 compensation/concurrency semantics require a dedicated ADR before any real

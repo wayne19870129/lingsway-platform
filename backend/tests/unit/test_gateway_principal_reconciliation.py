@@ -289,3 +289,28 @@ def test_missing_subscription_is_fail_closed() -> None:
         reconciliation._active_snapshot(cast(Session, session))
 
     assert raised.value.reason_code == "subscription_missing"
+
+def test_marzban_from_settings_passes_custom_ca_cert_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class _StubProvider:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(reconciliation, "MarzbanAccountingProvider", _StubProvider)
+    settings = SimpleNamespace(
+        marzban_base_url="https://marzban.internal.invalid",
+        marzban_admin_username="admin",
+        marzban_admin_password="password",
+        marzban_default_protocol="vless",
+        marzban_default_inbounds_json="{}",
+        marzban_verify_tls=True,
+        marzban_ca_cert_path="/custom/ca.pem",
+    )
+
+    result = reconciliation._marzban_from_settings(cast(Any, settings))
+
+    assert isinstance(result, _StubProvider)
+    assert captured["ca_cert_path"] == "/custom/ca.pem"

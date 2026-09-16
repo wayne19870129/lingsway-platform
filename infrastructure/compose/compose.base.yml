@@ -76,6 +76,7 @@ services:
       MIHOMO_PROVIDER_DIR: /app/data/mihomo/providers
     volumes:
       - ../../data/mihomo:/app/data/mihomo
+      - ../../data/marzban/internal.crt:/app/data/marzban/internal.crt:ro
     networks:
       - backend_net
       - db_net

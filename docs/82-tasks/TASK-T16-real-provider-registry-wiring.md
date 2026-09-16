@@ -2510,3 +2510,99 @@ were corrected: `xray run -test` and `xray_config.json`.
 Phase status remains unchanged: Phase 2B COMPLETE; Phase 2C ACTIVE; Phase 2C1
 COMPLETE; Phase 2C2 COMPLETE; Phase 2C3A awaits renewed independent review;
 Mihomo remains blocked.
+
+
+## Latest authoritative handoff — Phase 2C3B Xray runtime provider wiring
+
+This section records the implementation slice after PR #113 was manually
+merged at main commit
+`3943bfdb149bfdfa204ad627d11e37c1ce161abe`. The authorized vehicle is
+branch `task/t16-2c3b-xray-runtime-provider-wiring`; the default provider
+selections remain mock/noop until an operator explicitly selects a real
+provider.
+
+Phase 2C3B implements only the Xray gateway side of the accepted ADR-021
+boundary. `GATEWAY_PROVIDER=xray_file` now assembles the existing
+`XrayFileProvider` with the canonical static skeleton, Settings-derived
+deployment values, the shared persistent config/baseline paths, and a
+concrete `MarzbanXrayRuntime`. The runtime activates the exact installed
+candidate through authenticated `PUT /api/core/config`, validates the
+returned JSON against that candidate, checks authenticated `GET /api/core`
+for `started=true`, and checks TCP `marzban:8443`. It never invokes
+systemd, Docker, a restart endpoint, or a host-local Xray control path.
+
+`MARZBAN_CA_CERT_PATH` is the central explicit trust configuration for both
+Marzban accounting and Xray control. CA loading and owned accounting-client
+creation are lazy; registry construction performs no certificate read,
+network request, socket probe, subprocess, config write, or database access.
+Accounting and gateway providers remain independent and share no client,
+token, Session, or mutable operation context. Xray control bearer tokens are
+operation-local and are not retained by the runtime.
+
+Fresh internal certificates now include `DNS:marzban`,
+`DNS:localhost`, and `IP:127.0.0.1`. Existing half-pairs and existing
+certificates without `DNS:marzban` fail closed; no automatic rotation is
+performed. Mihomo remains blocked and is not part of this slice. No schema,
+workflow, AGENTS.md, deployment, credential, DNS, or real Marzban side
+effect is included.
+
+## Latest authoritative handoff — PR #114 reconciliation architecture gate
+
+Review of exact head `d8dbe7f1bb1bdef64661ced733c8e4bbb2c6fb3a`
+(canonical review `5221920838`) found five implementation blockers and one
+minor lifecycle gap. This remediation slice addresses only the five
+provider/deployment blockers and the lazy-client lifecycle guard. It also
+adds the proposed ADR `docs/80-decisions/ADR-022-gateway-runtime-reconciliation.md`
+for the remaining gateway DB/runtime reconciliation architecture blocker.
+
+Major 2 is closed by mounting only
+`../../data/marzban/internal.crt:/app/data/marzban/internal.crt:ro` into the
+scheduler. Major 3 is closed by mapping local TLS trust construction failures
+before HTTP dispatch to the typed create outcome
+`AccountingCreateEffect.NO_SIDE_EFFECT`; health remains fail-closed. Major 4
+is closed by requiring a valid, credential-free, fragment-free HTTPS
+`MARZBAN_BASE_URL` for production Marzban selections. Major 5 is closed by an
+exact SAN-token migration gate; `DNS:marzban.example.com`,
+`DNS:notmarzban`, and localhost-only SANs do not satisfy `DNS:marzban`. The
+lazy accounting provider now becomes permanently closed before it can create
+a client after `close()`, while injected-client ownership remains unchanged.
+
+ADR-022 is `Proposed`, not `Accepted`, and is documentation-only in this
+slice. It audits every discovered `GatewayRouteBinding` writer, compares
+apply-before-commit plus explicit compensation with commit-first durable
+reconciliation, keeps the named lock across mutation/apply/commit/rollback/
+compensation, and explicitly fails closed to DEGRADED/manual intervention if
+compensation cannot restore the previous desired projection. No domain,
+`providers/base.py`, provisioning saga, or `release_egress()` contract was
+implemented here.
+
+Phase status: Phase 2B COMPLETE; Phase 2C ACTIVE; Phase 2C1 COMPLETE; Phase
+2C2 COMPLETE; Phase 2C3A COMPLETE; Phase 2C3B runtime wiring remains present
+but production enablement is gated by ADR-022 and awaits renewed independent
+exact-head review. Mihomo remains separately architecture-blocked.
+
+## Latest authoritative handoff — PR #114 ADR-022 crash-consistency review
+
+Reviewed exact head: `c18231e13566e82248533ca53c5b611be941a8c7`; canonical review: `5223152268`. PR #114 remains OPEN and unmerged on `task/t16-2c3b-xray-runtime-provider-wiring`.
+
+Renewed review found no Critical, and three Majors: (1) the prior apply-before-commit wording was not process-crash safe because the current provider may persist APPLIED before DB commit; (2) the projection-input audit was too narrow and omitted EgressEndpoint, EgressBinding, credential/Secret values, Reality identity, and deployment Settings writers; (3) reconciliation's Marzban provider construction omitted `marzban_ca_cert_path`. Two Minors were also identified: lazy owned-client init/close serialization and final PR metadata evidence.
+
+This follow-up keeps ADR-022 `Proposed`, compares durable staged apply/finalization with commit-first durable reconciliation, and proposes the latter for crash consistency. It defines the baseline as projection evidence only, a fresh-DB recovery authority, an A-H crash matrix, a projection-wide writer inventory, and the existing gateway named lock as the single-writer boundary. No domain/base reconciliation contract, schema, durable job, or reconciliation implementation is added here. The code changes only pass the configured CA path into manual reconciliation and serialize lazy Marzban client initialization/close; tests cover both.
+
+Phase status: Phase 2B COMPLETE; Phase 2C ACTIVE; Phase 2C1 COMPLETE; Phase 2C2 COMPLETE; Phase 2C3A COMPLETE; Phase 2C3B remains ACTIVE/GATED by ADR-022. Mihomo remains separately blocked.
+
+## Latest authoritative handoff — PR #114 ADR-022 Direction B wording review
+
+Reviewed exact head: `aadd9670242e3806f7961ab10f82cd5b2071501e`; canonical review: `5223626712`. PR #114 remains OPEN and unmerged on `task/t16-2c3b-xray-runtime-provider-wiring`.
+
+This docs-only follow-up addresses three Majors: ADR-022 no longer contains an old apply-before-commit normative writer contract; it explicitly partially supersedes ADR-017 only for real gateway reconciliation transaction/finalization ordering; and it distinguishes prospective Phase A endpoint/binding/Secret data from live projection mutation. Direction B is now a concrete commit-first state machine: durable DB B plus pending first, runtime render/apply/verify, then durable finalization and only then customer-facing success. Retryable gateway failure keeps DB B authoritative and does not automatically disable the accounting user. NOTIFY occurs after releasing the projection lock.
+
+ADR-022 remains `Proposed`. No implementation, domain/base change, schema, workflow, provider, deployment, Webshare, or Mihomo change is included. Phase 2C3B remains ACTIVE/GATED by ADR-022.
+
+## Latest authoritative handoff — PR #114 production Xray hard gate
+
+Reviewed exact head: `6f0bde97f5e4e995c55410110e6dc18cd3f06c60`; canonical review: `5223833065`. ADR-022's architecture contract passed independent review, but its durable reconciliation implementation is intentionally deferred to Phase 2C3C.
+
+This follow-up adds one production safety boundary: Settings/runtime safety validation rejects exactly `APP_ENV=production` with `GATEWAY_PROVIDER=xray_file`, before provider construction or external I/O, with a stable secret-safe error. Production `ACCOUNTING_PROVIDER=marzban` with `GATEWAY_PROVIDER=mock` remains allowed. Development/test `xray_file` registry and runtime contract construction remains allowed and zero-I/O.
+
+PR #114 therefore completes the Xray runtime/control plumbing slice but remains production-gated until a separately reviewed Phase 2C3C implements ADR-022 durable reconciliation. No reconciliation table, schema, worker, service ordering, compensation, Webshare, or Mihomo implementation is included. Phase 2C3B runtime plumbing is COMPLETE but production-gated; ADR-022 remains Proposed.

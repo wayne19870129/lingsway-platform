@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import TracebackType
 
 from backend.app.core.config import Settings
@@ -25,6 +26,11 @@ from backend.app.providers.egress.mock import MockEgressProvider
 from backend.app.providers.email.noop import NoopEmailProvider
 from backend.app.providers.forwarder.mock import MockForwarderProvider
 from backend.app.providers.gateway.mock import MockGatewayProvider
+from backend.app.providers.gateway.xray_composition import (
+    XrayDeploymentConfig,
+    XrayStaticSkeleton,
+)
+from backend.app.providers.gateway.xray_file import MarzbanXrayRuntime, XrayFileProvider
 from backend.app.providers.notify.noop import NoopNotifyProvider
 from backend.app.providers.payment.mock import MockPaymentProvider
 from backend.app.providers.storage.mock import MockBlobStorage
@@ -157,7 +163,7 @@ class ProviderRegistry:
 
 def build_registry(settings: Settings) -> ProviderRegistry:
     """Build all providers without external I/O or hidden provider discovery."""
-    if settings.accounting_provider == "marzban":
+    if settings.accounting_provider == "marzban" or settings.gateway_provider == "xray_file":
         # Settings.from_env() already validates this, but callers
         # constructing Settings directly need the same fail-closed gate.
         settings.validate_runtime_safety()
@@ -166,7 +172,7 @@ def build_registry(settings: Settings) -> ProviderRegistry:
         raise _unsupported("EGRESS_PROVIDER", settings.egress_provider)
     if settings.accounting_provider not in {"mock", "marzban"}:
         raise _unsupported("ACCOUNTING_PROVIDER", settings.accounting_provider)
-    if settings.gateway_provider != "mock":
+    if settings.gateway_provider not in {"mock", "xray_file"}:
         raise _unsupported("GATEWAY_PROVIDER", settings.gateway_provider)
     if settings.forwarder_provider != "mock":
         raise _unsupported("FORWARDER_PROVIDER", settings.forwarder_provider)
@@ -194,12 +200,31 @@ def build_registry(settings: Settings) -> ProviderRegistry:
             default_protocol=settings.marzban_default_protocol,
             default_inbounds_json=settings.marzban_default_inbounds_json,
             verify_tls=settings.marzban_verify_tls,
+            ca_cert_path=settings.marzban_ca_cert_path,
+        )
+
+    if settings.gateway_provider == "mock":
+        gateway: GatewayProvider = MockGatewayProvider()
+    else:
+        runtime = MarzbanXrayRuntime(
+            config_path=Path(settings.xray_config_path),
+            backup_dir=Path(settings.xray_backup_dir),
+            control_base_url=settings.marzban_base_url,
+            _admin_username=settings.marzban_admin_username,
+            _admin_password=settings.marzban_admin_password,
+            verify_tls=settings.marzban_verify_tls,
+            ca_cert_path=settings.marzban_ca_cert_path,
+        )
+        gateway = XrayFileProvider(
+            runtime,
+            static_skeleton=XrayStaticSkeleton.canonical(),
+            deployment_config=XrayDeploymentConfig.from_settings(settings),
         )
 
     return ProviderRegistry(
         egress=MockEgressProvider(),
         accounting=accounting,
-        gateway=MockGatewayProvider(),
+        gateway=gateway,
         forwarder=MockForwarderProvider(),
         payment=MockPaymentProvider(),
         notify=NoopNotifyProvider(),

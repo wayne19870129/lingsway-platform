@@ -13,8 +13,11 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
+from threading import Barrier
 from typing import Any
 
 import httpx
@@ -24,6 +27,7 @@ from backend.app.providers.accounting.marzban import (
     MarzbanAccountingProvider,
     MarzbanApiError,
     MarzbanContractError,
+    MarzbanProviderClosedError,
 )
 from backend.app.providers.base import AccountingCreateEffect, AccountingCreateUserError
 
@@ -191,6 +195,24 @@ def test_health_check_malformed_auth_response_is_false() -> None:
         assert [request.url.path for request in requests] == ["/api/admin/token"]
     finally:
         provider.close()
+
+
+def test_missing_ca_is_no_side_effect_for_create_user(tmp_path: Path) -> None:
+    provider = MarzbanAccountingProvider(
+        base_url=_BASE_URL,
+        admin_username=_ADMIN_USERNAME,
+        admin_password=_ADMIN_PASSWORD,
+        default_protocol="vless",
+        default_inbounds_json=_INBOUNDS_JSON,
+        ca_cert_path=str(tmp_path / "missing-internal.crt"),
+    )
+
+    with pytest.raises(AccountingCreateUserError) as excinfo:
+        provider.create_user("alice", 1000, None)
+
+    assert excinfo.value.effect is AccountingCreateEffect.NO_SIDE_EFFECT
+    assert "no user was created" in str(excinfo.value)
+    provider.close()
 
 
 # ---------------------------------------------------------------------------
@@ -780,14 +802,62 @@ def test_401_error_message_never_exposes_bearer_token() -> None:
     assert "token-2" not in str(excinfo.value)
 
 
+
+def test_owned_client_loads_explicit_ca_only_on_first_operation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[object, float]] = []
+
+    class _OwnedClient:
+        def __init__(self, *, verify: object, timeout: float) -> None:
+            calls.append((verify, timeout))
+
+        def post(self, *_args: object, **_kwargs: object) -> httpx.Response:
+            return _token_response()
+
+        def close(self) -> None:
+            return None
+
+    sentinel_context = object()
+
+    def build_tls(*, verify_tls: bool, ca_cert_path: str) -> object:
+        calls.append((ca_cert_path, float(verify_tls)))
+        return sentinel_context
+
+    monkeypatch.setattr(
+        "backend.app.providers.accounting.marzban.build_marzban_tls_verify",
+        build_tls,
+    )
+    monkeypatch.setattr(
+        "backend.app.providers.accounting.marzban.httpx.Client",
+        _OwnedClient,
+    )
+    provider = MarzbanAccountingProvider(
+        base_url=_BASE_URL,
+        admin_username=_ADMIN_USERNAME,
+        admin_password=_ADMIN_PASSWORD,
+        default_protocol="vless",
+        default_inbounds_json=_INBOUNDS_JSON,
+        ca_cert_path="/explicit/internal.crt",
+        timeout_seconds=7.0,
+    )
+
+    assert calls == []
+    assert provider.health_check() is True
+
+    assert calls == [
+        ("/explicit/internal.crt", 1.0),
+        (sentinel_context, 7.0),
+    ]
+    provider.close()
+
 # ---------------------------------------------------------------------------
 # TASK-T16 Phase 2B8: provider resource lifecycle (_owns_client / close()).
 # ---------------------------------------------------------------------------
 
 
-def test_close_closes_a_self_created_client() -> None:
-    """When no client is injected, MarzbanAccountingProvider builds its
-    own httpx.Client -- close() must actually close that owned client."""
+def test_close_before_lazy_client_creation_is_safe() -> None:
+    """No client or CA file is touched by construction or early close."""
     provider = MarzbanAccountingProvider(
         base_url=_BASE_URL,
         admin_username=_ADMIN_USERNAME,
@@ -796,12 +866,15 @@ def test_close_closes_a_self_created_client() -> None:
         default_inbounds_json=_INBOUNDS_JSON,
     )
     assert provider._owns_client is True  # noqa: SLF001
-    client = provider._client  # noqa: SLF001
-    assert client.is_closed is False
+    assert provider._client is None  # noqa: SLF001
 
     provider.close()
+    provider.close()
 
-    assert client.is_closed is True
+    assert provider._client is None  # noqa: SLF001
+    with pytest.raises(MarzbanProviderClosedError, match="closed"):
+        provider._client_for_operation()  # noqa: SLF001
+    assert provider._client is None  # noqa: SLF001
 
 
 def test_close_never_closes_an_injected_client() -> None:
@@ -858,9 +931,9 @@ def test_close_permanently_surfaces_failure_when_the_owned_transport_close_raise
     the transport's own ``close()``, so once a real close attempt has
     raised, the client is already marked closed and a later
     ``Client.close()`` call would silently no-op instead of retrying.
-    ``MarzbanAccountingProvider.close()`` never had its own ``_closed``
-    flag, but it still delegated straight to ``self._client.close()`` --
-    the same false-success path exists inside httpx itself."""
+    ``MarzbanAccountingProvider.close()`` also keeps a permanent closed
+    state after the first close attempt, while preserving the provider's
+    existing permanent-failure behavior."""
     transport = _FlakyTransport(fail_times=1)
     provider = MarzbanAccountingProvider(
         base_url=_BASE_URL,
@@ -886,3 +959,42 @@ def test_close_permanently_surfaces_failure_when_the_owned_transport_close_raise
     assert transport.close_calls == 1  # never actually retried -- httpx would just no-op
 
     assert provider._client.is_closed is True  # noqa: SLF001
+
+def test_concurrent_lazy_client_creation_is_single_owned_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first concurrent operation creates exactly one owned client."""
+
+    created: list[object] = []
+    start = Barrier(2)
+
+    class _Client:
+        def close(self) -> None:
+            return None
+
+    def client_factory(**_kwargs: Any) -> _Client:
+        client = _Client()
+        created.append(client)
+        return client
+
+    monkeypatch.setattr(httpx, "Client", client_factory)
+    provider = MarzbanAccountingProvider(
+        base_url=_BASE_URL,
+        admin_username=_ADMIN_USERNAME,
+        admin_password=_ADMIN_PASSWORD,
+        default_protocol="vless",
+        default_inbounds_json=_INBOUNDS_JSON,
+        verify_tls=False,
+    )
+
+    def first_operation() -> object:
+        start.wait(timeout=5)
+        return provider._client_for_operation()  # noqa: SLF001
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        clients = list(executor.map(lambda _item: first_operation(), range(2)))
+
+    assert len(created) == 1
+    assert clients[0] is created[0]
+    assert clients[1] is created[0]
+    provider.close()

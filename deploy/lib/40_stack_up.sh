@@ -41,18 +41,24 @@ PY
 }
 
 ensure_marzban_internal_tls() {
-  local marzban_dir="$1" certificate="$marzban_dir/internal.crt" key="$marzban_dir/internal.key"
+  local marzban_dir="$1"
+  local certificate="$marzban_dir/internal.crt" key="$marzban_dir/internal.key"
   require_cmd openssl
   if [[ ! -e "$certificate" && ! -e "$key" ]]; then
     openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 3650 \
       -subj '/CN=localhost' \
-      -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' \
+      -addext 'subjectAltName=DNS:marzban,DNS:localhost,IP:127.0.0.1' \
       -keyout "$key" -out "$certificate" >/dev/null 2>&1
     chmod 600 "$certificate" "$key"
     return
   fi
   [[ -f "$certificate" && -f "$key" ]] || \
     die 'Marzban internal TLS files are incomplete; refusing to overwrite an existing half-pair'
+  local san required_san_re='(^|[[:space:],])DNS:marzban([[:space:],]|$)'
+  san="$(openssl x509 -in "$certificate" -noout -ext subjectAltName 2>/dev/null)" || \
+    die 'Marzban internal TLS certificate is unreadable; refusing deployment'
+  [[ "$san" =~ $required_san_re ]] || \
+    die 'MARZBAN_INTERNAL_TLS_MIGRATION_REQUIRED'
 }
 
 resolve_accounting_provider() {
