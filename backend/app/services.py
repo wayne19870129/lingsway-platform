@@ -177,6 +177,7 @@ def _confirm_paid_purchase_durable(
         raise RuntimeError("Provisioning subscription was not created")
     with state.gateway_route_binding_lock():
         first_commit_attempted = False
+        precommit_handler_started = False
         try:
             assert_no_unresolved_gateway_mutation(db)
             subscription.accounting_user_id = checkpoint.account_user.username
@@ -225,6 +226,7 @@ def _confirm_paid_purchase_durable(
                     return ProvisionOutcome(checkpoint.run_id, ProvisionStatus.RUNNING)
                 if outcome is FirstCommitOutcome.ABSENT:
                     db.rollback()
+                    precommit_handler_started = True
                     return _handle_pre_gateway_failure(
                         command,
                         order_state,
@@ -242,12 +244,13 @@ def _confirm_paid_purchase_durable(
                 )
             result = reconcile_gateway_job_in_session(db, job.id, registry)
         except Exception as error:
-            if first_commit_attempted:
+            if first_commit_attempted or precommit_handler_started:
                 raise
             try:
                 db.rollback()
             except Exception:
                 pass
+            precommit_handler_started = True
             return _handle_pre_gateway_failure(
                 command, order_state, provisioning, checkpoint, request, error
             )
