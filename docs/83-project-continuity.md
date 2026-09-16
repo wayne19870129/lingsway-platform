@@ -731,3 +731,107 @@ The Compose portability Major is now closed without changing provider architectu
 The mock path leaves the upstream Marzban default unchanged. The effective `marzban` path still selects the patched image (or verifies an operator-selected `MARZBAN_IMAGE`) before `compose up`; no registry/provider/network/DB/write/Xray side effect is performed by the probe.
 
 Evidence on this exact head: CI run #366 passed all jobs; the Marzban contract suite passed 69 tests; Security run #370 passed; Risk classification run #263 passed. PR #112 remains OPEN and unmerged, awaiting renewed independent exact-head review. Phase 2B remains COMPLETE; Phase 2C is ACTIVE; Phase 2C1 is COMPLETE; Phase 2C2 awaits review.
+
+
+## Latest authoritative handoff — Phase 2C3A Xray runtime-control ADR
+
+Authoritative base `main`: `99d299b1df1172583d221c0e19f6c421480c2c8c` (PR #112
+merged). This ADR-only vehicle is PR `TASK-T16 Phase 2C: define Xray runtime
+control boundary` on branch
+`task/t16-2c3a-xray-runtime-control-adr`. Codex / GPT-5.6 Luna High is the
+sole implementation writer; Claude Code Web is fully stopped. The User retains
+manual merge and production approval. No production code, deployment script,
+infrastructure file, test, workflow, AGENTS.md, Issue, or schema was changed.
+
+Phase 2C3's Xray and Mihomo audit found two independent blockers. This slice
+only resolves the Xray runtime-control architecture question in
+`docs/80-decisions/ADR-021-xray-runtime-control-boundary.md`; it does not
+wire a real provider and does not resolve Mihomo.
+
+ADR-021 is a Proposed / Accepted-candidate decision, not formally Accepted
+until human merge. It records the verified current topology: backend-api is a
+normal Python container that may run the pinned Xray binary for candidate
+`xray run -test`, while the Marzban container owns the running Xray process
+and mounts the same persistent `xray_config.json`. It rejects
+`systemctl reload xray` from backend-api, Docker socket/API, privileged or
+host-PID access, application-driven Compose/Docker restart, and any arbitrary
+host command.
+
+The selected future activation boundary is the authenticated Marzban
+`PUT /api/core/config` endpoint. The exact upstream Marzban v0.8.4 source
+at commit
+`7f396db3e703d71a28060bc9ce4a532ec64cb1f4` was rechecked in
+`app/routers/core.py`: `POST /api/core/restart` starts from Marzban's
+in-memory `xray.config` and cannot prove activation of a file externally
+changed by Lingsway; `PUT /api/core/config` validates the payload, replaces
+in-memory configuration, writes `XRAY_JSON`, includes DB users, restarts the
+core, and returns the submitted payload. The next implementation must send
+the exact candidate already validated and atomically installed by Lingsway,
+verify API acceptance, verify Marzban core/API health plus backend-network
+`marzban:8443`, verify the repo-owned projection, and persist APPLIED only
+after all checks. Failure uses the existing exact-backup restore and the same
+PUT activation path; inability to prove rollback remains DEGRADED/fail-closed.
+
+Lingsway retains DB desired-state, credential-resolution, full composition,
+candidate validation, shared-file projection, writer baseline, backup,
+rollback, drift, and post-activation verification ownership. Marzban retains
+runtime process lifecycle and dynamic user membership. `include_db_users()`
+does not transfer repo desired-state ownership, and `runtime.current()` is
+not a desired-state source. Process-lifetime provider configuration remains process-stable and immutable after construction. Concrete Marzban clients may privately retain Settings-derived secret fields such as the admin password only under the strict redaction contract defined by ADR-021. No Session, operation resolver, mutable operation context, or bearer token may be retained.
+No generic control-plane framework or new generic gateway DTO is introduced.
+
+Mihomo remains blocked under `MIHOMO_RENDER_BOUNDARY_BLOCKER`, plus two
+additional blockers recorded for its dedicated ADR: downstream forwarder
+compensation after a later saga step fails, and serialization/freshness/
+commit-order rules for its global full-config writer. No Mihomo implementation
+or registry wiring is part of this slice.
+
+Status: Phase 2B COMPLETE; Phase 2C ACTIVE; Phase 2C1 COMPLETE; Phase 2C2
+COMPLETE; Phase 2C3A (Xray runtime-control ADR) ACTIVE and awaiting
+independent exact-head review. Phase 2C3B Xray registry implementation is
+gated on human acceptance of ADR-021. Phase 2C4A/2C4B Mihomo ADR and
+implementation remain pending.
+
+
+## Review follow-up — Phase 2C3A credential lifetime and verified internal TLS
+
+The review of `61e4b75505ca98472acf2f974e24b25e9a54ac73` identified and this
+follow-up closes two documentation Majors without changing implementation.
+
+The concrete Marzban Xray-control helper may retain process-stable Settings-derived
+`base/control URL`, admin username, admin password, and TLS trust configuration
+as private fields. This follows the existing MarzbanAccountingProvider safety
+pattern: zero-network construction, custom safe representation, registry
+lifecycle ownership, and strict redaction. The admin password must never appear
+in repr, logs, exceptions, audit, metrics, PR/docs text, or plaintext tests.
+Authentication is lazy; a bearer token is operation-local, used for the
+activation/health operation, then discarded. No hidden global environment read,
+Session/resolver capture, or generic credential abstraction is introduced.
+
+The `MARZBAN_CA_CERT_PATH` trust configuration is shared by all Lingsway
+clients accessing the same Marzban internal HTTPS endpoint, including the
+existing accounting provider and the future Xray control helper. Provider
+categories remain independent and share no concrete provider, client
+instance, or token cache; they share only central Settings-derived
+connection/TLS configuration.
+
+
+The application-time control URL is `https://marzban:8000` on backend_net.
+This is distinct from the Xray health target `marzban:8443`. Verified internal
+TLS is required for the normal production architecture. The certificate must
+contain `DNS:marzban`, `DNS:localhost`, and `IP:127.0.0.1`; the backend uses
+the explicitly configured mounted trust anchor
+`/app/data/marzban/internal.crt`, with a central `MARZBAN_CA_CERT_PATH`
+setting permitted for the next implementation. `verify=False` is not the
+production default.
+
+The existing localhost-only certificate must not be silently overwritten. A
+future implementation/deployment must inspect existing SANs and fail closed
+with `MARZBAN_INTERNAL_TLS_MIGRATION_REQUIRED` when `DNS:marzban` is absent.
+A separately authorized certificate rotation step is required. Fresh VPS
+generation must create the complete SAN set. The prior Markdown fence typos
+were corrected: `xray run -test` and `xray_config.json`.
+
+Phase status remains unchanged: Phase 2B COMPLETE; Phase 2C ACTIVE; Phase 2C1
+COMPLETE; Phase 2C2 COMPLETE; Phase 2C3A awaits renewed independent review;
+Mihomo remains blocked.
