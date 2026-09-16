@@ -46,13 +46,18 @@ ensure_marzban_internal_tls() {
   if [[ ! -e "$certificate" && ! -e "$key" ]]; then
     openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 3650 \
       -subj '/CN=localhost' \
-      -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' \
+      -addext 'subjectAltName=DNS:marzban,DNS:localhost,IP:127.0.0.1' \
       -keyout "$key" -out "$certificate" >/dev/null 2>&1
     chmod 600 "$certificate" "$key"
     return
   fi
   [[ -f "$certificate" && -f "$key" ]] || \
     die 'Marzban internal TLS files are incomplete; refusing to overwrite an existing half-pair'
+  local san
+  san="$(openssl x509 -in "$certificate" -noout -ext subjectAltName 2>/dev/null)" || \
+    die 'Marzban internal TLS certificate is unreadable; refusing deployment'
+  [[ "$san" == *'DNS:marzban'* ]] || \
+    die 'MARZBAN_INTERNAL_TLS_MIGRATION_REQUIRED' 
 }
 
 resolve_accounting_provider() {
