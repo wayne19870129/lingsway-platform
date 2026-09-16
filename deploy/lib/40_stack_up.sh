@@ -119,7 +119,7 @@ elif isinstance(value, str) and value in {"mock", "marzban"}:
 else:
     raise SystemExit(1)
 ' <<<"$compose_json"
-  )" || die 'effective ACCOUNTING_PROVIDER is missing, malformed, or unsupported; refusing deployment'
+  )" || die 'effective ACCOUNTING_PROVIDER is not exactly "mock" or "marzban"; refusing deployment'
   printf '%s' "$provider"
 }
 
@@ -270,4 +270,6 @@ main() {
   log 'Compose stack started with the configured profiles'
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main "$@"
+fi
