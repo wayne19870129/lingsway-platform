@@ -1,9 +1,9 @@
 # ADR-022 — Gateway desired-state reconciliation and downstream compensation
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-16
 - Decision owners: repository owner / human approval
-- Scope: TASK-T16 Phase 2C3B follow-up
+- Scope: TASK-T16 Phase 2C3C implementation
 - Depends on: ADR-014, ADR-015, ADR-016, ADR-017, ADR-019, ADR-020, ADR-021
 
 ## Context
@@ -28,9 +28,9 @@ The authoritative invariant is:
   DEGRADED/manual intervention or durable reconciliation; stale B must not
   remain a normal APPLIED state.
 
-This ADR is a proposed architecture decision only. It does not change domain
-contracts, provisioning orchestration, release signatures, provider
-interfaces, or production behavior in this slice.
+This ADR is the accepted architecture decision for Phase 2C3C. Its
+implementation uses the existing generic Job table and one application/infra
+reconciler; it does not add a new provider interface or schema migration.
 
 ## Supersession relationship with ADR-017
 
@@ -237,3 +237,31 @@ new reconciliation table/model, enum, schema/Alembic migration,
 provisioning-state/service ordering, token-step move, accounting compensation
 change, scheduler worker, or release orchestration. Those changes require a
 separate implementation slice after independent review and human acceptance.
+
+## Implementation boundary — Phase 2C3C
+
+The accepted implementation reuses the existing jobs table with
+job_type=GATEWAY_RECONCILE. Its payload contains only operation_kind,
+subscription_id, order_id, and provision_run_id; tokens, credentials,
+candidates, bearer values, and Reality plaintext never enter the payload or
+audit detail. Existing attempts/available_at/locked_at fields provide retry,
+stale-running recovery, and exhaustion handling.
+
+backend/app/infra/gateway_reconciliation.py is the single application/infra
+entry point. It opens a fresh Session per recovery attempt, uses the existing
+named lock, rereads committed DB desired state, constructs the existing
+operation-scoped credential resolver, calls the existing
+GatewayProvider.render(desired, resolver) / validate / apply contract, and
+commits finalization only after runtime verification. The backend-api lifespan
+starts one bounded background recovery loop that reuses the process-owned
+ProviderRegistry and closes deterministically. No ContextVar, global mutable
+state, provider-held Session, or plaintext cache is used.
+
+Paid provisioning and expiry release now commit DB B plus a pending gateway
+intent before runtime mutation. Post-commit runtime failure keeps DB B
+authoritative and schedules retry or durable manual intervention. New Class-A
+writers check unresolved gateway jobs under the same projection lock; the
+manual principal command fails closed for a real Xray selection until routed
+through this reconciler. The production GATEWAY_PROVIDER=xray_file hard gate
+remains until the implementation and its independent review prove every
+writer and recovery path safe.

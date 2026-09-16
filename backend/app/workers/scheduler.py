@@ -29,6 +29,7 @@ from backend.app.workers.accounting_sync import (
     run_pending_reconcile,
 )
 from backend.app.workers.drift_check import check_egress_drift
+from backend.app.infra.gateway_reconciliation import reconcile_gateway_job
 from backend.app.workers.transport_sync import refresh_provider_inventory
 
 NORMAL_USAGE_INTERVAL_SECONDS = 300
@@ -124,6 +125,7 @@ def run_batch(
     now only ever runs at the actual process ownership boundary, ``main()``.
     """
     with db_factory() as db:
+        reconcile_gateway_job(registry, db_factory=db_factory)
         transport_records = sync_transport_capacity_and_inventory(db, registry)
         reconciled = run_pending_reconcile(
             db, registry.accounting, get_settings().accounting_sync_batch_size
@@ -131,7 +133,7 @@ def run_batch(
         reconcile_usage_period_cache(db)
         usage_jobs = 0
         for _ in range(get_settings().accounting_sync_batch_size):
-            job = run_next_usage_job(db, registry.accounting)
+            job = run_next_usage_job(db, registry.accounting, gateway=registry.gateway)
             if job is None:
                 break
             usage_jobs += 1

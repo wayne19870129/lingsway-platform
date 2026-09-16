@@ -177,6 +177,11 @@ def reconcile_gateway_principals(
 
     timestamp = datetime.now(UTC).isoformat()
     mode = "confirmed" if confirm else "dry-run"
+    if confirm and get_settings().gateway_provider == "xray_file":
+        # A manual principal mutation is a Class-A projection writer. Until
+        # it is routed through the durable reconciler, a real Xray selection
+        # must fail closed rather than update DB behind the runtime's back.
+        raise ReconciliationError("gateway_reconciliation_required")
     snapshots: tuple[BindingSnapshot, ...] = ()
     targets: dict[int, str] = {}
     try:

@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from sqlalchemy import select
+
 from backend.app.domain.capacity import ensure_capacity
 from backend.app.domain.ordering import (
     BillingCommand,
@@ -27,10 +29,18 @@ from backend.app.domain.provisioning import (
     ProvisionOutcome,
     ProvisionRequest,
     ProvisionRunStore,
+    ProvisionStep,
 )
 from backend.app.domain.subscription_render import RenderedSubscription, render_subscription
 from backend.app.infra.gateway_route_lock import GatewayRouteBindingLockError
-from backend.app.providers.base import CredentialResolver
+from backend.app.infra.gateway_reconciliation import (
+    assert_no_unresolved_gateway_mutation,
+    enqueue_gateway_reconciliation,
+    reconcile_gateway_job_in_session,
+)
+from backend.app.infra.provisioning_state import SqlAlchemyProvisioningState
+from backend.app.models import Subscription
+from backend.app.providers.base import CredentialResolver, NotifyEvent
 from backend.app.providers.registry import ProviderRegistry
 
 
@@ -88,6 +98,78 @@ def provision(
     return build_services(
         state, runs, providers=providers, credential_resolver=credential_resolver
     ).provisioning.provision(request)
+
+
+def _confirm_paid_purchase_durable(
+    command: BillingCommand,
+    request: ProvisionRequest,
+    state: ProvisioningState,
+    runs: ProvisionRunStore,
+    order_state: OrderWorkflowState,
+    provisioning: ProvisioningService,
+    checkpoint: object,
+    registry: ProviderRegistry,
+) -> ProvisionOutcome:
+    """Commit DB B plus a pending gateway intent before any runtime mutation."""
+    db = getattr(order_state, "db", None)
+    if db is None or not hasattr(checkpoint, "account_user"):
+        raise RuntimeError("durable gateway reconciliation requires SQLAlchemy state")
+    subscription = db.scalar(
+        select(Subscription).where(Subscription.order_id == int(command.order_id))
+    )
+    if subscription is None:
+        raise RuntimeError("Provisioning subscription was not created")
+    committed = False
+    try:
+        with state.gateway_route_binding_lock():
+            assert_no_unresolved_gateway_mutation(db, subscription.id)
+            subscription.accounting_user_id = checkpoint.account_user.username
+            raw_token = provisioning.token_factory()
+            state.store_subscription_token(request.customer_id, raw_token)
+            # This flushes/validates the active route skeleton, but the fresh
+            # post-commit snapshot is intentionally built by the reconciler.
+            state.desired_routing_state(
+                request,
+                checkpoint.endpoint,
+                checkpoint.tenant,
+                checkpoint.account_user.routing_principal,
+            )
+            job = enqueue_gateway_reconciliation(
+                db,
+                operation_kind="PURCHASE",
+                subscription_id=subscription.id,
+                order_id=int(command.order_id),
+                provision_run_id=checkpoint.run_id,
+                operation_id=command.order_id,
+            )
+            runs.record_step(checkpoint.run_id, ProvisionStep.APPLY_GATEWAY, "PENDING")
+            db.commit()
+            committed = True
+            result = reconcile_gateway_job_in_session(db, job.id, registry)
+        if result.applied:
+            try:
+                registry.notify.send(
+                    NotifyEvent(
+                        "PROVISION_SUCCEEDED",
+                        {"run_id": checkpoint.run_id, "customer_id": request.customer_id},
+                    )
+                )
+            except Exception as exc:
+                runs.mark_notification_failed(checkpoint.run_id, type(exc).__name__)
+            fresh_state = SqlAlchemyProvisioningState(db, subscription.id)
+            return ProvisionOutcome(
+                checkpoint.run_id,
+                ProvisionStatus.SUCCEEDED,
+                fresh_state.current_subscription_url(request.subscription_domain),
+            )
+        return ProvisionOutcome(checkpoint.run_id, ProvisionStatus.RUNNING)
+    except Exception as exc:
+        if not committed:
+            db.rollback()
+            with order_state.transaction():
+                fail_paid_purchase(command, type(exc).__name__, order_state)
+            provisioning.mark_run_failed(checkpoint.run_id, exc)
+        raise
 
 
 def confirm_payment_and_provision(
@@ -189,6 +271,21 @@ def confirm_payment_and_provision(
         # business state into anything else.
         provisioning.mark_run_pending_manual(prepared.run_id, prepared.pending_manual_error)
         return prepared
+
+    # Real SQLAlchemy paid provisioning follows ADR-022 Direction B. Test
+    # doubles retain the legacy composition below so the domain contract stays
+    # unchanged and does not gain an infrastructure/session dependency.
+    if getattr(order_state, "db", None) is not None and hasattr(prepared, "account_user"):
+        return _confirm_paid_purchase_durable(
+            command,
+            request,
+            state,
+            runs,
+            order_state,
+            provisioning,
+            prepared,
+            registry,
+        )
 
     # ADR-017/ADR-016: desired_routing_state() (invoked from
     # provision_apply_gateway()'s APPLY_GATEWAY step) mutates

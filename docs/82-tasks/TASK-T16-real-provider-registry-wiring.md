@@ -2606,3 +2606,31 @@ Reviewed exact head: `6f0bde97f5e4e995c55410110e6dc18cd3f06c60`; canonical revie
 This follow-up adds one production safety boundary: Settings/runtime safety validation rejects exactly `APP_ENV=production` with `GATEWAY_PROVIDER=xray_file`, before provider construction or external I/O, with a stable secret-safe error. Production `ACCOUNTING_PROVIDER=marzban` with `GATEWAY_PROVIDER=mock` remains allowed. Development/test `xray_file` registry and runtime contract construction remains allowed and zero-I/O.
 
 PR #114 therefore completes the Xray runtime/control plumbing slice but remains production-gated until a separately reviewed Phase 2C3C implements ADR-022 durable reconciliation. No reconciliation table, schema, worker, service ordering, compensation, Webshare, or Mihomo implementation is included. Phase 2C3B runtime plumbing is COMPLETE but production-gated; ADR-022 remains Proposed.
+## Latest authoritative handoff — Phase 2C3C durable gateway reconciliation
+
+Base main: 86304819fa0779bbe1e2c925636086e71fb551f1; implementation branch:
+task/t16-2c3c-durable-gateway-reconciliation; PR:
+TASK-T16 Phase 2C: implement durable gateway reconciliation.
+
+ADR-022 is now Accepted without changing its Direction B architecture. The
+implementation reuses jobs with job_type=GATEWAY_RECONCILE and a secret-safe
+identifier-only payload. Paid provisioning and expiry release perform the first
+authoritative commit before any gateway runtime mutation; the existing named
+lock remains the sole projection-writer boundary. gateway_reconciliation.py
+rereads fresh DB desired state, uses a fresh SQLAlchemy credential resolver for
+each attempt, applies through the existing GatewayProvider contract, and
+performs customer finalization only after runtime apply/verification.
+Retry/backoff and stale RUNNING claims are durable; exhaustion becomes
+FAILED/manual with an audit record. The backend-api lifespan runs the recovery
+executor with one process-owned ProviderRegistry and bounded shutdown. New
+Class-A writers reject unresolved older gateway intents, release uses the same
+path, and manual principal reconciliation fails closed for a real Xray
+selection.
+
+The production APP_ENV=production + GATEWAY_PROVIDER=xray_file gate remains
+in force pending independent review of the full implementation and all
+fault-injection/concurrency coverage. No real VPS, Marzban, Xray reload, DNS,
+credentials, deployment, schema/migration, workflow, or AGENTS.md change was
+performed. Phase 2B COMPLETE; Phase 2C ACTIVE; Phase 2C1 COMPLETE; Phase 2C2
+COMPLETE; Phase 2C3A COMPLETE; Phase 2C3B COMPLETE but production-gated;
+Phase 2C3C implementation awaiting exact-head review; Mihomo remains blocked.

@@ -914,3 +914,33 @@ ADR-022 remains `Proposed` and no implementation is included. PR #114 remains OP
 The renewed architecture review accepted ADR-022's Direction B contract but required a production hard gate because durable reconciliation is not yet implemented. At reviewed head `6f0bde97f5e4e995c55410110e6dc18cd3f06c60` (canonical review `5223833065`), Settings validation now rejects only production `GATEWAY_PROVIDER=xray_file` before registry/provider construction. It does not disable production Marzban accounting when the gateway remains mock, and it does not block development/test Xray contract construction.
 
 This is a safety-only boundary; no ADR-022 state machine or production reconciliation implementation is part of PR #114. The next independent vehicle is Phase 2C3C — ADR-022 durable gateway reconciliation. PR #114 remains OPEN and unmerged. Phase 2B COMPLETE; Phase 2C ACTIVE; Phase 2C1 COMPLETE; Phase 2C2 COMPLETE; Phase 2C3A COMPLETE; Phase 2C3B runtime plumbing COMPLETE but production-gated. Mihomo remains separately architecture-blocked.
+## Latest authoritative handoff — Phase 2C3C durable gateway reconciliation
+
+Starting from accepted main 86304819fa0779bbe1e2c925636086e71fb551f1,
+Codex created task/t16-2c3c-durable-gateway-reconciliation for
+TASK-T16 Phase 2C: implement durable gateway reconciliation.
+
+ADR-022 was verified against the reviewed Direction B content and changed only
+from Proposed to Accepted. The existing Job model is reused for
+GATEWAY_RECONCILE pending intents with identifier-only JSON payloads; there is
+no new table, enum, migration, provider-neutral DTO, or second GatewayProvider
+interface. The new reconciler uses the existing named lock, fresh Sessions and
+fresh DB desired-state reads, the operation-scoped SqlAlchemyCredentialResolver,
+and the existing provider registry. The backend-api lifespan owns one bounded
+recovery loop and closes it before the registry.
+
+Paid provisioning now establishes the route, accounting identity, token
+Secret/hash, and pending intent in the first durable DB commit; runtime
+render/validate/apply follows; finalization activates the Subscription/Order
+and marks the provision run only after successful runtime verification. Release
+commits route disable/release plus a pending intent before removal; runtime
+failure never rolls back DB B or disables the accounting user automatically.
+The manual principal writer fails closed when a real Xray provider is selected,
+and unresolved older gateway intents block later Class-A mutations.
+
+The production Xray hard gate remains because independent review must still
+verify all recovery, writer, concurrency, crash-matrix, release, finalization,
+and notify tests before enablement. No real external side effect was run.
+Phase status: Phase 2B COMPLETE; Phase 2C ACTIVE; Phase 2C1 COMPLETE; Phase
+2C2 COMPLETE; Phase 2C3A COMPLETE; Phase 2C3B COMPLETE but production-gated;
+Phase 2C3C implementation awaiting exact-head review; Mihomo remains blocked.

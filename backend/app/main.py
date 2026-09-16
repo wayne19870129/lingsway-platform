@@ -1,5 +1,6 @@
 """Application entry point for the backend API."""
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -11,7 +12,22 @@ from backend.app.api.public import router as public_router
 from backend.app.api.subscription import router as subscription_router
 from backend.app.api.subscription import subscription_feed_router
 from backend.app.core.config import get_settings
+from backend.app.infra.gateway_reconciliation import reconcile_gateway_job
 from backend.app.providers.registry import build_registry
+
+
+async def _gateway_reconciliation_loop(registry: object, stop: asyncio.Event) -> None:
+    """Recover durable gateway intents without owning another provider registry."""
+    while not stop.is_set():
+        try:
+            await asyncio.to_thread(reconcile_gateway_job, registry)
+        except Exception:
+            # The durable Job remains available for the next bounded attempt.
+            pass
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=5.0)
+        except TimeoutError:
+            continue
 
 
 @asynccontextmanager
@@ -24,11 +40,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     (and, for a future resource-owning provider, an unclosed
     ``httpx.Client`` per request).
     """
-    registry = build_registry(get_settings())
+    settings = get_settings()
+    registry = build_registry(settings)
     app.state.provider_registry = registry
+    stop = asyncio.Event()
+    recovery_task = (
+        asyncio.create_task(_gateway_reconciliation_loop(registry, stop))
+        if settings.gateway_provider == "xray_file"
+        else None
+    )
     try:
         yield
     finally:
+        stop.set()
+        if recovery_task is not None:
+            recovery_task.cancel()
+            try:
+                await recovery_task
+            except asyncio.CancelledError:
+                pass
         registry.close()
 
 

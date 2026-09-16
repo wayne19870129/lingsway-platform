@@ -1,0 +1,57 @@
+from __future__ import annotations
+
+import ast
+from pathlib import Path
+
+from backend.app.infra.gateway_reconciliation import _payload
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_RECONCILER = _REPO_ROOT / "backend" / "app" / "infra" / "gateway_reconciliation.py"
+_SERVICES = _REPO_ROOT / "backend" / "app" / "services.py"
+_ACCOUNTING = _REPO_ROOT / "backend" / "app" / "workers" / "accounting_sync.py"
+
+
+def test_gateway_job_payload_is_identifier_only() -> None:
+    payload = _payload(
+        operation_kind="PURCHASE",
+        subscription_id=7,
+        order_id=8,
+        provision_run_id="9",
+    )
+    assert payload == {
+        "operation_kind": "PURCHASE",
+        "subscription_id": 7,
+        "order_id": 8,
+        "provision_run_id": "9",
+    }
+    assert not {"token", "password", "privateKey", "shortIds", "candidate"} & set(payload)
+
+
+def test_reconciler_uses_existing_job_retry_fields_and_fresh_state() -> None:
+    source = _RECONCILER.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    text = source
+    assert "GATEWAY_RECONCILE_JOB_TYPE = " in text
+    assert "Job.attempts < Job.max_attempts" in text
+    assert "Job.locked_at < stale_before" in text
+    assert "full_desired_routing_snapshot(db)" in text
+    assert "SqlAlchemyCredentialResolver(db)" in text
+    assert "gateway_route_binding_write(db)" in text
+    assert "gateway.render(desired, resolver)" in text
+    assert "gateway.apply(candidate)" in text
+    assert tree.body
+
+
+def test_paid_and_release_writers_enqueue_before_runtime_reconcile() -> None:
+    services = _SERVICES.read_text(encoding="utf-8")
+    accounting = _ACCOUNTING.read_text(encoding="utf-8")
+    assert services.index("enqueue_gateway_reconciliation") < services.index(
+        "reconcile_gateway_job_in_session"
+    )
+    assert accounting.index("enqueue_gateway_reconciliation") < accounting.index(
+        "reconcile_gateway_job_in_session"
+    )
+    assert "release_egress(db, locked.id, now, gateway=gateway)" in accounting
+    assert "gateway_reconciliation_required" in (
+        _REPO_ROOT / "ops" / "reconciliation" / "gateway_principals.py"
+    ).read_text(encoding="utf-8")
