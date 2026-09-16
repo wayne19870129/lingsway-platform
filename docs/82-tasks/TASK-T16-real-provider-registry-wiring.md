@@ -2398,3 +2398,11 @@ Xray/Mihomo/transport registry wiring, and any `AGENTS.md`/architecture
 change remain out of scope and unstarted. Phase 2B remains **COMPLETE**;
 Phase 2C is **ACTIVE**; Phase 2C1 is **COMPLETE**; Phase 2C2 (this slice)
 awaits independent review with its PR **OPEN**, not merged.
+
+## Final authoritative handoff — Phase 2C2 Compose probe review
+
+Accepted baseline: `8b88e875159898a299c1250938272c8bc0fef1fc`. Codex final follow-up head: `287214a19dcb1d40fc1defc9e9b1e7fa9376058b` on PR #112 / branch `task/t16-2c2-patched-marzban-image`.
+
+The remaining Compose v1/v2 portability contract is closed. The deployment resolver now runs backend-api's `Settings.from_env().accounting_provider` through `compose run --rm --no-deps`, emits one exact `__LINGSWAY_ACCOUNTING_PROVIDER__=...` sentinel, and rejects zero/multiple/noisy/invalid output or any probe failure. The same path works for Compose v2 and the supported `docker-compose` v1 fallback; Compose remains responsible for `LINGSWAY_ENV_FILE` and quoted dotenv parsing. The patched Marzban image verification remains before `compose up`, while the mock default remains the upstream image.
+
+Exact-head evidence: CI #366 success with 69 Marzban contract tests passed, Security #370 success, Risk #263 success. PR #112 remains OPEN and unmerged, pending renewed independent review. Phase 2B COMPLETE; Phase 2C ACTIVE; Phase 2C1 COMPLETE; Phase 2C2 awaits review.

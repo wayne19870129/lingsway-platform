@@ -721,3 +721,13 @@ work beyond this slice's scope.
 PR #112 remains the active vehicle on `task/t16-2c2-patched-marzban-image`, based on main `5bdf5655d67da1185686d8560609874e4979f5c5`. The compose defaults remain `gozargah/marzban:v0.8.4` for mock/default deployments. Only an effective `ACCOUNTING_PROVIDER=marzban` selection causes `deploy/lib/40_stack_up.sh` to select and verify `lingsway/marzban:v0.8.4-routing-principal`; custom `MARZBAN_IMAGE` values are verified by the same gate.
 
 The verifier obtains `ACCOUNTING_PROVIDER` from Docker Compose's resolved `backend-api` environment using the same `LINGSWAY_ENV_FILE` source as Compose. It accepts only `mock` or `marzban`; malformed, ambiguous, or unsupported resolution fails closed before `compose up`. Verification precedes stack startup. Codex / GPT-5.6 Luna High is the sole writer for this task; Claude Code Web is paused; ChatGPT independently reviews the exact head; the User performs any final manual merge. Phase 2B is **COMPLETE**, Phase 2C is **ACTIVE**, and Phase 2C2 awaits renewed exact-SHA review.
+
+## Final authoritative handoff — Phase 2C2 Compose v1/v2 provider probe
+
+The accepted baseline for this review was `8b88e875159898a299c1250938272c8bc0fef1fc`. Codex then completed the final self-audit follow-up on PR #112 at exact head `287214a19dcb1d40fc1defc9e9b1e7fa9376058b`.
+
+The Compose portability Major is now closed without changing provider architecture: `deploy/lib/40_stack_up.sh` invokes `compose run --rm --no-deps backend-api` after `compose build backend-api`, and the probe imports `Settings` and calls `Settings.from_env().accounting_provider` inside the backend image. It emits exactly one `__LINGSWAY_ACCOUNTING_PROVIDER__=mock|marzban` sentinel. The host accepts only one exact sentinel and fails closed on zero, multiple, blank, noisy, malformed, unsupported, Settings-validation, or command failure. This works through both the repository's Compose v2 (`docker compose`) path and v1 (`docker-compose`) fallback, without dotenv hand-parsing or the v2-only JSON config flag; `LINGSWAY_ENV_FILE`, including quoted dotenv values, remains Compose-owned.
+
+The mock path leaves the upstream Marzban default unchanged. The effective `marzban` path still selects the patched image (or verifies an operator-selected `MARZBAN_IMAGE`) before `compose up`; no registry/provider/network/DB/write/Xray side effect is performed by the probe.
+
+Evidence on this exact head: CI run #366 passed all jobs; the Marzban contract suite passed 69 tests; Security run #370 passed; Risk classification run #263 passed. PR #112 remains OPEN and unmerged, awaiting renewed independent exact-head review. Phase 2B remains COMPLETE; Phase 2C is ACTIVE; Phase 2C1 is COMPLETE; Phase 2C2 awaits review.
