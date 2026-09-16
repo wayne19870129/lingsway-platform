@@ -108,7 +108,7 @@ def test_reload_posts_exact_installed_candidate_and_discards_token(
 def test_reload_rejects_response_mismatch_without_exposing_body(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    requests: list[tuple[str, str, dict[str, object] | None]] = []
+    requests: list[tuple[str, str, Mapping[str, object] | None]] = []
     fake = _Client(requests, response_payload={"different": True})
     monkeypatch.setattr(
         "backend.app.providers.gateway.xray_file.httpx.Client",
@@ -122,7 +122,7 @@ def test_reload_rejects_response_mismatch_without_exposing_body(
 def test_reload_does_not_retry_transport_failure(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    requests: list[tuple[str, str, dict[str, object] | None]] = []
+    requests: list[tuple[str, str, Mapping[str, object] | None]] = []
     fake = _Client(
         requests,
         response_payload={},
@@ -143,7 +143,7 @@ def test_reload_does_not_retry_transport_failure(
 def test_health_requires_started_core_and_marzban_port(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, started: bool
 ) -> None:
-    requests: list[tuple[str, str, dict[str, object] | None]] = []
+    requests: list[tuple[str, str, Mapping[str, object] | None]] = []
     fake = _Client(requests, response_payload={"started": started})
     monkeypatch.setattr(
         "backend.app.providers.gateway.xray_file.httpx.Client",
@@ -175,7 +175,7 @@ def test_health_requires_started_core_and_marzban_port(
 def test_health_is_unhealthy_when_marzban_port_is_unreachable(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    requests: list[tuple[str, str, dict[str, object] | None]] = []
+    requests: list[tuple[str, str, Mapping[str, object] | None]] = []
     fake = _Client(requests, response_payload={"started": True})
     monkeypatch.setattr(
         "backend.app.providers.gateway.xray_file.httpx.Client",
