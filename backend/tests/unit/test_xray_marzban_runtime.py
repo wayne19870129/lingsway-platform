@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
 
 import httpx
@@ -24,7 +25,7 @@ class _Response:
 class _Client:
     def __init__(
         self,
-        requests: list[tuple[str, str, dict[str, object] | None]],
+        requests: list[tuple[str, str, Mapping[str, object] | None]],
         *,
         response_payload: object,
         request_status: int = 200,
@@ -54,7 +55,7 @@ class _Client:
         url: str,
         *,
         headers: dict[str, str],
-        json: dict[str, object] | None = None,
+        json: Mapping[str, object] | None = None,
     ) -> _Response:
         del headers
         self.requests.append((method, url, json))
