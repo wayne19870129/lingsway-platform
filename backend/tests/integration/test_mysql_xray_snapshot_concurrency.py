@@ -17,6 +17,11 @@ import backend.app.models  # noqa: F401
 from backend.app.core.database import Base, build_engine
 from backend.app.core.secrets import put_secret
 from backend.app.infra.credential_resolver import SqlAlchemyCredentialResolver
+from backend.app.infra.gateway_reconciliation import (
+    GatewayReconciliationBlocked,
+    assert_no_unresolved_gateway_mutation,
+    enqueue_gateway_reconciliation,
+)
 from backend.app.infra.gateway_route_lock import gateway_route_binding_write
 from backend.app.infra.provisioning_state import SqlAlchemyProvisioningState
 from backend.app.infra.xray_reality import (
@@ -30,6 +35,7 @@ from backend.app.models import (
     EgressEndpoint,
     EgressGroup,
     GatewayRouteBinding,
+    JobStatus,
     Order,
     Plan,
     Secret,
@@ -513,3 +519,31 @@ def test_mysql_reality_current_read_refreshes_stale_identity_map(
 
     assert refreshed == XrayRealityConfig("new-private-key", ("new-id",))
 
+
+
+def test_mysql_gateway_pending_current_read_breaks_stale_snapshot(
+    mysql_engine: Engine,
+) -> None:
+    """A phase-A RR snapshot cannot hide a committed pending gateway intent."""
+    _, subscription_id, _, _ = _seed(mysql_engine)
+    with Session(mysql_engine) as writer_c:
+        # This ordinary read deliberately establishes Writer-C's old RR view.
+        assert writer_c.scalars(select(GatewayRouteBinding)).all() == []
+
+        with Session(mysql_engine) as writer_b:
+            with gateway_route_binding_write(writer_b):
+                pending = enqueue_gateway_reconciliation(
+                    writer_b,
+                    operation_kind="PURCHASE",
+                    subscription_id=subscription_id,
+                    operation_id=f"stale-{uuid4().hex}",
+                )
+                writer_b.commit()
+            assert pending.status is JobStatus.PENDING
+
+        # The named lock is the single projection-writer boundary. The
+        # unresolved query is a locking/current read, so it must see B even
+        # though this Session already has an older consistent-read snapshot.
+        with gateway_route_binding_write(writer_c):
+            with pytest.raises(GatewayReconciliationBlocked):
+                assert_no_unresolved_gateway_mutation(writer_c)
