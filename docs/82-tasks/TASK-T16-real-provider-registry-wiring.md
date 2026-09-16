@@ -2634,3 +2634,35 @@ credentials, deployment, schema/migration, workflow, or AGENTS.md change was
 performed. Phase 2B COMPLETE; Phase 2C ACTIVE; Phase 2C1 COMPLETE; Phase 2C2
 COMPLETE; Phase 2C3A COMPLETE; Phase 2C3B COMPLETE but production-gated;
 Phase 2C3C implementation awaiting exact-head review; Mihomo remains blocked.
+
+
+## Latest independent-review follow-up — Phase 2C3C durability
+
+Reviewed exact head: `3d3a770160bdf7b45fb91789b209688438c99c1b`; canonical review:
+`5225093815`. This follow-up addresses the five Major findings and one Minor
+without changing the accepted ADR-022 direction.
+
+The first authoritative purchase commit now has an explicit outcome boundary.
+After a commit acknowledgement error, the projection named lock remains held
+while a fresh independent Session performs current reads for the deterministic
+`GATEWAY_RECONCILE:PURCHASE:<order_id>` intent and the active route. Job plus
+active route means LANDED and no compensation; both absent means ABSENT and
+reuses the existing ADR-018 certainty-aware Phase-A accounting-user
+compensation; partial evidence or unavailable DB is UNKNOWN, fail-closed, and
+never blind-disables the accounting user. Ordinary pre-commit failures use the
+same small compensation entry point, including its PENDING_MANUAL result.
+
+Unresolved gateway intent and dedupe checks are locking/current reads under the
+existing named lock, so an older REPEATABLE READ snapshot cannot hide a
+committed pending intent. The scheduler only enqueues real-Xray work and passes
+`gateway=None` in `xray_file` mode; backend-api remains the sole real-Xray
+runtime executor. Gateway retry/finalization no longer writes accounting-owned
+`Subscription.reconcile_state` or `reconcile_attempts`; Job, safe audit, and
+`provision_error` remain the gateway-side durable evidence. The backend recovery
+loop records exception type only and continues.
+
+Real MySQL integration coverage now includes the stale-snapshot pending-intent
+block, current-read dedupe recovery, and first-commit evidence classification
+using real Sessions, Job rows, and the named lock. The production
+`APP_ENV=production + GATEWAY_PROVIDER=xray_file` hard gate remains. Phase
+2C3C is ACTIVE and production-gated, awaiting renewed exact-head review.
