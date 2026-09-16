@@ -86,9 +86,10 @@ exit 0
         [
             "bash",
             "-c",
-            'source "$1"; resolve_accounting_provider',
+            'source "$1" --inventory "$2"; resolve_accounting_provider',
             "_",
             str(_STACK_SCRIPT),
+            str(inventory),
         ],
         env=env,
         capture_output=True,
