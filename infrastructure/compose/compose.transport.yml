@@ -15,6 +15,17 @@ services:
       - 8.8.8.8
 
   marzban:
+    # Marzban runs here regardless of ACCOUNTING_PROVIDER (it always hosts
+    # the Xray gateway), so this default must stay usable on a fresh
+    # machine that has not run infrastructure/marzban/build_patched_image.sh
+    # -- it is deliberately still the unpatched upstream tag. For the
+    # specific dangerous combination (ACCOUNTING_PROVIDER=marzban, i.e.
+    # real Marzban accounting), deploy/lib/40_stack_up.sh's
+    # verify_marzban_image_identity() overrides MARZBAN_IMAGE to the local
+    # patched tag before this file is ever read by `compose up`, and
+    # fails closed if that resolved image doesn't carry the verified
+    # patched-image identity labels (TASK-T16 Phase 2C2). A MARZBAN_IMAGE
+    # override set by the operator goes through the identical check.
     image: ${MARZBAN_IMAGE:-gozargah/marzban:v0.8.4}
     restart: unless-stopped
     ports:

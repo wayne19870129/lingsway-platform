@@ -29,29 +29,14 @@ from __future__ import annotations
 import sys
 
 from pinned_upstream_manifest import (
-    PINNED_DEPENDENCIES,
     PINNED_FILES,
-    XRAY_EMAIL_FORMULA,
     PinnedUpstreamFetchError,
+    check_pinned_content,
     fetch_pinned_file,
 )
-
-
-def check_dependency_versions(requirements_text: str) -> list[str]:
-    """Return problem descriptions for any pinned dependency in
-    `PINNED_DEPENDENCIES` whose exact `name==version` line is missing
-    from `requirements_text`. Empty list means all pins still hold."""
-    lines = {line.strip() for line in requirements_text.splitlines()}
-    problems = []
-    for package, version in PINNED_DEPENDENCIES.items():
-        expected_line = f"{package}=={version}"
-        if expected_line not in lines:
-            problems.append(
-                f"requirements.txt no longer pins {expected_line!r} exactly "
-                "(this repository's Marzban patch/contract was verified "
-                "against that exact version)"
-            )
-    return problems
+from pinned_upstream_manifest import (
+    check_dependency_versions as check_dependency_versions,  # noqa: PLC0414
+)
 
 
 def collect_errors() -> list[str]:
@@ -72,16 +57,12 @@ def collect_errors() -> list[str]:
             errors.append(str(exc))
             continue
 
-        if path == "app/xray/operations.py" and XRAY_EMAIL_FORMULA not in content.decode("utf-8"):
-            errors.append(
-                "pinned app/xray/operations.py no longer contains the "
-                f"exact Xray client email formula {XRAY_EMAIL_FORMULA!r} "
-                "this repository's routing_principal patch must keep "
-                "matching"
-            )
-
-        if path == "requirements.txt":
-            errors.extend(check_dependency_versions(content.decode("utf-8")))
+        # fetch_pinned_file() already verified the hash before returning;
+        # check_pinned_content() re-checks it (always matches here) plus
+        # the formula/dependency checks that are the actual point of
+        # calling it -- shared with verify_local_source_tree.py so this
+        # logic lives in exactly one place.
+        errors.extend(check_pinned_content(path, content))
 
     return errors
 
