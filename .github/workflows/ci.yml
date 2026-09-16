@@ -147,6 +147,31 @@ jobs:
       - name: Run Marzban routing_principal patch contract tests
         run: python -m pytest infrastructure/marzban/patches/tests -v
 
+  marzban-image-contract:
+    # TASK-T16 Phase 2C2: actually builds the patched Marzban image (not
+    # just a Dockerfile lint) and proves the deployment-side identity
+    # verifier both accepts it and fails closed on the unpatched upstream
+    # image. Separate job/runner from marzban-contract above: this one
+    # needs Docker and outbound network access to fetch the pinned
+    # upstream commit and pull a comparison image, not Marzban's pinned
+    # Python dependency versions. Runs unconditionally, same as every
+    # other job in this workflow.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build patched Marzban image
+        run: infrastructure/marzban/build_patched_image.sh lingsway/marzban:v0.8.4-routing-principal
+      - name: Verify patched image identity labels (fail-closed)
+        run: python3 infrastructure/marzban/verify_patched_image.py lingsway/marzban:v0.8.4-routing-principal
+      - name: Verify identity check fails closed on the unpatched upstream image
+        run: |
+          set -euo pipefail
+          docker pull gozargah/marzban:v0.8.4
+          if python3 infrastructure/marzban/verify_patched_image.py gozargah/marzban:v0.8.4; then
+            echo 'verify_patched_image.py must reject the unpatched upstream image' >&2
+            exit 1
+          fi
+
   backend-image:
     runs-on: ubuntu-latest
     steps:

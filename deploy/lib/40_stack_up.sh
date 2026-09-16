@@ -55,6 +55,85 @@ ensure_marzban_internal_tls() {
     die 'Marzban internal TLS files are incomplete; refusing to overwrite an existing half-pair'
 }
 
+resolve_accounting_provider() {
+  # Ask the backend-api container for its own resolved
+  # Settings.accounting_provider instead of hand-parsing dotenv text or
+  # depending on the Compose v2-only JSON configuration flag -- common.sh's
+  # compose() deliberately also supports the
+  # `docker-compose` v1 fallback this repository's deploy docs record for
+  # Debian 12 hosts, so a v2-only dependency here would break deployment
+  # even on the default ACCOUNTING_PROVIDER=mock path on a v1-only host.
+  # `compose run` is supported by both Compose generations and executes
+  # backend-api under the exact env_file/environment either generation
+  # resolves for it, so this reads the identical effective value the real
+  # container will use -- not a re-derivation of it. Requires backend-api
+  # already built (main() does `compose build backend-api` earlier).
+  local raw_output provider
+  raw_output="$(compose run -T --rm --no-deps backend-api python -c '
+from backend.app.core.config import Settings
+
+provider = Settings.from_env().accounting_provider
+if provider not in {"mock", "marzban"}:
+    raise SystemExit(1)
+print("__LINGSWAY_ACCOUNTING_PROVIDER__=" + provider)
+')" || die 'unable to resolve the effective ACCOUNTING_PROVIDER from backend-api; refusing deployment'
+  # Accept exactly one sentinel and nothing else. This intentionally rejects
+  # zero, multiple, blank, unsupported, malformed, or noisy output so the
+  # deployment never guesses at the provider from an ambiguous probe.
+  case "$raw_output" in
+    __LINGSWAY_ACCOUNTING_PROVIDER__=mock)
+      provider=mock
+      ;;
+    __LINGSWAY_ACCOUNTING_PROVIDER__=marzban)
+      provider=marzban
+      ;;
+    *)
+      die 'effective ACCOUNTING_PROVIDER probe returned zero, multiple, blank, unsupported, or malformed sentinels; refusing deployment'
+      ;;
+  esac
+  printf '%s' "$provider"
+}
+
+
+verify_marzban_image_identity() {
+  # TASK-T16 Phase 2C2: before Phase 2C2 this deployment could silently
+  # start the unpatched upstream `gozargah/marzban:v0.8.4` image (or an
+  # arbitrary `MARZBAN_IMAGE` override) while the backend ran
+  # ACCOUNTING_PROVIDER=marzban -- an image *tag* is not proof of what was
+  # actually built.
+  #
+  # Marzban always runs (it hosts the Xray gateway regardless of
+  # ACCOUNTING_PROVIDER), so compose.transport.yml's own MARZBAN_IMAGE
+  # default must stay the unpatched upstream tag -- a fresh machine that
+  # has never run build_patched_image.sh must still be able to deploy
+  # with the default ACCOUNTING_PROVIDER=mock. Only for the genuinely
+  # dangerous combination (resolve_accounting_provider() returns
+  # "marzban" -- it already dies closed on anything else, so this never
+  # sees an ambiguous value) does this function override MARZBAN_IMAGE to
+  # the local patched tag (unless the caller's environment already set
+  # one) and export it, so the `compose up` call
+  # that follows resolves the identical image this just verified -- then
+  # fail closed via verify_patched_image.py's docker-inspect-based label
+  # check before Marzban is ever started. There is no override that skips
+  # this -- a custom MARZBAN_IMAGE still goes through the identical check.
+  local accounting_provider
+  accounting_provider="$(resolve_accounting_provider)"
+  case "$accounting_provider" in
+    mock)
+      return 0
+      ;;
+    marzban)
+      ;;
+    *)
+      die 'effective ACCOUNTING_PROVIDER is not mock or marzban; refusing deployment'
+      ;;
+  esac
+  export MARZBAN_IMAGE="${MARZBAN_IMAGE:-lingsway/marzban:v0.8.4-routing-principal}"
+  log "ACCOUNTING_PROVIDER=${accounting_provider@Q} (not mock); verifying patched Marzban image identity for $MARZBAN_IMAGE"
+  python3 "$DEPLOY_ROOT/infrastructure/marzban/verify_patched_image.py" "$MARZBAN_IMAGE" || \
+    die "Marzban image identity verification failed for '$MARZBAN_IMAGE'; refusing to start Marzban with ACCOUNTING_PROVIDER not exactly mock against an image that does not prove it carries the routing_principal patch. Build it with infrastructure/marzban/build_patched_image.sh first."
+}
+
 port_is_listening() {
   local port="$1"
   ss -ltnH | awk -v port=":$port" '$4 ~ port "$" { found = 1 } END { exit !found }'
@@ -142,6 +221,10 @@ main() {
   [[ "$expected_sha" =~ ^[0-9a-f]{64}$ ]] || \
     die 'renderer did not return a valid expected repo-owned Xray fingerprint'
   validate_runtime_files
+  # Delegates to Compose (via resolve_accounting_provider's `compose run`)
+  # for the effective ACCOUNTING_PROVIDER, so this needs no env-file path
+  # of its own -- see verify_marzban_image_identity()/resolve_accounting_provider().
+  verify_marzban_image_identity
   compose up --detach
   if is_true "${RESTART_TRANSPORT:-false}"; then
     compose restart marzban mihomo
@@ -152,4 +235,6 @@ main() {
   log 'Compose stack started with the configured profiles'
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main "$@"
+fi

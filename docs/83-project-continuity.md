@@ -1,11 +1,11 @@
 # Project Continuity / Handoff
 
-**Last reconciled with main baseline:** `9b86d6c3b804c6d700a8f94fe559496f655a4cff`
-(verified 2026-09-15 UTC after PR #110 was manually merged). PR #109 and PR #110
-are merged; writer-guard/drift, preservation/legal-deletion, and existing-data
-reconciliation are complete on main. Phase 2B is **COMPLETE** and Phase 2C is
-**UNBLOCKED**. The active vehicle is Phase 2C1 real Marzban registry wiring on
-branch `task/t16-2c1-marzban-registry-wiring`.
+**Last reconciled with main baseline:** `5bdf5655d67da1185686d8560609874e4979f5c5`
+(verified 2026-09-15 UTC after PR #111 was manually merged). PR #109, PR #110,
+and PR #111 are merged; Phase 2B is **COMPLETE** and Phase 2C is **ACTIVE**.
+The active vehicle is Phase 2C2 patched Marzban image path on branch
+`task/t16-2c2-patched-marzban-image`; PR #112 remains open pending renewed
+exact-SHA review.
 Dates in this document are UTC unless stated otherwise.
 
 This document is maintained by whichever agent last touched a section
@@ -55,11 +55,9 @@ from anything a prior conversation "remembers."
 - **User (human)**: owns requirements, final acceptance, manual PR merge,
   and any production/go-live decision. No automation replaces these
   three things.
-- **Claude Code**: the sole implementation executor. Edits code, runs
-  tests/lint/build, creates branches, commits, and pushes; reads and
-  judges review feedback and pushes fixes. Never merges, never deploys,
-  never closes another party's PR/Issue. On the Issue-first background
-  path (section 5), the standard Claude Code Action pushes the branch.
+- **Claude Code**: the standing abstract implementation role described by
+  the repository process. It is paused for the current PR #112 and must not
+  write concurrently with Codex.
   TASK-T24 adds a small isolated PAT-backed PR-creation job; normal
   `pull_request` events then run CI.
 - **ChatGPT / ChatGPT Work**: requirements/acceptance-criteria
@@ -76,6 +74,12 @@ from anything a prior conversation "remembers."
 - One task, one PR; fixes from review feedback land as new commits on the
   same PR/branch, never a second PR for the same task.
 
+**Current execution mode (updated for PR #112, `task/t16-2c2-patched-marzban-image`):**
+Codex / GPT-5.6 Luna High is the sole implementation writer. Claude Code Web
+is paused and must not write concurrently. ChatGPT is the independent exact-SHA
+reviewer/planner, and the User retains final manual merge and production
+approval. No `AGENTS.md` change is needed; this is a task-level operating note
+and should be updated when PR #112 or the operating mode changes.
 ## 4. Review / merge policy
 
 - Final merge is always a human action — no agent merges a PR, regardless
@@ -579,3 +583,151 @@ staging credentials or network test is used in this slice;
 `REAL_STAGING_MARZBAN_NETWORK_TEST = PENDING`. Webshare, Xray, Mihomo,
 transport registry wiring, deployment, schema/migration, workflow, and Phase
 2C2 remain out of scope.
+
+
+## Latest authoritative handoff — Phase 2C2 patched Marzban image path
+
+Base `main` at the start of this slice: `5bdf5655d67da1185686d8560609874e4979f5c5`
+(PR #111, Phase 2C1 Marzban registry wiring, is merged). The active vehicle
+is PR `TASK-T16 Phase 2C: build patched Marzban image path` on branch
+`task/t16-2c2-patched-marzban-image`. This slice does not change
+`routing_principal`/registry/provider-selection architecture already
+settled by ADR-016/Phase 2C1 -- it only builds the missing reproducible
+path from the pinned upstream commit to a verifiable patched image, and
+wires a fail-closed identity check in front of the one deployment path
+that starts Marzban.
+
+**What this slice adds**, all under `infrastructure/marzban/` unless noted:
+
+- `patches/verify_local_source_tree.py` -- local-checkout counterpart to
+  the existing network-fetching `verify_pinned_upstream.py`, sharing the
+  same `pinned_upstream_manifest.py` constants and (via the new
+  `check_pinned_content()`/`check_dependency_versions()` functions moved
+  there) the same check logic, so the pinned-file/Xray-formula/dependency
+  contract is defined in exactly one place either way.
+- `patches/pinned_upstream_manifest.py` additions: `PINNED_TAG`,
+  `PATCH_ID`, `ROUTING_PRINCIPAL_PATCH_MARKER`, `IMAGE_CONTRACT_VERSION`,
+  the five `IMAGE_LABEL_*` OCI label key constants,
+  `REQUIRED_IMAGE_LABELS`, and `validate_image_labels()` -- the single
+  source of truth for both what `build_patched_image.sh` attaches and
+  what `verify_patched_image.py` checks for.
+- `build_patched_image.sh` -- the build entrypoint: fetches the exact
+  pinned commit (`git fetch --depth 1 origin <40-char pinned SHA>`, no
+  branch/tag/latest fallback) into a `mktemp -d` working directory,
+  verifies checked-out HEAD equals the pinned commit, runs
+  `verify_local_source_tree.py`, runs `apply_patch.sh --check` then
+  `apply_patch.sh`, greps the patched `app/models/user.py` for the three
+  expected `routing_principal` markers, `docker build`s the unmodified
+  upstream `Dockerfile` (from the fetched tree, `.git` already excluded
+  by Marzban's own `.dockerignore`) with the five immutable identity
+  labels attached via `--label`, and deletes the temporary source tree on
+  exit (trap-based, runs even on failure). No Marzban source is committed
+  to this repository at any point. Default tag:
+  `lingsway/marzban:v0.8.4-routing-principal`; no
+  force/override/skip_patch_check/unsafe/bypass flag exists or may be
+  added (`AGENTS.md` rule 3).
+- `verify_patched_image.py` -- the deployment-side fail-closed gate:
+  `docker inspect`s a candidate image's OCI labels and checks them
+  against `REQUIRED_IMAGE_LABELS`. A missing `docker` binary, an image
+  that doesn't exist locally, malformed inspect output, or any label
+  mismatch (including no labels at all) all fail closed (non-zero exit).
+- `deploy/lib/40_stack_up.sh`: new `verify_marzban_image_identity()`,
+  called once, right before `compose up --detach` (after
+  `validate_runtime_files`, before the nine-step Xray
+  render/up/restart/verify/promote sequence starts touching Marzban).
+  It reads `ACCOUNTING_PROVIDER` from the actual deployment `.env` file
+  (not the inventory-derived shell variable, since that is what the
+  backend container actually runs with); when it is `marzban`, it
+  resolves the exact image reference Compose will use
+  (`${MARZBAN_IMAGE:-lingsway/marzban:v0.8.4-routing-principal}` -- same
+  default/override precedence as the compose files) and calls
+  `verify_patched_image.py` on it, `die`-ing the deploy on any failure.
+  When `ACCOUNTING_PROVIDER` is not `marzban` (e.g. the default `mock`),
+  this check is skipped -- it targets specifically the dangerous
+  combination the task called out: real Marzban accounting selected
+  while the container silently runs unpatched. A custom `MARZBAN_IMAGE`
+  override goes through the identical check; there is no bypass.
+- `infrastructure/compose/compose.transport.yml` and `compose.probe.yml`:
+  default `MARZBAN_IMAGE` changed from `gozargah/marzban:v0.8.4` to
+  `lingsway/marzban:v0.8.4-routing-principal`. This changes which image a
+  fresh deploy will *try* to start by default (the local patched build,
+  which must exist -- built via `build_patched_image.sh` -- or the
+  identity check above fails closed); it does not change any provider
+  selection default.
+- `.github/workflows/ci.yml`: new `marzban-image-contract` job (separate
+  runner from `marzban-contract`, since it needs Docker + network to
+  fetch upstream and pull a comparison image) that actually runs
+  `build_patched_image.sh`, verifies the resulting image's labels pass,
+  and verifies the unpatched `gozargah/marzban:v0.8.4` image's labels
+  fail. Plus new pytest coverage in `patches/tests/`
+  (`test_verify_local_source_tree.py`, `test_image_identity.py`) folded
+  into the existing `marzban-contract` job's `pytest infrastructure/marzban/patches/tests`
+  run.
+
+**What this slice deliberately does not do**: no real VPS
+deployment, no DNS, no real Marzban credentials/user creation, no
+Webshare/Xray/Mihomo registry wiring, no payment/schema/migration
+changes, no public container registry publishing, no `AGENTS.md` edit, no
+change to the `routing_principal`/ADR-016 architecture itself.
+
+**Actual Docker build result in this development environment**: the
+patched-image build path (fetch pinned commit -> verify HEAD ->
+`verify_local_source_tree.py` -> `apply_patch.sh --check`/`apply_patch.sh`
+-> routing_principal marker grep) was run for real against the genuine
+pinned commit and passed every step. The final `docker build` layer in
+*this* sandboxed development session could not complete because its
+outbound network policy returns `403 Forbidden` for `docker.io` registry
+blob storage (`production.cloudfront.docker.com`) -- confirmed
+independent of this patch by the same failure pulling unrelated public
+images (`hello-world:latest`, `python:3.12-slim`). This is an environment
+restriction, not a defect in the build script. The full label-attach +
+`docker inspect` + `verify_patched_image.py` mechanism (build, positive
+verification, and negative verification against an unlabeled image and a
+nonexistent image reference) was still proven end-to-end in this same
+session using a `FROM scratch` image built by the real local Docker
+daemon (no registry pull required) carrying the same five labels
+`build_patched_image.sh` attaches -- this is a smoke test of the identity
+mechanism, not a substitute for actually building the real patched
+Marzban image, which the new `marzban-image-contract` CI job (GitHub-
+hosted runners, unrestricted `docker.io` access) does on every PR going
+forward. Record: `DOCKER_BUILD_ENVIRONMENT_UNAVAILABLE` (this development
+session only; not a statement about CI or any deployment host).
+
+**AGPL / licensing status**: unchanged from Phase 2B4's existing position
+in `infrastructure/marzban/patches/README.md` ("Upstream source: fetched,
+not vendored") -- this slice fetches upstream source only into a
+`mktemp -d` build-time working directory, never commits it, and does not
+touch the repository's root `LICENSE`. This slice does not resolve, and
+does not attempt to resolve, the operational AGPL-3.0 source-offer /
+corresponding-source requirement that actually running a patched Marzban
+binary in staging/production will raise (the patched image itself, if
+ever started, is a modified AGPL-3.0-licensed work). That decision needs
+the repository owner or counsel, not an agent's inference. Record:
+`MARZBAN_AGPL_DEPLOYMENT_COMPLIANCE_PENDING` -- this must be resolved
+before any real staging/production deployment runs the patched image,
+separately from and in addition to `MARZBAN_PATCHED_IMAGE_DEPLOYMENT_PENDING`
+being closed by this slice's build path existing.
+
+Phase 2B remains **COMPLETE**. Phase 2C is **ACTIVE**. Phase 2C1 (Marzban
+registry wiring) is **COMPLETE**. Phase 2C2 (this slice, the patched image
+build/deployment-verification path) awaits independent review; PR remains
+**OPEN**, not merged. Real VPS deployment, real Marzban credentials, and
+the AGPL operational-compliance decision above all remain open follow-up
+work beyond this slice's scope.
+
+
+## Latest authoritative handoff — Phase 2C2 review follow-up
+
+PR #112 remains the active vehicle on `task/t16-2c2-patched-marzban-image`, based on main `5bdf5655d67da1185686d8560609874e4979f5c5`. The compose defaults remain `gozargah/marzban:v0.8.4` for mock/default deployments. Only an effective `ACCOUNTING_PROVIDER=marzban` selection causes `deploy/lib/40_stack_up.sh` to select and verify `lingsway/marzban:v0.8.4-routing-principal`; custom `MARZBAN_IMAGE` values are verified by the same gate.
+
+The verifier obtains `ACCOUNTING_PROVIDER` from Docker Compose's resolved `backend-api` environment using the same `LINGSWAY_ENV_FILE` source as Compose. It accepts only `mock` or `marzban`; malformed, ambiguous, or unsupported resolution fails closed before `compose up`. Verification precedes stack startup. Codex / GPT-5.6 Luna High is the sole writer for this task; Claude Code Web is paused; ChatGPT independently reviews the exact head; the User performs any final manual merge. Phase 2B is **COMPLETE**, Phase 2C is **ACTIVE**, and Phase 2C2 awaits renewed exact-SHA review.
+
+## Final authoritative handoff — Phase 2C2 Compose v1/v2 provider probe
+
+The accepted baseline for this review was `8b88e875159898a299c1250938272c8bc0fef1fc`. Codex then completed the final self-audit follow-up on PR #112 at exact head `287214a19dcb1d40fc1defc9e9b1e7fa9376058b`.
+
+The Compose portability Major is now closed without changing provider architecture: `deploy/lib/40_stack_up.sh` invokes `compose run -T --rm --no-deps backend-api` after `compose build backend-api`, and the probe imports `Settings` and calls `Settings.from_env().accounting_provider` inside the backend image. It emits exactly one `__LINGSWAY_ACCOUNTING_PROVIDER__=mock|marzban` sentinel. The host accepts only one exact sentinel and fails closed on zero, multiple, blank, noisy, malformed, unsupported, Settings-validation, or command failure. This works through both the repository's Compose v2 (`docker compose`) path and v1 (`docker-compose`) fallback, without dotenv hand-parsing or the v2-only JSON config flag; `LINGSWAY_ENV_FILE`, including quoted dotenv values, remains Compose-owned.
+
+The mock path leaves the upstream Marzban default unchanged. The effective `marzban` path still selects the patched image (or verifies an operator-selected `MARZBAN_IMAGE`) before `compose up`; no registry/provider/network/DB/write/Xray side effect is performed by the probe.
+
+Evidence on this exact head: CI run #366 passed all jobs; the Marzban contract suite passed 69 tests; Security run #370 passed; Risk classification run #263 passed. PR #112 remains OPEN and unmerged, awaiting renewed independent exact-head review. Phase 2B remains COMPLETE; Phase 2C is ACTIVE; Phase 2C1 is COMPLETE; Phase 2C2 awaits review.
