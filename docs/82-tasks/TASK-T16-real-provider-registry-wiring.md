@@ -2598,3 +2598,11 @@ Reviewed exact head: `aadd9670242e3806f7961ab10f82cd5b2071501e`; canonical revie
 This docs-only follow-up addresses three Majors: ADR-022 no longer contains an old apply-before-commit normative writer contract; it explicitly partially supersedes ADR-017 only for real gateway reconciliation transaction/finalization ordering; and it distinguishes prospective Phase A endpoint/binding/Secret data from live projection mutation. Direction B is now a concrete commit-first state machine: durable DB B plus pending first, runtime render/apply/verify, then durable finalization and only then customer-facing success. Retryable gateway failure keeps DB B authoritative and does not automatically disable the accounting user. NOTIFY occurs after releasing the projection lock.
 
 ADR-022 remains `Proposed`. No implementation, domain/base change, schema, workflow, provider, deployment, Webshare, or Mihomo change is included. Phase 2C3B remains ACTIVE/GATED by ADR-022.
+
+## Latest authoritative handoff — PR #114 production Xray hard gate
+
+Reviewed exact head: `6f0bde97f5e4e995c55410110e6dc18cd3f06c60`; canonical review: `5223833065`. ADR-022's architecture contract passed independent review, but its durable reconciliation implementation is intentionally deferred to Phase 2C3C.
+
+This follow-up adds one production safety boundary: Settings/runtime safety validation rejects exactly `APP_ENV=production` with `GATEWAY_PROVIDER=xray_file`, before provider construction or external I/O, with a stable secret-safe error. Production `ACCOUNTING_PROVIDER=marzban` with `GATEWAY_PROVIDER=mock` remains allowed. Development/test `xray_file` registry and runtime contract construction remains allowed and zero-I/O.
+
+PR #114 therefore completes the Xray runtime/control plumbing slice but remains production-gated until a separately reviewed Phase 2C3C implements ADR-022 durable reconciliation. No reconciliation table, schema, worker, service ordering, compensation, Webshare, or Mihomo implementation is included. Phase 2C3B runtime plumbing is COMPLETE but production-gated; ADR-022 remains Proposed.

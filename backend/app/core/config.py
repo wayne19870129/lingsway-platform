@@ -95,6 +95,11 @@ class Settings:
             )
         if self.app_env == "production" and self.secret_encryption_key.startswith("MDAwMDAw"):
             raise ValueError("Production SECRET_ENCRYPTION_KEY must be configured")
+        if self.app_env == "production" and self.gateway_provider == "xray_file":
+            raise ValueError(
+                "Production GATEWAY_PROVIDER=xray_file is disabled until "
+                "ADR-022 durable gateway reconciliation is implemented"
+            )
         marzban_runtime_selected = (
             self.accounting_provider == "marzban" or self.gateway_provider == "xray_file"
         )

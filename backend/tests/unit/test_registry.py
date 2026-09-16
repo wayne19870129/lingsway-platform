@@ -451,3 +451,77 @@ def test_production_default_marzban_credential_fails_closed() -> None:
                 "MARZBAN_DEFAULT_INBOUNDS_JSON": '{"vless": ["inbound-vless"]}',
             }
         )
+
+def test_production_xray_file_is_rejected_before_provider_construction() -> None:
+    gateway_secret = "gateway-admin-password-that-must-not-be-printed"
+    ca_path = "/etc/lingsway/marzban/internal.crt"
+    with pytest.raises(ValueError, match="Production GATEWAY_PROVIDER=xray_file is disabled") as excinfo:
+        Settings.from_env(
+            {
+                "APP_ENV": "production",
+                "JWT_SECRET": "J" * 32,
+                "SECRET_ENCRYPTION_KEY": "S" * 44,
+                "GATEWAY_PROVIDER": "xray_file",
+                "ACCOUNTING_PROVIDER": "marzban",
+                "MARZBAN_BASE_URL": "https://marzban.test",
+                "MARZBAN_ADMIN_USERNAME": "admin",
+                "MARZBAN_ADMIN_PASSWORD": gateway_secret,
+                "MARZBAN_VERIFY_TLS": "true",
+                "MARZBAN_CA_CERT_PATH": ca_path,
+                "XRAY_REALITY_DEST": "example.com:443",
+                "XRAY_REALITY_SERVER_NAME": "example.com",
+            }
+        )
+
+    assert gateway_secret not in str(excinfo.value)
+    assert ca_path not in str(excinfo.value)
+
+
+def test_production_marzban_accounting_with_mock_gateway_remains_allowed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "backend.app.providers.accounting.marzban.httpx.Client",
+        lambda **_kwargs: _NoIoClient(),
+    )
+    settings = Settings.from_env(
+        {
+            "APP_ENV": "production",
+            "JWT_SECRET": "J" * 32,
+            "SECRET_ENCRYPTION_KEY": "S" * 44,
+            "ACCOUNTING_PROVIDER": "marzban",
+            "GATEWAY_PROVIDER": "mock",
+            "MARZBAN_BASE_URL": "https://marzban.test",
+            "MARZBAN_ADMIN_USERNAME": "admin",
+            "MARZBAN_ADMIN_PASSWORD": "test-password",
+            "MARZBAN_VERIFY_TLS": "true",
+            "MARZBAN_CA_CERT_PATH": "/etc/lingsway/marzban/internal.crt",
+        }
+    )
+    registry = build_registry(settings)
+    try:
+        assert isinstance(registry.accounting, MarzbanAccountingProvider)
+        assert isinstance(registry.gateway, MockGatewayProvider)
+    finally:
+        registry.close()
+
+
+def test_development_xray_file_remains_constructible_after_safety_gate() -> None:
+    settings = Settings.from_env(
+        {
+            "APP_ENV": "development",
+            "GATEWAY_PROVIDER": "xray_file",
+            "MARZBAN_BASE_URL": "https://marzban.internal.invalid",
+            "MARZBAN_ADMIN_USERNAME": "admin",
+            "MARZBAN_ADMIN_PASSWORD": "test-password",
+            "MARZBAN_DEFAULT_PROTOCOL": "vless",
+            "MARZBAN_DEFAULT_INBOUNDS_JSON": '{"vless": ["inbound-vless"]}',
+            "XRAY_REALITY_DEST": "example.com:443",
+            "XRAY_REALITY_SERVER_NAME": "example.com",
+        }
+    )
+    registry = build_registry(settings)
+    try:
+        assert isinstance(registry.gateway, XrayFileProvider)
+    finally:
+        registry.close()
