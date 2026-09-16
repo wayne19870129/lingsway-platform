@@ -73,8 +73,8 @@ def _runtime(tmp_path: Path) -> MarzbanXrayRuntime:
         config_path=config_path,
         backup_dir=tmp_path / "backups",
         control_base_url="https://marzban:8000",
-        admin_username="admin",
-        admin_password="private-password",
+        _admin_username="admin",
+        _admin_password="private-password",
         verify_tls=False,
     )
 
