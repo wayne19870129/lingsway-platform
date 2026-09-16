@@ -29,6 +29,9 @@ class Settings:
     marzban_default_protocol: str = "vless"
     marzban_default_inbounds_json: str = "{}"
     marzban_verify_tls: bool = True
+    marzban_ca_cert_path: str = "/app/data/marzban/internal.crt"
+    xray_config_path: str = "/app/data/marzban/xray_config.json"
+    xray_backup_dir: str = "/app/data/xray-reload"
     xray_log_level: str = "warning"
     xray_reality_dest: str = ""
     xray_reality_server_name: str = ""
@@ -91,7 +94,8 @@ class Settings:
             )
         if self.app_env == "production" and self.secret_encryption_key.startswith("MDAwMDAw"):
             raise ValueError("Production SECRET_ENCRYPTION_KEY must be configured")
-        if self.accounting_provider == "marzban":
+        marzban_runtime_selected = self.accounting_provider == "marzban" or self.gateway_provider == "xray_file"
+        if marzban_runtime_selected:
             if not self.marzban_base_url.strip():
                 raise ValueError("MARZBAN_BASE_URL must not be blank when Marzban is selected")
             if not self.marzban_admin_username.strip():
@@ -102,11 +106,17 @@ class Settings:
                 raise ValueError(
                     "MARZBAN_ADMIN_PASSWORD must not be blank when Marzban is selected"
                 )
+            if self.marzban_verify_tls and not self.marzban_ca_cert_path.strip():
+                raise ValueError(
+                    "MARZBAN_CA_CERT_PATH must not be blank when Marzban TLS verification is enabled"
+                )
             if self.app_env == "production":
                 if "example.invalid" in self.marzban_base_url:
                     raise ValueError("Production MARZBAN_BASE_URL must be configured")
                 if "CHANGE_ME" in {self.marzban_admin_username, self.marzban_admin_password}:
                     raise ValueError("Production Marzban credentials must be configured")
+                if not self.marzban_verify_tls:
+                    raise ValueError("Production MARZBAN_VERIFY_TLS must remain enabled")
 
 @lru_cache
 def get_settings() -> Settings:
