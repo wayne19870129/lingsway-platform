@@ -2426,8 +2426,8 @@ wire a real provider and does not resolve Mihomo.
 ADR-021 is a Proposed / Accepted-candidate decision, not formally Accepted
 until human merge. It records the verified current topology: backend-api is a
 normal Python container that may run the pinned Xray binary for candidate
-`xray run -test\), while the Marzban container owns the running Xray process
-and mounts the same persistent `xray_config.json\). It rejects
+`xray run -test), while the Marzban container owns the running Xray process
+and mounts the same persistent `xray_config.json). It rejects
 `systemctl reload xray` from backend-api, Docker socket/API, privileged or
 host-PID access, application-driven Compose/Docker restart, and any arbitrary
 host command.
