@@ -175,8 +175,9 @@ Direction B is the selected crash-safe architecture. The normal sequence is:
    projection verification. `runtime/file = B` and `APPLIED B` are valid
    only after these checks succeed; APPLIED remains projection evidence, never
    DB authority.
-6. Perform the second durable finalization transaction: pending becomes
-   APPLIED/SYNCED, Subscription becomes ACTIVE, Order becomes ACTIVATED, and
+6. Perform the second durable finalization transaction: the gateway
+   reconciliation Job becomes SUCCEEDED, Subscription becomes ACTIVE, Order
+   becomes ACTIVATED, and
    other customer-facing success state is committed together. Only after
    this commit may the run be SUCCEEDED, a subscription URL be returned, or
    customer success be reported.
@@ -231,7 +232,7 @@ infers desired state from APPLIED, runtime, filesystem, or fingerprint alone.
 
 ## Deferred implementation boundary
 
-This ADR remains `Proposed`. It does not implement the state machine or any
+This ADR remains `Accepted`. It does not implement the state machine or any
 new reconciliation table/model, enum, schema/Alembic migration,
 `current_desired_routing_state()`, new domain protocol, provider finalize API,
 provisioning-state/service ordering, token-step move, accounting compensation
@@ -265,3 +266,9 @@ manual principal command fails closed for a real Xray selection until routed
 through this reconciler. The production GATEWAY_PROVIDER=xray_file hard gate
 remains until the implementation and its independent review prove every
 writer and recovery path safe.
+
+Gateway retry and exhaustion state is owned by the GATEWAY_RECONCILE Job,
+safe AuditLog entries, and provision_error where customer-facing business
+state requires it. Gateway reconciliation does not write
+Subscription.reconcile_state or reconcile_attempts; those fields remain
+owned by the accounting reconciliation worker.
