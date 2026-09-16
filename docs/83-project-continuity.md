@@ -751,8 +751,8 @@ wire a real provider and does not resolve Mihomo.
 ADR-021 is a Proposed / Accepted-candidate decision, not formally Accepted
 until human merge. It records the verified current topology: backend-api is a
 normal Python container that may run the pinned Xray binary for candidate
-`xray run -test), while the Marzban container owns the running Xray process
-and mounts the same persistent `xray_config.json). It rejects
+`xray run -test`, while the Marzban container owns the running Xray process
+and mounts the same persistent `xray_config.json`. It rejects
 `systemctl reload xray` from backend-api, Docker socket/API, privileged or
 host-PID access, application-driven Compose/Docker restart, and any arbitrary
 host command.
@@ -792,3 +792,39 @@ COMPLETE; Phase 2C3A (Xray runtime-control ADR) ACTIVE and awaiting
 independent exact-head review. Phase 2C3B Xray registry implementation is
 gated on human acceptance of ADR-021. Phase 2C4A/2C4B Mihomo ADR and
 implementation remain pending.
+
+
+## Review follow-up — Phase 2C3A credential lifetime and verified internal TLS
+
+The review of `61e4b75505ca98472acf2f974e24b25e9a54ac73` identified and this
+follow-up closes two documentation Majors without changing implementation.
+
+The concrete Marzban Xray-control helper may retain process-stable Settings-derived
+`base/control URL`, admin username, admin password, and TLS trust configuration
+as private fields. This follows the existing MarzbanAccountingProvider safety
+pattern: zero-network construction, custom safe representation, registry
+lifecycle ownership, and strict redaction. The admin password must never appear
+in repr, logs, exceptions, audit, metrics, PR/docs text, or plaintext tests.
+Authentication is lazy; a bearer token is operation-local, used for the
+activation/health operation, then discarded. No hidden global environment read,
+Session/resolver capture, or generic credential abstraction is introduced.
+
+The application-time control URL is `https://marzban:8000` on backend_net.
+This is distinct from the Xray health target `marzban:8443`. Verified internal
+TLS is required for the normal production architecture. The certificate must
+contain `DNS:marzban`, `DNS:localhost`, and `IP:127.0.0.1`; the backend uses
+the explicitly configured mounted trust anchor
+`/app/data/marzban/internal.crt`, with a central `MARZBAN_CA_CERT_PATH`
+setting permitted for the next implementation. `verify=False` is not the
+production default.
+
+The existing localhost-only certificate must not be silently overwritten. A
+future implementation/deployment must inspect existing SANs and fail closed
+with `MARZBAN_INTERNAL_TLS_MIGRATION_REQUIRED` when `DNS:marzban` is absent.
+A separately authorized certificate rotation step is required. Fresh VPS
+generation must create the complete SAN set. The prior Markdown fence typos
+were corrected: `xray run -test` and `xray_config.json`.
+
+Phase status remains unchanged: Phase 2B COMPLETE; Phase 2C ACTIVE; Phase 2C1
+COMPLETE; Phase 2C2 COMPLETE; Phase 2C3A awaits renewed independent review;
+Mihomo remains blocked.
