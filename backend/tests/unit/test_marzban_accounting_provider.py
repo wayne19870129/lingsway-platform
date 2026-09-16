@@ -797,11 +797,14 @@ def test_owned_client_loads_explicit_ca_only_on_first_operation(
             return None
 
     sentinel_context = object()
+
+    def build_tls(*, verify_tls: bool, ca_cert_path: str) -> object:
+        calls.append((ca_cert_path, float(verify_tls)))
+        return sentinel_context
+
     monkeypatch.setattr(
         "backend.app.providers.accounting.marzban.build_marzban_tls_verify",
-        lambda *, verify_tls, ca_cert_path: (
-            calls.append((ca_cert_path, float(verify_tls))) or sentinel_context
-        ),
+        build_tls,
     )
     monkeypatch.setattr(
         "backend.app.providers.accounting.marzban.httpx.Client",
