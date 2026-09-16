@@ -2452,8 +2452,7 @@ candidate validation, shared-file projection, writer baseline, backup,
 rollback, drift, and post-activation verification ownership. Marzban retains
 runtime process lifecycle and dynamic user membership. `include_db_users()`
 does not transfer repo desired-state ownership, and `runtime.current()` is
-not a desired-state source. Process-lifetime provider state remains immutable,
-non-secret, and process-stable; authentication is lazy and operation-time.
+not a desired-state source. Process-lifetime provider configuration remains process-stable and immutable after construction. Concrete Marzban clients may privately retain Settings-derived secret fields such as the admin password only under the strict redaction contract defined by ADR-021. No Session, operation resolver, mutable operation context, or bearer token may be retained.
 No generic control-plane framework or new generic gateway DTO is introduced.
 
 Mihomo remains blocked under `MIHOMO_RENDER_BOUNDARY_BLOCKER`, plus two
@@ -2483,6 +2482,14 @@ in repr, logs, exceptions, audit, metrics, PR/docs text, or plaintext tests.
 Authentication is lazy; a bearer token is operation-local, used for the
 activation/health operation, then discarded. No hidden global environment read,
 Session/resolver capture, or generic credential abstraction is introduced.
+
+The `MARZBAN_CA_CERT_PATH` trust configuration is shared by all Lingsway
+clients accessing the same Marzban internal HTTPS endpoint, including the
+existing accounting provider and the future Xray control helper. Provider
+categories remain independent and share no concrete provider, client
+instance, or token cache; they share only central Settings-derived
+connection/TLS configuration.
+
 
 The application-time control URL is `https://marzban:8000` on backend_net.
 This is distinct from the Xray health target `marzban:8443`. Verified internal
