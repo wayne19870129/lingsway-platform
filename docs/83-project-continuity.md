@@ -944,3 +944,31 @@ and notify tests before enablement. No real external side effect was run.
 Phase status: Phase 2B COMPLETE; Phase 2C ACTIVE; Phase 2C1 COMPLETE; Phase
 2C2 COMPLETE; Phase 2C3A COMPLETE; Phase 2C3B COMPLETE but production-gated;
 Phase 2C3C implementation awaiting exact-head review; Mihomo remains blocked.
+
+
+## Review follow-up — Phase 2C3C durability
+
+At reviewed exact head `3d3a770160bdf7b45fb91789b209688438c99c1b` (canonical review `5225093815`) the independent review found five Majors and one Minor. The implementation follow-up keeps ADR-022 Accepted and the production Xray hard gate.
+
+The first purchase commit now uses a fresh independent Session, while the
+projection named lock is still held, to classify the deterministic pending
+intent plus active route as LANDED, ABSENT, or UNKNOWN after an acknowledgement
+error. Only an explicitly ABSENT outcome invokes the existing ADR-018
+certainty-aware accounting compensation; UNKNOWN is secret-safe,
+fail-closed, and never blind-disables an external user. Pre-commit failures
+reuse the same compensation helper, including PENDING_MANUAL handling.
+
+Gateway unresolved-intent and dedupe reads are locking/current reads. The
+scheduler no longer calls the reconciliation executor and passes no runtime
+gateway in `xray_file` mode; backend-api remains the sole real-Xray recovery
+executor. Gateway reconciliation no longer writes the accounting-owned
+`Subscription.reconcile_state` or `reconcile_attempts`. The recovery loop emits
+only exception type diagnostics and continues.
+
+Real MySQL integration coverage now exercises stale-snapshot blocking,
+current-read dedupe recovery, and first-commit evidence classification with
+real Sessions, Job rows, and the existing named lock. Phase status remains:
+Phase 2B COMPLETE; Phase 2C ACTIVE; Phase 2C1 COMPLETE; Phase 2C2 COMPLETE;
+Phase 2C3A COMPLETE; Phase 2C3B COMPLETE but production-gated; Phase 2C3C
+ACTIVE and production-gated, awaiting renewed exact-head review. Mihomo
+remains blocked.
