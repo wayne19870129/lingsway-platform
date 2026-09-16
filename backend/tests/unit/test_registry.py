@@ -455,7 +455,9 @@ def test_production_default_marzban_credential_fails_closed() -> None:
 def test_production_xray_file_is_rejected_before_provider_construction() -> None:
     gateway_secret = "gateway-admin-password-that-must-not-be-printed"
     ca_path = "/etc/lingsway/marzban/internal.crt"
-    with pytest.raises(ValueError, match="Production GATEWAY_PROVIDER=xray_file is disabled") as excinfo:
+    with pytest.raises(
+        ValueError, match="Production GATEWAY_PROVIDER=xray_file is disabled"
+    ) as excinfo:
         Settings.from_env(
             {
                 "APP_ENV": "production",
