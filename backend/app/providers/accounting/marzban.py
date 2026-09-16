@@ -45,6 +45,7 @@ from urllib.parse import quote
 
 import httpx
 
+from backend.app.providers.marzban_tls import build_marzban_tls_verify
 from backend.app.providers.base import (
     AccountingCreateEffect,
     AccountingCreateUserError,
@@ -371,6 +372,7 @@ class MarzbanAccountingProvider:
         default_protocol: str,
         default_inbounds_json: str,
         verify_tls: bool = True,
+        ca_cert_path: str = "/app/data/marzban/internal.crt",
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         client: httpx.Client | None = None,
     ) -> None:
@@ -384,9 +386,20 @@ class MarzbanAccountingProvider:
             default_protocol, default_inbounds_json
         )
         self._owns_client = client is None
-        self._client = client or httpx.Client(verify=verify_tls, timeout=timeout_seconds)
+        self._verify_tls = verify_tls
+        self._ca_cert_path = ca_cert_path
+        self._timeout_seconds = timeout_seconds
+        self._client: httpx.Client | None = client
         self._token: str | None = None
         self._close_failed = False
+
+    def _client_for_operation(self) -> httpx.Client:
+        if self._client is None:
+            verify = build_marzban_tls_verify(
+                verify_tls=self._verify_tls, ca_cert_path=self._ca_cert_path
+            )
+            self._client = httpx.Client(verify=verify, timeout=self._timeout_seconds)
+        return self._client
 
     def __repr__(self) -> str:
         # Deliberately not the dataclass-style "every field" repr: the
@@ -424,8 +437,11 @@ class MarzbanAccountingProvider:
                 "provider instance and must keep surfacing rather than being "
                 "silently treated as success"
             )
+        client = self._client
+        if client is None:
+            return
         try:
-            self._client.close()
+            client.close()
         except Exception:
             self._close_failed = True
             raise
@@ -434,7 +450,7 @@ class MarzbanAccountingProvider:
 
     def _authenticate(self) -> str:
         try:
-            response = self._client.post(
+            response = self._client_for_operation().post(
                 f"{self._base_url}/api/admin/token",
                 data={"username": self._admin_username, "password": self._admin_password},
             )
@@ -470,7 +486,7 @@ class MarzbanAccountingProvider:
         self, method: str, path: str, *, operation: str, json_body: Mapping[str, object] | None
     ) -> httpx.Response:
         try:
-            return self._client.request(
+            return self._client_for_operation().request(
                 method,
                 f"{self._base_url}{path}",
                 json=json_body,
