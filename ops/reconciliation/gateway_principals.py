@@ -313,6 +313,7 @@ def _marzban_from_settings(settings: Settings) -> MarzbanAccountingProvider:
         default_protocol=settings.marzban_default_protocol,
         default_inbounds_json=settings.marzban_default_inbounds_json,
         verify_tls=settings.marzban_verify_tls,
+        ca_cert_path=settings.marzban_ca_cert_path,
     )
 
 

@@ -2580,3 +2580,13 @@ Phase status: Phase 2B COMPLETE; Phase 2C ACTIVE; Phase 2C1 COMPLETE; Phase
 2C2 COMPLETE; Phase 2C3A COMPLETE; Phase 2C3B runtime wiring remains present
 but production enablement is gated by ADR-022 and awaits renewed independent
 exact-head review. Mihomo remains separately architecture-blocked.
+
+## Latest authoritative handoff — PR #114 ADR-022 crash-consistency review
+
+Reviewed exact head: `c18231e13566e82248533ca53c5b611be941a8c7`; canonical review: `5223152268`. PR #114 remains OPEN and unmerged on `task/t16-2c3b-xray-runtime-provider-wiring`.
+
+Renewed review found no Critical, and three Majors: (1) the prior apply-before-commit wording was not process-crash safe because the current provider may persist APPLIED before DB commit; (2) the projection-input audit was too narrow and omitted EgressEndpoint, EgressBinding, credential/Secret values, Reality identity, and deployment Settings writers; (3) reconciliation's Marzban provider construction omitted `marzban_ca_cert_path`. Two Minors were also identified: lazy owned-client init/close serialization and final PR metadata evidence.
+
+This follow-up keeps ADR-022 `Proposed`, compares durable staged apply/finalization with commit-first durable reconciliation, and proposes the latter for crash consistency. It defines the baseline as projection evidence only, a fresh-DB recovery authority, an A-H crash matrix, a projection-wide writer inventory, and the existing gateway named lock as the single-writer boundary. No domain/base reconciliation contract, schema, durable job, or reconciliation implementation is added here. The code changes only pass the configured CA path into manual reconciliation and serialize lazy Marzban client initialization/close; tests cover both.
+
+Phase status: Phase 2B COMPLETE; Phase 2C ACTIVE; Phase 2C1 COMPLETE; Phase 2C2 COMPLETE; Phase 2C3A COMPLETE; Phase 2C3B remains ACTIVE/GATED by ADR-022. Mihomo remains separately blocked.

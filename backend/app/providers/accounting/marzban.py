@@ -41,6 +41,7 @@ import json
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
+from threading import Lock
 from urllib.parse import quote
 
 import httpx
@@ -404,25 +405,27 @@ class MarzbanAccountingProvider:
         self._token: str | None = None
         self._close_failed = False
         self._closed = False
+        self._client_init_lock = Lock()
 
     def _client_for_operation(self) -> httpx.Client:
-        if self._closed:
-            raise MarzbanProviderClosedError(
-                "MarzbanAccountingProvider is closed",
-                operation="lifecycle",
-            )
-        if self._client is None:
-            try:
-                verify = build_marzban_tls_verify(
-                    verify_tls=self._verify_tls, ca_cert_path=self._ca_cert_path
+        with self._client_init_lock:
+            if self._closed:
+                raise MarzbanProviderClosedError(
+                    "MarzbanAccountingProvider is closed",
+                    operation="lifecycle",
                 )
-            except MarzbanTlsConfigurationError as exc:
-                raise MarzbanPreflightError(
-                    "Marzban TLS trust configuration could not be prepared",
-                    operation="preflight",
-                ) from exc
-            self._client = httpx.Client(verify=verify, timeout=self._timeout_seconds)
-        return self._client
+            if self._client is None:
+                try:
+                    verify = build_marzban_tls_verify(
+                        verify_tls=self._verify_tls, ca_cert_path=self._ca_cert_path
+                    )
+                except MarzbanTlsConfigurationError as exc:
+                    raise MarzbanPreflightError(
+                        "Marzban TLS trust configuration could not be prepared",
+                        operation="preflight",
+                    ) from exc
+                self._client = httpx.Client(verify=verify, timeout=self._timeout_seconds)
+            return self._client
 
     def __repr__(self) -> str:
         # Deliberately not the dataclass-style "every field" repr: the
@@ -449,26 +452,27 @@ class MarzbanAccountingProvider:
         every later call instead of calling ``self._client.close()``
         again (see ``SubscriptionTransportProvider.close()`` for the same
         fix and the full rationale)."""
-        if self._close_failed:
-            raise RuntimeError(
-                "MarzbanAccountingProvider's owned httpx.Client previously failed "
-                "to close; httpx.Client.close() cannot be safely retried once it "
-                "has raised (it marks its internal state CLOSED before actually "
-                "closing the transport), so this failure is permanent for this "
-                "provider instance and must keep surfacing rather than being "
-                "silently treated as success"
-            )
-        self._closed = True
-        if not self._owns_client:
-            return
-        client = self._client
-        if client is None:
-            return
-        try:
-            client.close()
-        except Exception:
-            self._close_failed = True
-            raise
+        with self._client_init_lock:
+            if self._close_failed:
+                raise RuntimeError(
+                    "MarzbanAccountingProvider's owned httpx.Client previously failed "
+                    "to close; httpx.Client.close() cannot be safely retried once it "
+                    "has raised (it marks its internal state CLOSED before actually "
+                    "closing the transport), so this failure is permanent for this "
+                    "provider instance and must keep surfacing rather than being "
+                    "silently treated as success"
+                )
+            self._closed = True
+            if not self._owns_client:
+                return
+            client = self._client
+            if client is None:
+                return
+            try:
+                client.close()
+            except Exception:
+                self._close_failed = True
+                raise
 
     # -- auth -----------------------------------------------------------
 

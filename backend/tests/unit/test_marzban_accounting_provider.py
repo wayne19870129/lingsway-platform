@@ -13,14 +13,17 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from threading import Barrier
 from typing import Any
 
 import httpx
 import pytest
 
+from backend.app.providers.accounting import marzban as marzban_module
 from backend.app.providers.accounting.marzban import (
     MarzbanAccountingProvider,
     MarzbanApiError,
@@ -957,3 +960,42 @@ def test_close_permanently_surfaces_failure_when_the_owned_transport_close_raise
     assert transport.close_calls == 1  # never actually retried -- httpx would just no-op
 
     assert provider._client.is_closed is True  # noqa: SLF001
+
+def test_concurrent_lazy_client_creation_is_single_owned_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first concurrent operation creates exactly one owned client."""
+
+    created: list[object] = []
+    start = Barrier(2)
+
+    class _Client:
+        def close(self) -> None:
+            return None
+
+    def client_factory(**_kwargs: Any) -> _Client:
+        client = _Client()
+        created.append(client)
+        return client
+
+    monkeypatch.setattr(marzban_module.httpx, "Client", client_factory)
+    provider = MarzbanAccountingProvider(
+        base_url=_BASE_URL,
+        admin_username=_ADMIN_USERNAME,
+        admin_password=_ADMIN_PASSWORD,
+        default_protocol="vless",
+        default_inbounds_json=_INBOUNDS_JSON,
+        verify_tls=False,
+    )
+
+    def first_operation() -> object:
+        start.wait(timeout=5)
+        return provider._client_for_operation()  # noqa: SLF001
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        clients = list(executor.map(lambda _item: first_operation(), range(2)))
+
+    assert len(created) == 1
+    assert clients[0] is created[0]
+    assert clients[1] is created[0]
+    provider.close()

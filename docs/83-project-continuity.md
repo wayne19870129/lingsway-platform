@@ -890,3 +890,13 @@ compensation failure DEGRADED/manual-intervention rather than a stale APPLIED
 baseline. It does not implement domain/application changes in this slice.
 PR #114 remains OPEN and unmerged; no real Marzban operation, Xray reload,
 certificate rotation, or deployment was performed.
+
+## Latest authoritative handoff — PR #114 ADR-022 crash-consistency review
+
+The renewed review of exact head `c18231e13566e82248533ca53c5b611be941a8c7` (canonical review `5223152268`) found no Critical, but three Majors and two Minors. This slice addresses only the documented ADR-022 crash-consistency/projection-wide audit, the reconciliation CA trust-path omission, and Marzban lazy-client lifecycle serialization.
+
+ADR-022 remains `Proposed`, not Accepted. It now rejects the current provider's APPLIED-before-DB-commit behavior as insufficient for process-crash safety, compares durable staged apply/finalization against commit-first durable reconciliation, proposes commit-first based on crash consistency, and specifies that fresh committed DB desired state is the sole restart authority. It inventories GatewayRouteBinding, EgressEndpoint, EgressBinding, referenced credential values, Reality identity, and deployment Settings, classifies current/future writers, makes the existing gateway named lock the single projection-writer boundary, and includes the required A-H crash matrix. No domain/base reconciliation implementation, schema, durable job, or release orchestration is included.
+
+`_marzban_from_settings()` now passes `settings.marzban_ca_cert_path`. `MarzbanAccountingProvider` uses one minimal lock around lazy owned-client creation and close, preserving zero-I/O construction and injected-client ownership. PR #114 remains OPEN and unmerged; no deployment or real Marzban/Xray side effect occurred.
+
+Phase status: Phase 2B COMPLETE; Phase 2C ACTIVE; Phase 2C1 COMPLETE; Phase 2C2 COMPLETE; Phase 2C3A COMPLETE; Phase 2C3B remains ACTIVE/GATED by ADR-022. Mihomo remains separately blocked.
