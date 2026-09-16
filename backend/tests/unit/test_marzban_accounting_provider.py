@@ -785,9 +785,8 @@ def test_401_error_message_never_exposes_bearer_token() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_close_closes_a_self_created_client() -> None:
-    """When no client is injected, MarzbanAccountingProvider builds its
-    own httpx.Client -- close() must actually close that owned client."""
+def test_close_before_lazy_client_creation_is_safe() -> None:
+    """No client or CA file is touched by construction or early close."""
     provider = MarzbanAccountingProvider(
         base_url=_BASE_URL,
         admin_username=_ADMIN_USERNAME,
@@ -796,12 +795,12 @@ def test_close_closes_a_self_created_client() -> None:
         default_inbounds_json=_INBOUNDS_JSON,
     )
     assert provider._owns_client is True  # noqa: SLF001
-    client = provider._client  # noqa: SLF001
-    assert client.is_closed is False
+    assert provider._client is None  # noqa: SLF001
 
     provider.close()
+    provider.close()
 
-    assert client.is_closed is True
+    assert provider._client is None  # noqa: SLF001
 
 
 def test_close_never_closes_an_injected_client() -> None:
