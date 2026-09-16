@@ -404,7 +404,7 @@ def release_egress(
         )
         if binding is None:
             return False
-        assert_no_unresolved_gateway_mutation(db, subscription_id)
+        assert_no_unresolved_gateway_mutation(db)
         egress = db.scalar(
             select(EgressEndpoint)
             .where(EgressEndpoint.id == binding.egress_id)

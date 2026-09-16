@@ -179,6 +179,14 @@ def _record_failure(db: Session, job_id: int, error: BaseException, now: datetim
     job.locked_at = None
     job.last_error_code = reason_code[:80]
     job.available_at = now + timedelta(minutes=min(2 ** max(job.attempts, 1), 60))
+    provision_run_id = payload.get("provision_run_id")
+    if exhausted and isinstance(provision_run_id, str) and provision_run_id.isdigit():
+        provision_run = db.get(Job, int(provision_run_id))
+        if provision_run is not None:
+            provision_run.status = JobStatus.FAILED
+            provision_run.locked_at = None
+            provision_run.last_error_code = reason_code[:80]
+
     if subscription is not None:
         subscription.reconcile_state = ReconcileState.FAILED if exhausted else ReconcileState.PENDING
         subscription.provision_error = (

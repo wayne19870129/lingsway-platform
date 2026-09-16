@@ -13,10 +13,10 @@ from backend.app.api.subscription import router as subscription_router
 from backend.app.api.subscription import subscription_feed_router
 from backend.app.core.config import get_settings
 from backend.app.infra.gateway_reconciliation import reconcile_gateway_job
-from backend.app.providers.registry import build_registry
+from backend.app.providers.registry import ProviderRegistry, build_registry
 
 
-async def _gateway_reconciliation_loop(registry: object, stop: asyncio.Event) -> None:
+async def _gateway_reconciliation_loop(registry: ProviderRegistry, stop: asyncio.Event) -> None:
     """Recover durable gateway intents without owning another provider registry."""
     while not stop.is_set():
         try:

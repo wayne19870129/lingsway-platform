@@ -28,6 +28,7 @@ from backend.app.domain.provisioning import (
     ProvisioningState,
     ProvisionOutcome,
     ProvisionRequest,
+    ProvisionStatus,
     ProvisionRunStore,
     ProvisionStep,
 )
@@ -122,7 +123,7 @@ def _confirm_paid_purchase_durable(
     committed = False
     try:
         with state.gateway_route_binding_lock():
-            assert_no_unresolved_gateway_mutation(db, subscription.id)
+            assert_no_unresolved_gateway_mutation(db)
             subscription.accounting_user_id = checkpoint.account_user.username
             raw_token = provisioning.token_factory()
             state.store_subscription_token(request.customer_id, raw_token)
