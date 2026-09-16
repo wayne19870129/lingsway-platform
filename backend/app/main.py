@@ -15,7 +15,6 @@ from backend.app.infra.gateway_reconciliation import reconcile_gateway_job
 from backend.app.providers.registry import ProviderRegistry, build_registry
 from fastapi import FastAPI
 
-
 logger = logging.getLogger(__name__)
 
 
