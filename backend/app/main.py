@@ -5,6 +5,8 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 
+from fastapi import FastAPI
+
 from backend.app.api.admin import router as admin_router
 from backend.app.api.health import router as health_router
 from backend.app.api.public import router as public_router
@@ -13,7 +15,7 @@ from backend.app.api.subscription import subscription_feed_router
 from backend.app.core.config import get_settings
 from backend.app.infra.gateway_reconciliation import reconcile_gateway_job
 from backend.app.providers.registry import ProviderRegistry, build_registry
-from fastapi import FastAPI
+
 
 logger = logging.getLogger(__name__)
 
