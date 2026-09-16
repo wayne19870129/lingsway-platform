@@ -195,8 +195,8 @@ def build_registry(settings: Settings) -> ProviderRegistry:
     else:
         accounting = MarzbanAccountingProvider(
             base_url=settings.marzban_base_url,
-            _admin_username=settings.marzban_admin_username,
-            _admin_password=settings.marzban_admin_password,
+            admin_username=settings.marzban_admin_username,
+            admin_password=settings.marzban_admin_password,
             default_protocol=settings.marzban_default_protocol,
             default_inbounds_json=settings.marzban_default_inbounds_json,
             verify_tls=settings.marzban_verify_tls,
@@ -210,8 +210,8 @@ def build_registry(settings: Settings) -> ProviderRegistry:
             config_path=Path(settings.xray_config_path),
             backup_dir=Path(settings.xray_backup_dir),
             control_base_url=settings.marzban_base_url,
-            admin_username=settings.marzban_admin_username,
-            admin_password=settings.marzban_admin_password,
+            _admin_username=settings.marzban_admin_username,
+            _admin_password=settings.marzban_admin_password,
             verify_tls=settings.marzban_verify_tls,
             ca_cert_path=settings.marzban_ca_cert_path,
         )
