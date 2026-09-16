@@ -496,6 +496,8 @@ def test_production_marzban_accounting_with_mock_gateway_remains_allowed(
             "MARZBAN_BASE_URL": "https://marzban.test",
             "MARZBAN_ADMIN_USERNAME": "admin",
             "MARZBAN_ADMIN_PASSWORD": "test-password",
+            "MARZBAN_DEFAULT_PROTOCOL": "vless",
+            "MARZBAN_DEFAULT_INBOUNDS_JSON": '{"vless": ["inbound-vless"]}',
             "MARZBAN_VERIFY_TLS": "true",
             "MARZBAN_CA_CERT_PATH": "/etc/lingsway/marzban/internal.crt",
         }
