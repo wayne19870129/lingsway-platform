@@ -171,58 +171,58 @@ The Marzban admin/control API and the Xray inbound are different runtime
 targets and must not be conflated:
 
 - Marzban's Uvicorn/admin API listens on container port 8000. The
-  application-time control URL is \`https://marzban:8000\` on the Compose
-  backend network, represented by central \`MARZBAN_BASE_URL\`.
+  application-time control URL is `https://marzban:8000` on the Compose
+  backend network, represented by central `MARZBAN_BASE_URL`.
 - Xray listens on container port 8443. The runtime TCP health target is
-  \`marzban:8443\` on that same backend network.
+  `marzban:8443` on that same backend network.
 - The host-published 8443 port is not the application control API, and Caddy
   does not proxy the Marzban admin API.
-- \`127.0.0.1:8443\` inside backend-api is not the real Xray runtime target.
+- `127.0.0.1:8443` inside backend-api is not the real Xray runtime target.
 
 A real Xray runtime health result must require both:
 
-- the authenticated Marzban core API at \`https://marzban:8000\` is available
-  and reports the core as started/running (the upstream \`GET /api/core\`
-  response exposes \`CoreStats.started\`); and
-- \`marzban:8443\` is TCP reachable from the backend network.
+- the authenticated Marzban core API at `https://marzban:8000` is available
+  and reports the core as started/running (the upstream `GET /api/core`
+  response exposes `CoreStats.started`); and
+- `marzban:8443` is TCP reachable from the backend network.
 
 Any health failure follows the existing rollback path.
 
 The selected normal production architecture is verified internal TLS, not
-\`MARZBAN_VERIFY_TLS=false\`. The internal server certificate must include
-at least \`DNS:marzban\`, \`DNS:localhost\`, and \`IP:127.0.0.1\`. The
+`MARZBAN_VERIFY_TLS=false`. The internal server certificate must include
+at least `DNS:marzban`, `DNS:localhost`, and `IP:127.0.0.1`. The
 backend-side explicit trust anchor is the mounted
-\`/app/data/marzban/internal.crt ), whose host-side source is the persistent
+`/app/data/marzban/internal.crt), whose host-side source is the persistent
 Marzban data directory. The next implementation may expose this path through
-a central \`MARZBAN_CA_CERT_PATH\` setting, with the production default
-\`/app/data/marzban/internal.crt ); the provider must not read environment
+a central `MARZBAN_CA_CERT_PATH` setting, with the production default
+`/app/data/marzban/internal.crt); the provider must not read environment
 variables as a second configuration source.
 
-When \`MARZBAN_VERIFY_TLS=true\`, a valid configured trust path is mandatory
+When `MARZBAN_VERIFY_TLS=true`, a valid configured trust path is mandatory
 and the HTTP client must load that certificate through an explicit
-\`ssl.SSLContext ) (or equivalent httpx TLS configuration). It must not rely
+`ssl.SSLContext) (or equivalent httpx TLS configuration). It must not rely
 on system-CA auto-trust for this self-signed internal certificate and must not
-use \`verify=False\` as the production default.
+use `verify=False` as the production default.
 
 ## 6. Authentication, credential lifetime, and certificate migration
 
 The next implementation may reuse the central Settings values
-\`MARZBAN_BASE_URL\`, \`MARZBAN_ADMIN_USERNAME\`,
-\`MARZBAN_ADMIN_PASSWORD\`, and \`MARZBAN_VERIFY_TLS\`. The gateway provider
-must not depend on a concrete \`MarzbanAccountingProvider ); provider
+`MARZBAN_BASE_URL`, `MARZBAN_ADMIN_USERNAME`,
+`MARZBAN_ADMIN_PASSWORD`, and `MARZBAN_VERIFY_TLS`. The gateway provider
+must not depend on a concrete `MarzbanAccountingProvider); provider
 categories remain independent.
 
-The existing \`MarzbanAccountingProvider ) already establishes the accepted
+The existing `MarzbanAccountingProvider) already establishes the accepted
 secret-retention safety pattern: private admin username/password fields,
 zero-network construction, safe representation, and lifecycle ownership by
 the registry. The concrete Xray Marzban-control helper may use the same
 pattern. Specifically, it may privately retain the process-stable
-\`base/control URL ), admin username, admin password, and TLS trust
+`base/control URL), admin username, admin password, and TLS trust
 configuration supplied by central Settings. The admin password is a secret
 and may be a private process-lifetime field only under this redaction
 contract:
 
-- a custom safe \`repr ) must omit the password;
+- a custom safe `repr) must omit the password;
 - the password must not appear in logs, exceptions, audit records, metrics,
   PR/docs text, or plaintext test output; and
 - construction must perform no HTTP request.
@@ -234,16 +234,16 @@ when that operation completes. No process-lifetime token cache is required
 by this ADR. If a later implementation proves caching necessary, it must add
 explicit redaction and invalidation tests without weakening this boundary.
 
-This design supplies the existing \`GatewayProvider.apply(candidate) )
+This design supplies the existing `GatewayProvider.apply(candidate))
 shape without reading global environment state during an operation, keeping
 a hidden closure around a Session/resolver, or changing the generic provider
-contract. \`build_registry(settings) ) is the configuration assembly
+contract. `build_registry(settings)) is the configuration assembly
 boundary: it passes validated Settings-derived values to the concrete
-helper; the helper does not call \`os.environ ) as a second source. A small
+helper; the helper does not call `os.environ) as a second source. A small
 concrete Xray runtime/control helper or lazy authenticated client is
 permitted, but no generic credential or control-plane abstraction is
 required. Any owned client that needs closing is owned and closed through
-the existing process/application-lifetime \`ProviderRegistry ) lifecycle.
+the existing process/application-lifetime `ProviderRegistry) lifecycle.
 
 The registry/provider must not retain a SQLAlchemy Session, operation
 resolver, Reality plaintext, mutable operation context, or bearer token.
@@ -251,12 +251,12 @@ Construction of the registry/provider must make no network request, real
 reload, Docker call, or deployment-side effect.
 
 The current deployment certificate generator creates a self-signed pair
-with SAN \`DNS:localhost,IP:127.0.0.1 ). That localhost-only pair is not
-valid for \`https://marzban:8000 ). An existing certificate must never be
+with SAN `DNS:localhost,IP:127.0.0.1). That localhost-only pair is not
+valid for `https://marzban:8000). An existing certificate must never be
 silently overwritten or replaced behind a live process. Before a future
 implementation/deployment uses internal TLS, it must inspect the existing
-certificate SANs. If \`DNS:marzban ) is absent, it must fail closed with the
-stable reason code \`MARZBAN_INTERNAL_TLS_MIGRATION_REQUIRED ) (or an
+certificate SANs. If `DNS:marzban) is absent, it must fail closed with the
+stable reason code `MARZBAN_INTERNAL_TLS_MIGRATION_REQUIRED) (or an
 equivalent stable, secret-safe code). A separately authorized certificate
 rotation/migration step must then generate and install the new certificate
 and key pair, with explicit restart/activation coordination. A fresh VPS
