@@ -12,6 +12,7 @@ from sqlalchemy import select
 
 from backend.app.core.config import get_settings
 from backend.app.core.database import SessionLocal
+from backend.app.infra.gateway_reconciliation import reconcile_gateway_job
 from backend.app.models import (
     AuditLog,
     ProviderStatus,
@@ -29,7 +30,6 @@ from backend.app.workers.accounting_sync import (
     run_pending_reconcile,
 )
 from backend.app.workers.drift_check import check_egress_drift
-from backend.app.infra.gateway_reconciliation import reconcile_gateway_job
 from backend.app.workers.transport_sync import refresh_provider_inventory
 
 NORMAL_USAGE_INTERVAL_SECONDS = 300

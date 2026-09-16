@@ -10,12 +10,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from backend.app.core.config import get_settings
-from backend.app.infra.gateway_route_lock import gateway_route_binding_write
 from backend.app.infra.gateway_reconciliation import (
     assert_no_unresolved_gateway_mutation,
     enqueue_gateway_reconciliation,
     reconcile_gateway_job_in_session,
 )
+from backend.app.infra.gateway_route_lock import gateway_route_binding_write
 from backend.app.models import (
     AuditLog,
     EgressBinding,
