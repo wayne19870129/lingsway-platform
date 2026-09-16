@@ -13,7 +13,6 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 
 from backend.app.core.config import get_settings
-from backend.app.core.config import get_settings
 from backend.app.domain.capacity import ensure_capacity
 from backend.app.domain.ordering import (
     BillingCommand,
