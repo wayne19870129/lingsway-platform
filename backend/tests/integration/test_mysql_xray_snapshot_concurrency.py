@@ -18,8 +18,10 @@ from backend.app.core.database import Base, build_engine
 from backend.app.core.secrets import put_secret
 from backend.app.infra.credential_resolver import SqlAlchemyCredentialResolver
 from backend.app.infra.gateway_reconciliation import (
+    FirstCommitOutcome,
     GatewayReconciliationBlocked,
     assert_no_unresolved_gateway_mutation,
+    classify_first_commit_outcome,
     enqueue_gateway_reconciliation,
 )
 from backend.app.infra.gateway_route_lock import gateway_route_binding_write
@@ -547,3 +549,72 @@ def test_mysql_gateway_pending_current_read_breaks_stale_snapshot(
         with gateway_route_binding_write(writer_c):
             with pytest.raises(GatewayReconciliationBlocked):
                 assert_no_unresolved_gateway_mutation(writer_c)
+
+
+def test_mysql_gateway_dedupe_current_read_does_not_duplicate_intent(
+    mysql_engine: Engine,
+) -> None:
+    """A stale Session cannot enqueue a second row for a committed dedupe key."""
+    _, subscription_id, _, _ = _seed(mysql_engine)
+    operation_id = f"dedupe-{uuid4().hex}"
+    with Session(mysql_engine) as writer_c:
+        assert writer_c.scalars(select(GatewayRouteBinding)).all() == []
+        with Session(mysql_engine) as writer_b:
+            with gateway_route_binding_write(writer_b):
+                pending = enqueue_gateway_reconciliation(
+                    writer_b,
+                    operation_kind="PURCHASE",
+                    subscription_id=subscription_id,
+                    operation_id=operation_id,
+                )
+                writer_b.commit()
+
+        with gateway_route_binding_write(writer_c):
+            recovered = enqueue_gateway_reconciliation(
+                writer_c,
+                operation_kind="PURCHASE",
+                subscription_id=subscription_id,
+                operation_id=operation_id,
+            )
+            assert recovered.id == pending.id
+            writer_c.rollback()
+
+
+def test_mysql_first_commit_probe_requires_complete_authoritative_evidence(
+    mysql_engine: Engine,
+) -> None:
+    """Fresh commit classification distinguishes landed, absent, and partial B."""
+    _, subscription_id, endpoint, _ = _seed(mysql_engine)
+    operation_id = f"certainty-{uuid4().hex}"
+    dedupe_key = f"GATEWAY_RECONCILE:PURCHASE:{operation_id}"
+    with Session(mysql_engine) as db:
+        with gateway_route_binding_write(db):
+            enqueue_gateway_reconciliation(
+                db,
+                operation_kind="PURCHASE",
+                subscription_id=subscription_id,
+                operation_id=operation_id,
+            )
+            db.add(
+                GatewayRouteBinding(
+                    subscription_id=subscription_id,
+                    egress_id=endpoint.id,
+                    gateway_principal=f"certainty-{operation_id}",
+                    outbound_tag=f"certainty-{operation_id}",
+                    enabled=True,
+                )
+            )
+            db.commit()
+
+    with Session(mysql_engine) as probe:
+        assert classify_first_commit_outcome(
+            probe, dedupe_key=dedupe_key, subscription_id=subscription_id
+        ) is FirstCommitOutcome.LANDED
+
+    _, absent_subscription, _, _ = _seed(mysql_engine)
+    with Session(mysql_engine) as probe:
+        assert classify_first_commit_outcome(
+            probe,
+            dedupe_key=f"GATEWAY_RECONCILE:PURCHASE:absent-{uuid4().hex}",
+            subscription_id=absent_subscription,
+        ) is FirstCommitOutcome.ABSENT
