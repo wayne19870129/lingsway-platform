@@ -56,11 +56,28 @@ ensure_marzban_internal_tls() {
 }
 
 resolve_accounting_provider() {
-  local env_file="$1" value=''
-  if [[ -f "$env_file" ]]; then
-    value="$(grep -m1 '^ACCOUNTING_PROVIDER=' "$env_file" 2>/dev/null | cut -d= -f2- || true)"
+  # Reads the exact same effective ACCOUNTING_PROVIDER value the backend
+  # container will actually run with: a missing file or missing key
+  # resolves to "mock" (the real default in backend/app/core/config.py),
+  # but anything else -- including a value docker compose's own env_file
+  # quote-stripping would resolve differently than this parser -- must
+  # NOT silently fall back to "mock". A single-quoted or double-quoted
+  # value is unwrapped one layer (matching Compose's own env_file
+  # semantics); a value that isn't cleanly "mock" after that is returned
+  # as-is, not coerced, so the caller can fail closed on anything that
+  # isn't an exact, unambiguous "mock".
+  local env_file="$1" line value
+  [[ -f "$env_file" ]] || { printf '%s' 'mock'; return; }
+  line="$(grep -m1 -E '^ACCOUNTING_PROVIDER=' "$env_file" 2>/dev/null || true)"
+  if [[ -z "$line" ]]; then
+    printf '%s' 'mock'
+    return
   fi
-  printf '%s' "${value:-mock}"
+  value="${line#ACCOUNTING_PROVIDER=}"
+  if [[ ( "$value" == \"*\" && "$value" == *\" ) || ( "$value" == \'*\' && "$value" == *\' ) ]]; then
+    value="${value:1:-1}"
+  fi
+  printf '%s' "$value"
 }
 
 verify_marzban_image_identity() {
@@ -68,20 +85,31 @@ verify_marzban_image_identity() {
   # start the unpatched upstream `gozargah/marzban:v0.8.4` image (or an
   # arbitrary `MARZBAN_IMAGE` override) while the backend ran
   # ACCOUNTING_PROVIDER=marzban -- an image *tag* is not proof of what was
-  # actually built. Resolve exactly the image reference Compose will use
-  # (same default/override precedence as compose.transport.yml) and fail
-  # closed via verify_patched_image.py's docker-inspect-based label check
-  # before Marzban is ever started. There is no override that skips this
-  # -- a custom MARZBAN_IMAGE goes through the identical check.
-  local app_env="$1" accounting_provider marzban_image
-  accounting_provider="$(resolve_accounting_provider "$app_env")"
-  if [[ "$accounting_provider" != marzban ]]; then
+  # actually built.
+  #
+  # Marzban always runs (it hosts the Xray gateway regardless of
+  # ACCOUNTING_PROVIDER), so compose.transport.yml's own MARZBAN_IMAGE
+  # default must stay the unpatched upstream tag -- a fresh machine that
+  # has never run build_patched_image.sh must still be able to deploy
+  # with the default ACCOUNTING_PROVIDER=mock. Only for the genuinely
+  # dangerous combination (accounting_provider resolves to anything other
+  # than an exact "mock" -- i.e. "marzban", or anything ambiguous this
+  # parser can't positively confirm is "mock") does this function
+  # override MARZBAN_IMAGE to the local patched tag (unless the caller's
+  # environment already set one) and export it, so the `compose up` call
+  # that follows resolves the identical image this just verified -- then
+  # fail closed via verify_patched_image.py's docker-inspect-based label
+  # check before Marzban is ever started. There is no override that skips
+  # this -- a custom MARZBAN_IMAGE still goes through the identical check.
+  local env_file="$1" accounting_provider
+  accounting_provider="$(resolve_accounting_provider "$env_file")"
+  if [[ "$accounting_provider" == mock ]]; then
     return 0
   fi
-  marzban_image="${MARZBAN_IMAGE:-lingsway/marzban:v0.8.4-routing-principal}"
-  log "ACCOUNTING_PROVIDER=marzban selected; verifying patched Marzban image identity for $marzban_image"
-  python3 "$DEPLOY_ROOT/infrastructure/marzban/verify_patched_image.py" "$marzban_image" || \
-    die "Marzban image identity verification failed for '$marzban_image'; refusing to start Marzban with ACCOUNTING_PROVIDER=marzban against an image that does not prove it carries the routing_principal patch. Build it with infrastructure/marzban/build_patched_image.sh first."
+  export MARZBAN_IMAGE="${MARZBAN_IMAGE:-lingsway/marzban:v0.8.4-routing-principal}"
+  log "ACCOUNTING_PROVIDER=${accounting_provider@Q} (not mock); verifying patched Marzban image identity for $MARZBAN_IMAGE"
+  python3 "$DEPLOY_ROOT/infrastructure/marzban/verify_patched_image.py" "$MARZBAN_IMAGE" || \
+    die "Marzban image identity verification failed for '$MARZBAN_IMAGE'; refusing to start Marzban with ACCOUNTING_PROVIDER not exactly mock against an image that does not prove it carries the routing_principal patch. Build it with infrastructure/marzban/build_patched_image.sh first."
 }
 
 port_is_listening() {
@@ -171,7 +199,16 @@ main() {
   [[ "$expected_sha" =~ ^[0-9a-f]{64}$ ]] || \
     die 'renderer did not return a valid expected repo-owned Xray fingerprint'
   validate_runtime_files
-  verify_marzban_image_identity "${APP_ENV_FILE:-$DEPLOY_ROOT/.env}"
+  # LINGSWAY_ENV_FILE (not APP_ENV_FILE) matches exactly what
+  # compose.base.yml/compose.transport.yml's `env_file:` directives
+  # resolve for the backend-api/marzban services themselves -- this must
+  # read the same file Compose will actually load, not a separately-named
+  # deploy-script convention that could point elsewhere. If an operator
+  # sets LINGSWAY_ENV_FILE to a *relative* path, Compose resolves it
+  # relative to the compose files' own directory while this resolves it
+  # relative to the current shell -- an absolute path (the norm for this
+  # kind of override) resolves identically either way.
+  verify_marzban_image_identity "${LINGSWAY_ENV_FILE:-$DEPLOY_ROOT/.env}"
   compose up --detach
   if is_true "${RESTART_TRANSPORT:-false}"; then
     compose restart marzban mihomo

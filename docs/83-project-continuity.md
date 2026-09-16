@@ -76,17 +76,16 @@ from anything a prior conversation "remembers."
 - One task, one PR; fixes from review feedback land as new commits on the
   same PR/branch, never a second PR for the same task.
 
-**Current execution mode (as of TASK-T16 Phase 2C2, PR `task/t16-2c2-patched-marzban-image`):**
-Claude Code Web (model Sonnet 5, Medium thinking/effort) is running as the
-sole implementation executor described above. Codex is paused and is not
-concurrently writing to any module. ChatGPT continues in its existing role
-as an independent exact-SHA reviewer (see `AGENTS.md` "协作角色与职责").
-The User is away from a machine during this slice and has authorized
-Claude Code to self-drive ordinary implementation detail (branch, commit,
-push, PR, self-review, CI fixups) without stopping to ask mid-task, within
-what ADRs/`AGENTS.md`/the relevant TASK already permit; final PR merge and
-any production/licensing decision remain exclusively the User's, unchanged
-from the collaboration model above. This is a point-in-time operating note,
+**Current execution mode (updated during TASK-T16 Phase 2C2 review, PR
+`task/t16-2c2-patched-marzban-image`):** the User has switched back to
+Codex as sole writer (Claude Code Web's quota burn during the Phase 2C2
+slice above was too high). Claude Code Web is not concurrently writing to
+any module. ChatGPT continues in its existing role as an independent
+exact-SHA reviewer (see `AGENTS.md` "协作角色与职责"). No `AGENTS.md`
+change is needed for this switch -- it already names Claude Code as the
+sole *implementation* executor role in the abstract; this note only
+records which concrete agent is presently filling that role. This is a
+point-in-time operating note,
 not a new standing rule — update or remove it once this slice's PR is
 merged or the operating mode changes again.
 

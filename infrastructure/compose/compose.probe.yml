@@ -3,8 +3,9 @@ version: "3.8"
 services:
   gateway-probe:
     # Kept in sync with compose.transport.yml's marzban service default --
-    # see infrastructure/marzban/build_patched_image.sh (TASK-T16 Phase 2C2).
-    image: ${MARZBAN_IMAGE:-lingsway/marzban:v0.8.4-routing-principal}
+    # see that file's comment for why this stays the unpatched upstream
+    # tag by default (TASK-T16 Phase 2C2).
+    image: ${MARZBAN_IMAGE:-gozargah/marzban:v0.8.4}
     restart: unless-stopped
     profiles:
       - probe
