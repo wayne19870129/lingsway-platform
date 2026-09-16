@@ -7,6 +7,7 @@ provider implementation or contain an alternate provisioning sequence.
 
 from __future__ import annotations
 
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -213,18 +214,14 @@ def _confirm_paid_purchase_durable(
                             subscription_id=subscription.id,
                         )
                     except GatewayCommitOutcomeUnknown:
-                        try:
+                        with suppress(Exception):
                             db.rollback()
-                        except Exception:
-                            pass
                         return _mark_first_commit_unknown(
                             command, order_state, provisioning, checkpoint
                         )
                     if outcome is FirstCommitOutcome.LANDED:
-                        try:
+                        with suppress(Exception):
                             db.rollback()
-                        except Exception:
-                            pass
                         return ProvisionOutcome(checkpoint.run_id, ProvisionStatus.RUNNING)
                     if outcome is FirstCommitOutcome.ABSENT:
                         db.rollback()
@@ -237,10 +234,8 @@ def _confirm_paid_purchase_durable(
                             request,
                             commit_error,
                         )
-                    try:
+                    with suppress(Exception):
                         db.rollback()
-                    except Exception:
-                        pass
                     return _mark_first_commit_unknown(
                         command, order_state, provisioning, checkpoint
                     )
@@ -248,10 +243,8 @@ def _confirm_paid_purchase_durable(
             except Exception as error:
                 if first_commit_attempted or precommit_handler_started:
                     raise
-                try:
+                with suppress(Exception):
                     db.rollback()
-                except Exception:
-                    pass
                 precommit_handler_started = True
                 return _handle_pre_gateway_failure(
                     command, order_state, provisioning, checkpoint, request, error
@@ -259,10 +252,8 @@ def _confirm_paid_purchase_durable(
     except Exception as error:
         if first_commit_attempted or precommit_handler_started:
             raise
-        try:
+        with suppress(Exception):
             db.rollback()
-        except Exception:
-            pass
         return _handle_pre_gateway_failure(
             command, order_state, provisioning, checkpoint, request, error
         )
