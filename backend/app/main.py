@@ -1,6 +1,7 @@
 """Application entry point for the backend API."""
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 
@@ -16,11 +17,19 @@ from backend.app.infra.gateway_reconciliation import reconcile_gateway_job
 from backend.app.providers.registry import ProviderRegistry, build_registry
 
 
+logger = logging.getLogger(__name__)
+
+
 async def _gateway_reconciliation_loop(registry: ProviderRegistry, stop: asyncio.Event) -> None:
     """Recover durable gateway intents without owning another provider registry."""
     while not stop.is_set():
-        with suppress(Exception):
+        try:
             await asyncio.to_thread(reconcile_gateway_job, registry)
+        except Exception as exc:
+            logger.warning(
+                "gateway reconciliation loop attempt failed: %s",
+                type(exc).__name__,
+            )
         try:
             await asyncio.wait_for(stop.wait(), timeout=5.0)
         except TimeoutError:
