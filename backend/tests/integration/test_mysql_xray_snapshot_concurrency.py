@@ -568,6 +568,7 @@ def test_mysql_gateway_dedupe_current_read_does_not_duplicate_intent(
                 operation_id=operation_id,
             )
             writer_b.commit()
+            pending_id = pending.id
 
         with gateway_route_binding_write(writer_c):
             recovered = enqueue_gateway_reconciliation(
@@ -576,7 +577,7 @@ def test_mysql_gateway_dedupe_current_read_does_not_duplicate_intent(
                 subscription_id=subscription_id,
                 operation_id=operation_id,
             )
-            assert recovered.id == pending.id
+            assert recovered.id == pending_id
             writer_c.rollback()
 
 
