@@ -42,7 +42,7 @@ class _Client:
     def __exit__(self, *_args: object) -> None:
         return None
 
-    def post(self, url: str, *, data: dict[str, str]) -> _Response:
+    def post(self, url: str, *, data: Mapping[str, str]) -> _Response:
         self.requests.append(("POST", url, data))
         return _Response(
             200,
@@ -82,7 +82,7 @@ def _runtime(tmp_path: Path) -> MarzbanXrayRuntime:
 def test_reload_posts_exact_installed_candidate_and_discards_token(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    requests: list[tuple[str, str, dict[str, object] | None]] = []
+    requests: list[tuple[str, str, Mapping[str, object] | None]] = []
     candidate = {"outbounds": [{"tag": "candidate"}]}
     fake = _Client(requests, response_payload=candidate)
     monkeypatch.setattr(
