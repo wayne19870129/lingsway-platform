@@ -58,8 +58,8 @@ ensure_marzban_internal_tls() {
 resolve_accounting_provider() {
   # Ask the backend-api container for its own resolved
   # Settings.accounting_provider instead of hand-parsing dotenv text or
-  # depending on `compose config --format json` -- that flag is Compose
-  # v2-only, and common.sh's compose() deliberately also supports the
+  # depending on the Compose v2-only JSON configuration flag -- common.sh's
+  # compose() deliberately also supports the
   # `docker-compose` v1 fallback this repository's deploy docs record for
   # Debian 12 hosts, so a v2-only dependency here would break deployment
   # even on the default ACCOUNTING_PROVIDER=mock path on a v1-only host.
@@ -70,17 +70,28 @@ resolve_accounting_provider() {
   # already built (main() does `compose build backend-api` earlier).
   local raw_output provider
   raw_output="$(compose run --rm --no-deps backend-api python -c '
-from backend.app.core.config import get_settings
+from backend.app.core.config import Settings
 
-print(get_settings().accounting_provider)
+provider = Settings.from_env().accounting_provider
+if provider not in {"mock", "marzban"}:
+    raise SystemExit(1)
+print("__LINGSWAY_ACCOUNTING_PROVIDER__=" + provider)
 ')" || die 'unable to resolve the effective ACCOUNTING_PROVIDER from backend-api; refusing deployment'
-  # The last stdout line is the print() output; anything before it is
-  # Compose/Python startup noise some configurations route to stdout.
-  provider="$(printf '%s\n' "$raw_output" | tail -n 1)"
-  case "$provider" in
-    mock|marzban) printf '%s' "$provider" ;;
-    *) die 'effective ACCOUNTING_PROVIDER is not exactly "mock" or "marzban"; refusing deployment' ;;
+  # Accept exactly one sentinel and nothing else. This intentionally rejects
+  # zero, multiple, blank, unsupported, malformed, or noisy output so the
+  # deployment never guesses at the provider from an ambiguous probe.
+  case "$raw_output" in
+    __LINGSWAY_ACCOUNTING_PROVIDER__=mock)
+      provider=mock
+      ;;
+    __LINGSWAY_ACCOUNTING_PROVIDER__=marzban)
+      provider=marzban
+      ;;
+    *)
+      die 'effective ACCOUNTING_PROVIDER probe returned zero, multiple, blank, unsupported, or malformed sentinels; refusing deployment'
+      ;;
   esac
+  printf '%s' "$provider"
 }
 
 
