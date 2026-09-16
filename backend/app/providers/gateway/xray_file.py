@@ -8,13 +8,17 @@ import shutil
 import socket
 import subprocess
 import tempfile
+from contextlib import contextmanager
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import NoReturn, Protocol
+from typing import Iterator, NoReturn, Protocol
+
+import httpx
 
 from backend.app.core.config import Settings
+from backend.app.providers.marzban_tls import build_marzban_tls_verify
 from backend.app.providers.base import (
     ApplyResult,
     CandidateConfig,
@@ -464,6 +468,193 @@ class LocalXrayRuntime:
         if not isinstance(backup, Path):
             raise TypeError("backup must be a Path")
         shutil.copy2(backup, self.config_path)
+
+
+class MarzbanXrayControlError(RuntimeError):
+    """Stable, secret-safe failure from the Marzban Xray control API."""
+
+
+@dataclass(slots=True)
+class MarzbanXrayRuntime(LocalXrayRuntime):
+    """Concrete Xray runtime controlled by the Marzban admin API.
+
+    File backup, candidate validation, installation, and rollback storage are
+    inherited from LocalXrayRuntime.  Only activation and health differ:
+    Marzban owns the Xray process, so this runtime never invokes systemd or
+    Docker.  Authentication state is local to one control operation and is
+    never stored on the runtime object.
+    """
+
+    control_base_url: str = ""
+    admin_username: str = ""
+    admin_password: str = ""
+    verify_tls: bool = True
+    ca_cert_path: str = "/app/data/marzban/internal.crt"
+    health_host: str = "marzban"
+    health_port: int = 8443
+    timeout_seconds: float = 10.0
+
+    def __repr__(self) -> str:
+        return (
+            f"{type(self).__name__}(config_path={str(self.config_path)!r}, "
+            f"control_base_url={self.control_base_url!r}, "
+            f"health_host={self.health_host!r}, health_port={self.health_port!r})"
+        )
+
+    @contextmanager
+    def _client(self) -> Iterator[httpx.Client]:
+        verify = build_marzban_tls_verify(
+            verify_tls=self.verify_tls, ca_cert_path=self.ca_cert_path
+        )
+        with httpx.Client(verify=verify, timeout=self.timeout_seconds) as client:
+            yield client
+
+    def _authenticate(self, client: httpx.Client) -> str:
+        try:
+            response = client.post(
+                f"{self.control_base_url.rstrip('/')}/api/admin/token",
+                data={
+                    "username": self.admin_username,
+                    "password": self.admin_password,
+                },
+            )
+        except httpx.HTTPError as exc:
+            raise MarzbanXrayControlError(
+                "Marzban Xray authentication failed at the transport layer"
+            ) from exc
+        if response.status_code != 200:
+            raise MarzbanXrayControlError("Marzban Xray authentication was rejected")
+        try:
+            payload = response.json()
+        except (ValueError, TypeError) as exc:
+            raise MarzbanXrayControlError(
+                "Marzban Xray authentication returned invalid JSON"
+            ) from exc
+        if not isinstance(payload, Mapping):
+            raise MarzbanXrayControlError(
+                "Marzban Xray authentication returned an invalid payload"
+            )
+        token = payload.get("access_token")
+        token_type = payload.get("token_type")
+        if not isinstance(token, str) or not token.strip():
+            raise MarzbanXrayControlError(
+                "Marzban Xray authentication response is missing access_token"
+            )
+        if token_type is not None and not (
+            isinstance(token_type, str) and token_type.lower() == "bearer"
+        ):
+            raise MarzbanXrayControlError(
+                "Marzban Xray authentication response token_type was not bearer"
+            )
+        return token
+
+    def _request(
+        self,
+        client: httpx.Client,
+        method: str,
+        path: str,
+        token: str,
+        *,
+        json_body: Mapping[str, object] | None = None,
+    ) -> httpx.Response:
+        try:
+            return client.request(
+                method,
+                f"{self.control_base_url.rstrip('/')}{path}",
+                headers={"Authorization": f"Bearer {token}"},
+                json=json_body,
+            )
+        except httpx.HTTPError as exc:
+            raise MarzbanXrayControlError(
+                "Marzban Xray control request failed at the transport layer"
+            ) from exc
+
+    def reload(self) -> None:
+        """Activate the exact installed file through Marzban's control API.
+
+        A 401 is safe to re-authenticate once because the pinned Marzban
+        admin dependency rejects it before the route body executes.  A
+        transport failure is never retried, because PUT may have reached the
+        server before the failure was observed.
+        """
+
+        candidate = self.current()
+        token: str | None = None
+        try:
+            with self._client() as client:
+                token = self._authenticate(client)
+                response = self._request(
+                    client,
+                    "PUT",
+                    "/api/core/config",
+                    token,
+                    json_body=candidate,
+                )
+                if response.status_code == 401:
+                    token = self._authenticate(client)
+                    response = self._request(
+                        client,
+                        "PUT",
+                        "/api/core/config",
+                        token,
+                        json_body=candidate,
+                    )
+                if response.status_code != 200:
+                    raise MarzbanXrayControlError(
+                        "Marzban rejected the Xray configuration activation"
+                    )
+                try:
+                    accepted = response.json()
+                except (ValueError, TypeError) as exc:
+                    raise MarzbanXrayControlError(
+                        "Marzban Xray activation returned invalid JSON"
+                    ) from exc
+                if accepted != candidate:
+                    raise MarzbanXrayControlError(
+                        "Marzban Xray activation response did not match the candidate"
+                    )
+        finally:
+            token = None
+
+    def health(self) -> HealthReport:
+        api_ok = False
+        core_started = False
+        port_ok = False
+        token: str | None = None
+        try:
+            with self._client() as client:
+                token = self._authenticate(client)
+                response = self._request(client, "GET", "/api/core", token)
+                if response.status_code == 200:
+                    try:
+                        payload = response.json()
+                    except (ValueError, TypeError):
+                        payload = None
+                    if isinstance(payload, Mapping):
+                        api_ok = True
+                        core_started = payload.get("started") is True
+        except (MarzbanXrayControlError, httpx.HTTPError, OSError, ValueError):
+            pass
+        finally:
+            token = None
+
+        try:
+            with socket.create_connection(
+                (self.health_host, self.health_port), timeout=2
+            ):
+                port_ok = True
+        except OSError:
+            pass
+
+        return HealthReport(
+            api_ok and core_started and port_ok,
+            {
+                "marzban_control_api": str(api_ok),
+                "xray_core_started": str(core_started),
+                "port_8443": str(port_ok),
+                "health_host": self.health_host,
+            },
+        )
 
 
 def _baseline_store_for_runtime(runtime: XrayRuntime) -> XrayAppliedStateStore | None:
