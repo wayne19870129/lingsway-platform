@@ -56,29 +56,73 @@ ensure_marzban_internal_tls() {
 }
 
 resolve_accounting_provider() {
-  # Reads the exact same effective ACCOUNTING_PROVIDER value the backend
-  # container will actually run with: a missing file or missing key
-  # resolves to "mock" (the real default in backend/app/core/config.py),
-  # but anything else -- including a value docker compose's own env_file
-  # quote-stripping would resolve differently than this parser -- must
-  # NOT silently fall back to "mock". A single-quoted or double-quoted
-  # value is unwrapped one layer (matching Compose's own env_file
-  # semantics); a value that isn't cleanly "mock" after that is returned
-  # as-is, not coerced, so the caller can fail closed on anything that
-  # isn't an exact, unambiguous "mock".
-  local env_file="$1" line value
-  [[ -f "$env_file" ]] || { printf '%s' 'mock'; return; }
-  line="$(grep -m1 -E '^ACCOUNTING_PROVIDER=' "$env_file" 2>/dev/null || true)"
-  if [[ -z "$line" ]]; then
-    printf '%s' 'mock'
-    return
-  fi
-  value="${line#ACCOUNTING_PROVIDER=}"
-  if [[ ( "$value" == \"*\" && "$value" == *\" ) || ( "$value" == \'*\' && "$value" == *\' ) ]]; then
-    value="${value:1:-1}"
-  fi
-  printf '%s' "$value"
+  # Ask Docker Compose for the resolved service model instead of re-parsing
+  # dotenv text. This uses the same LINGSWAY_ENV_FILE interpolation and
+  # env_file resolution that backend-api will use. Only the selected
+  # ACCOUNTING_PROVIDER is emitted; the JSON may contain secrets but is
+  # never logged or included in an error.
+  local compose_json provider
+  compose_json="$(compose config --format json)" || \
+    die 'unable to resolve the effective Compose configuration; refusing deployment'
+  provider="$(
+    python3 -c '
+import json
+import sys
+
+try:
+    model = json.load(sys.stdin)
+except (json.JSONDecodeError, OSError, TypeError):
+    raise SystemExit(1)
+
+services = model.get("services")
+if isinstance(services, dict):
+    backend = services.get("backend-api")
+elif isinstance(services, list):
+    backend = next(
+        (
+            item
+            for item in services
+            if isinstance(item, dict) and item.get("name") == "backend-api"
+        ),
+        None,
+    )
+else:
+    backend = None
+
+if not isinstance(backend, dict):
+    raise SystemExit(1)
+
+environment = backend.get("environment")
+if environment is None:
+    value = None
+elif isinstance(environment, dict):
+    value = environment.get("ACCOUNTING_PROVIDER")
+elif isinstance(environment, list):
+    value = None
+    for item in environment:
+        if isinstance(item, str) and item.startswith("ACCOUNTING_PROVIDER="):
+            value = item.split("=", 1)[1]
+            break
+        if isinstance(item, dict) and "ACCOUNTING_PROVIDER" in item:
+            value = item["ACCOUNTING_PROVIDER"]
+            break
+else:
+    raise SystemExit(1)
+
+# Settings.accounting_provider defaults to mock when Compose does not inject
+# the variable. Blank, non-string, and unsupported values are ambiguous and
+# fail closed rather than being coerced to mock.
+if value is None:
+    print("mock")
+elif isinstance(value, str) and value in {"mock", "marzban"}:
+    print(value)
+else:
+    raise SystemExit(1)
+' <<<"$compose_json"
+  )" || die 'effective ACCOUNTING_PROVIDER is missing, malformed, or unsupported; refusing deployment'
+  printf '%s' "$provider"
 }
+
 
 verify_marzban_image_identity() {
   # TASK-T16 Phase 2C2: before Phase 2C2 this deployment could silently
@@ -101,11 +145,18 @@ verify_marzban_image_identity() {
   # fail closed via verify_patched_image.py's docker-inspect-based label
   # check before Marzban is ever started. There is no override that skips
   # this -- a custom MARZBAN_IMAGE still goes through the identical check.
-  local env_file="$1" accounting_provider
-  accounting_provider="$(resolve_accounting_provider "$env_file")"
-  if [[ "$accounting_provider" == mock ]]; then
-    return 0
-  fi
+  local accounting_provider
+  accounting_provider="$(resolve_accounting_provider)"
+  case "$accounting_provider" in
+    mock)
+      return 0
+      ;;
+    marzban)
+      ;;
+    *)
+      die 'effective ACCOUNTING_PROVIDER is not mock or marzban; refusing deployment'
+      ;;
+  esac
   export MARZBAN_IMAGE="${MARZBAN_IMAGE:-lingsway/marzban:v0.8.4-routing-principal}"
   log "ACCOUNTING_PROVIDER=${accounting_provider@Q} (not mock); verifying patched Marzban image identity for $MARZBAN_IMAGE"
   python3 "$DEPLOY_ROOT/infrastructure/marzban/verify_patched_image.py" "$MARZBAN_IMAGE" || \
@@ -208,7 +259,7 @@ main() {
   # relative to the compose files' own directory while this resolves it
   # relative to the current shell -- an absolute path (the norm for this
   # kind of override) resolves identically either way.
-  verify_marzban_image_identity "${LINGSWAY_ENV_FILE:-$DEPLOY_ROOT/.env}"
+  verify_marzban_image_identity
   compose up --detach
   if is_true "${RESTART_TRANSPORT:-false}"; then
     compose restart marzban mihomo

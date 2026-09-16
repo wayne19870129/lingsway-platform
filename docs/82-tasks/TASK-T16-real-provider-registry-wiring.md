@@ -2368,15 +2368,14 @@ build` with five immutable OCI identity labels
 `infrastructure/marzban/verify_patched_image.py` (`docker inspect` +
 label match, fail-closed on any mismatch or inspection failure) is now
 called from `deploy/lib/40_stack_up.sh` right before `compose up`
-whenever the deployment `.env`'s `ACCOUNTING_PROVIDER=marzban`, against
-whatever image reference Compose will actually use (default or a
-`MARZBAN_IMAGE` override alike -- no bypass flag exists). Compose
-defaults (`compose.transport.yml`, `compose.probe.yml`) now point at the
-local patched tag `lingsway/marzban:v0.8.4-routing-principal` instead of
-the unpatched upstream image. A new `marzban-image-contract` CI job
-builds the real image and proves both the positive (patched image passes)
-and negative (unpatched upstream image fails closed) verification cases
-on every PR.
+when Docker Compose resolves `backend-api` to `ACCOUNTING_PROVIDER=marzban`,
+against whatever image reference the operator selected (the patched default or
+a `MARZBAN_IMAGE` override alike; no bypass flag exists). Compose defaults
+(`compose.transport.yml`, `compose.probe.yml`) remain the unpatched upstream
+`gozargah/marzban:v0.8.4` so mock/default deployments do not require a local
+patched image. The deployment verifier selects the patched tag
+`lingsway/marzban:v0.8.4-routing-principal` only when the effective provider is
+`marzban`, and verifies it before `compose up`.
 
 This development session's own Docker daemon could build+label+inspect a
 real image (proven with a `FROM scratch` smoke image, since this

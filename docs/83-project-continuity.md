@@ -1,11 +1,11 @@
 # Project Continuity / Handoff
 
-**Last reconciled with main baseline:** `9b86d6c3b804c6d700a8f94fe559496f655a4cff`
-(verified 2026-09-15 UTC after PR #110 was manually merged). PR #109 and PR #110
-are merged; writer-guard/drift, preservation/legal-deletion, and existing-data
-reconciliation are complete on main. Phase 2B is **COMPLETE** and Phase 2C is
-**UNBLOCKED**. The active vehicle is Phase 2C1 real Marzban registry wiring on
-branch `task/t16-2c1-marzban-registry-wiring`.
+**Last reconciled with main baseline:** `5bdf5655d67da1185686d8560609874e4979f5c5`
+(verified 2026-09-15 UTC after PR #111 was manually merged). PR #109, PR #110,
+and PR #111 are merged; Phase 2B is **COMPLETE** and Phase 2C is **ACTIVE**.
+The active vehicle is Phase 2C2 patched Marzban image path on branch
+`task/t16-2c2-patched-marzban-image`; PR #112 remains open pending renewed
+exact-SHA review.
 Dates in this document are UTC unless stated otherwise.
 
 This document is maintained by whichever agent last touched a section
@@ -55,11 +55,9 @@ from anything a prior conversation "remembers."
 - **User (human)**: owns requirements, final acceptance, manual PR merge,
   and any production/go-live decision. No automation replaces these
   three things.
-- **Claude Code**: the sole implementation executor. Edits code, runs
-  tests/lint/build, creates branches, commits, and pushes; reads and
-  judges review feedback and pushes fixes. Never merges, never deploys,
-  never closes another party's PR/Issue. On the Issue-first background
-  path (section 5), the standard Claude Code Action pushes the branch.
+- **Claude Code**: the standing abstract implementation role described by
+  the repository process. It is paused for the current PR #112 and must not
+  write concurrently with Codex.
   TASK-T24 adds a small isolated PAT-backed PR-creation job; normal
   `pull_request` events then run CI.
 - **ChatGPT / ChatGPT Work**: requirements/acceptance-criteria
@@ -76,19 +74,12 @@ from anything a prior conversation "remembers."
 - One task, one PR; fixes from review feedback land as new commits on the
   same PR/branch, never a second PR for the same task.
 
-**Current execution mode (updated during TASK-T16 Phase 2C2 review, PR
-`task/t16-2c2-patched-marzban-image`):** the User has switched back to
-Codex as sole writer (Claude Code Web's quota burn during the Phase 2C2
-slice above was too high). Claude Code Web is not concurrently writing to
-any module. ChatGPT continues in its existing role as an independent
-exact-SHA reviewer (see `AGENTS.md` "协作角色与职责"). No `AGENTS.md`
-change is needed for this switch -- it already names Claude Code as the
-sole *implementation* executor role in the abstract; this note only
-records which concrete agent is presently filling that role. This is a
-point-in-time operating note,
-not a new standing rule — update or remove it once this slice's PR is
-merged or the operating mode changes again.
-
+**Current execution mode (updated for PR #112, `task/t16-2c2-patched-marzban-image`):**
+Codex / GPT-5.6 Luna High is the sole implementation writer. Claude Code Web
+is paused and must not write concurrently. ChatGPT is the independent exact-SHA
+reviewer/planner, and the User retains final manual merge and production
+approval. No `AGENTS.md` change is needed; this is a task-level operating note
+and should be updated when PR #112 or the operating mode changes.
 ## 4. Review / merge policy
 
 - Final merge is always a human action — no agent merges a PR, regardless
@@ -723,3 +714,10 @@ build/deployment-verification path) awaits independent review; PR remains
 **OPEN**, not merged. Real VPS deployment, real Marzban credentials, and
 the AGPL operational-compliance decision above all remain open follow-up
 work beyond this slice's scope.
+
+
+## Latest authoritative handoff — Phase 2C2 review follow-up
+
+PR #112 remains the active vehicle on `task/t16-2c2-patched-marzban-image`, based on main `5bdf5655d67da1185686d8560609874e4979f5c5`. The compose defaults remain `gozargah/marzban:v0.8.4` for mock/default deployments. Only an effective `ACCOUNTING_PROVIDER=marzban` selection causes `deploy/lib/40_stack_up.sh` to select and verify `lingsway/marzban:v0.8.4-routing-principal`; custom `MARZBAN_IMAGE` values are verified by the same gate.
+
+The verifier obtains `ACCOUNTING_PROVIDER` from Docker Compose's resolved `backend-api` environment using the same `LINGSWAY_ENV_FILE` source as Compose. It accepts only `mock` or `marzban`; malformed, ambiguous, or unsupported resolution fails closed before `compose up`. Verification precedes stack startup. Codex / GPT-5.6 Luna High is the sole writer for this task; Claude Code Web is paused; ChatGPT independently reviews the exact head; the User performs any final manual merge. Phase 2B is **COMPLETE**, Phase 2C is **ACTIVE**, and Phase 2C2 awaits renewed exact-SHA review.
