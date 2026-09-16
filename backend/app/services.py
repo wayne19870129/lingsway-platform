@@ -36,7 +36,10 @@ from backend.app.domain.provisioning import (
 )
 from backend.app.domain.subscription_render import RenderedSubscription, render_subscription
 from backend.app.infra.gateway_reconciliation import (
+    FirstCommitOutcome,
+    GatewayCommitOutcomeUnknown,
     assert_no_unresolved_gateway_mutation,
+    classify_first_commit_outcome,
     enqueue_gateway_reconciliation,
     reconcile_gateway_job_in_session,
 )
@@ -103,6 +106,56 @@ def provision(
     ).provisioning.provision(request)
 
 
+def _handle_pre_gateway_failure(
+    command: BillingCommand,
+    order_state: OrderWorkflowState,
+    provisioning: ProvisioningService,
+    checkpoint: ProvisioningCheckpoint,
+    request: ProvisionRequest,
+    error: Exception,
+) -> ProvisionOutcome:
+    """Compensate a confirmed phase-A accounting user or keep manual state."""
+    try:
+        pending = provisioning.fail_before_gateway_authoritative_commit(
+            checkpoint, request, error
+        )
+    except Exception:
+        with order_state.transaction():
+            fail_paid_purchase(command, type(error).__name__, order_state)
+        raise
+    if pending.reason is None:
+        raise RuntimeError("PENDING_MANUAL reason is required")
+    message = PENDING_MANUAL_BUSINESS_MESSAGES[pending.reason]
+    with order_state.transaction():
+        order_state.mark_provision_pending(command, message)
+    provisioning.mark_run_pending_manual(checkpoint.run_id, pending.pending_manual_error)
+    return pending
+
+
+def _mark_first_commit_unknown(
+    command: BillingCommand,
+    order_state: OrderWorkflowState,
+    provisioning: ProvisioningService,
+    checkpoint: ProvisioningCheckpoint,
+) -> ProvisionOutcome:
+    """Persist only a safe manual-review state when DB truth is unavailable."""
+    diagnostic = "GATEWAY_FIRST_COMMIT_OUTCOME_UNKNOWN"
+    try:
+        with order_state.transaction():
+            order_state.mark_provision_pending(
+                command,
+                "durable gateway commit outcome could not be confirmed; requires review",
+            )
+    except Exception as exc:
+        raise GatewayCommitOutcomeUnknown(diagnostic) from exc
+    provisioning.mark_run_pending_manual(checkpoint.run_id, diagnostic)
+    return ProvisionOutcome(
+        checkpoint.run_id,
+        ProvisionStatus.PENDING_MANUAL,
+        pending_manual_error=diagnostic,
+    )
+
+
 def _confirm_paid_purchase_durable(
     command: BillingCommand,
     request: ProvisionRequest,
@@ -122,9 +175,9 @@ def _confirm_paid_purchase_durable(
     )
     if subscription is None:
         raise RuntimeError("Provisioning subscription was not created")
-    committed = False
-    try:
-        with state.gateway_route_binding_lock():
+    with state.gateway_route_binding_lock():
+        first_commit_attempted = False
+        try:
             assert_no_unresolved_gateway_mutation(db)
             subscription.accounting_user_id = checkpoint.account_user.username
             raw_token = provisioning.token_factory()
@@ -143,36 +196,78 @@ def _confirm_paid_purchase_durable(
                 subscription_id=subscription.id,
                 order_id=int(command.order_id),
                 provision_run_id=checkpoint.run_id,
-                operation_id=command.order_id,
+                operation_id=str(command.order_id),
             )
             runs.record_step(checkpoint.run_id, ProvisionStep.APPLY_GATEWAY, "PENDING")
-            db.commit()
-            committed = True
-            result = reconcile_gateway_job_in_session(db, job.id, registry)
-        if result.applied:
+            first_commit_attempted = True
             try:
-                registry.notify.send(
-                    NotifyEvent(
-                        "PROVISION_SUCCEEDED",
-                        {"run_id": checkpoint.run_id, "customer_id": request.customer_id},
+                db.commit()
+            except Exception as commit_error:
+                try:
+                    outcome = classify_first_commit_outcome(
+                        db,
+                        dedupe_key=f"GATEWAY_RECONCILE:PURCHASE:{command.order_id}",
+                        subscription_id=subscription.id,
                     )
+                except GatewayCommitOutcomeUnknown:
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+                    return _mark_first_commit_unknown(
+                        command, order_state, provisioning, checkpoint
+                    )
+                if outcome is FirstCommitOutcome.LANDED:
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+                    return ProvisionOutcome(checkpoint.run_id, ProvisionStatus.RUNNING)
+                if outcome is FirstCommitOutcome.ABSENT:
+                    db.rollback()
+                    return _handle_pre_gateway_failure(
+                        command,
+                        order_state,
+                        provisioning,
+                        checkpoint,
+                        request,
+                        commit_error,
+                    )
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                return _mark_first_commit_unknown(
+                    command, order_state, provisioning, checkpoint
                 )
-            except Exception as exc:
-                runs.mark_notification_failed(checkpoint.run_id, type(exc).__name__)
-            fresh_state = SqlAlchemyProvisioningState(db, subscription.id)
-            return ProvisionOutcome(
-                checkpoint.run_id,
-                ProvisionStatus.SUCCEEDED,
-                fresh_state.current_subscription_url(request.subscription_domain),
+            result = reconcile_gateway_job_in_session(db, job.id, registry)
+        except Exception as error:
+            if first_commit_attempted:
+                raise
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            return _handle_pre_gateway_failure(
+                command, order_state, provisioning, checkpoint, request, error
             )
-        return ProvisionOutcome(checkpoint.run_id, ProvisionStatus.RUNNING)
-    except Exception as exc:
-        if not committed:
-            db.rollback()
-            with order_state.transaction():
-                fail_paid_purchase(command, type(exc).__name__, order_state)
-            provisioning.mark_run_failed(checkpoint.run_id, exc)
-        raise
+    if result.applied:
+        try:
+            registry.notify.send(
+                NotifyEvent(
+                    "PROVISION_SUCCEEDED",
+                    {"run_id": checkpoint.run_id, "customer_id": request.customer_id},
+                )
+            )
+        except Exception as exc:
+            runs.mark_notification_failed(checkpoint.run_id, type(exc).__name__)
+        fresh_state = SqlAlchemyProvisioningState(db, subscription.id)
+        return ProvisionOutcome(
+            checkpoint.run_id,
+            ProvisionStatus.SUCCEEDED,
+            fresh_state.current_subscription_url(request.subscription_domain),
+        )
+    return ProvisionOutcome(checkpoint.run_id, ProvisionStatus.RUNNING)
 
 
 def confirm_payment_and_provision(
