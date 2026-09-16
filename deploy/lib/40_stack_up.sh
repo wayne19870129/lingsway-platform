@@ -57,7 +57,7 @@ ensure_marzban_internal_tls() {
   san="$(openssl x509 -in "$certificate" -noout -ext subjectAltName 2>/dev/null)" || \
     die 'Marzban internal TLS certificate is unreadable; refusing deployment'
   [[ "$san" == *'DNS:marzban'* ]] || \
-    die 'MARZBAN_INTERNAL_TLS_MIGRATION_REQUIRED' 
+    die 'MARZBAN_INTERNAL_TLS_MIGRATION_REQUIRED'
 }
 
 resolve_accounting_provider() {
