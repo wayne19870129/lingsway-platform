@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, fields
 from decimal import Decimal
 from functools import lru_cache
+from urllib.parse import urlsplit
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,8 +99,23 @@ class Settings:
             self.accounting_provider == "marzban" or self.gateway_provider == "xray_file"
         )
         if marzban_runtime_selected:
-            if not self.marzban_base_url.strip():
+            normalized_base_url = self.marzban_base_url.strip()
+            if not normalized_base_url:
                 raise ValueError("MARZBAN_BASE_URL must not be blank when Marzban is selected")
+            try:
+                parsed_base_url = urlsplit(normalized_base_url)
+            except ValueError as exc:
+                raise ValueError(
+                    "MARZBAN_BASE_URL must be a valid URL when Marzban is selected"
+                ) from exc
+            if not parsed_base_url.scheme or not parsed_base_url.netloc:
+                raise ValueError(
+                    "MARZBAN_BASE_URL must include a URL scheme and host when Marzban is selected"
+                )
+            if parsed_base_url.username is not None or parsed_base_url.password is not None:
+                raise ValueError("MARZBAN_BASE_URL must not contain embedded credentials")
+            if parsed_base_url.fragment:
+                raise ValueError("MARZBAN_BASE_URL must not contain a URL fragment")
             if not self.marzban_admin_username.strip():
                 raise ValueError(
                     "MARZBAN_ADMIN_USERNAME must not be blank when Marzban is selected"
@@ -114,6 +130,8 @@ class Settings:
                     "verification is enabled"
                 )
             if self.app_env == "production":
+                if parsed_base_url.scheme.lower() != "https":
+                    raise ValueError("Production MARZBAN_BASE_URL must use verified HTTPS")
                 if "example.invalid" in self.marzban_base_url:
                     raise ValueError("Production MARZBAN_BASE_URL must be configured")
                 if "CHANGE_ME" in {self.marzban_admin_username, self.marzban_admin_password}:

@@ -24,6 +24,7 @@ from backend.app.providers.accounting.marzban import (
     MarzbanAccountingProvider,
     MarzbanApiError,
     MarzbanContractError,
+    MarzbanProviderClosedError,
 )
 from backend.app.providers.base import AccountingCreateEffect, AccountingCreateUserError
 
@@ -191,6 +192,24 @@ def test_health_check_malformed_auth_response_is_false() -> None:
         assert [request.url.path for request in requests] == ["/api/admin/token"]
     finally:
         provider.close()
+
+
+def test_missing_ca_is_no_side_effect_for_create_user(tmp_path: Path) -> None:
+    provider = MarzbanAccountingProvider(
+        base_url=_BASE_URL,
+        admin_username=_ADMIN_USERNAME,
+        admin_password=_ADMIN_PASSWORD,
+        default_protocol="vless",
+        default_inbounds_json=_INBOUNDS_JSON,
+        ca_cert_path=str(tmp_path / "missing-internal.crt"),
+    )
+
+    with pytest.raises(AccountingCreateUserError) as excinfo:
+        provider.create_user("alice", 1000, None)
+
+    assert excinfo.value.effect is AccountingCreateEffect.NO_SIDE_EFFECT
+    assert "no user was created" in str(excinfo.value)
+    provider.close()
 
 
 # ---------------------------------------------------------------------------
@@ -850,6 +869,9 @@ def test_close_before_lazy_client_creation_is_safe() -> None:
     provider.close()
 
     assert provider._client is None  # noqa: SLF001
+    with pytest.raises(MarzbanProviderClosedError, match="closed"):
+        provider._client_for_operation()  # noqa: SLF001
+    assert provider._client is None  # noqa: SLF001
 
 
 def test_close_never_closes_an_injected_client() -> None:
@@ -906,9 +928,9 @@ def test_close_permanently_surfaces_failure_when_the_owned_transport_close_raise
     the transport's own ``close()``, so once a real close attempt has
     raised, the client is already marked closed and a later
     ``Client.close()`` call would silently no-op instead of retrying.
-    ``MarzbanAccountingProvider.close()`` never had its own ``_closed``
-    flag, but it still delegated straight to ``self._client.close()`` --
-    the same false-success path exists inside httpx itself."""
+    ``MarzbanAccountingProvider.close()`` also keeps a permanent closed
+    state after the first close attempt, while preserving the provider's
+    existing permanent-failure behavior."""
     transport = _FlakyTransport(fail_times=1)
     provider = MarzbanAccountingProvider(
         base_url=_BASE_URL,

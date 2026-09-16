@@ -2545,3 +2545,38 @@ certificates without `DNS:marzban` fail closed; no automatic rotation is
 performed. Mihomo remains blocked and is not part of this slice. No schema,
 workflow, AGENTS.md, deployment, credential, DNS, or real Marzban side
 effect is included.
+
+## Latest authoritative handoff — PR #114 reconciliation architecture gate
+
+Review of exact head `d8dbe7f1bb1bdef64661ced733c8e4bbb2c6fb3a`
+(canonical review `5221920838`) found five implementation blockers and one
+minor lifecycle gap. This remediation slice addresses only the five
+provider/deployment blockers and the lazy-client lifecycle guard. It also
+adds the proposed ADR `docs/80-decisions/ADR-022-gateway-runtime-reconciliation.md`
+for the remaining gateway DB/runtime reconciliation architecture blocker.
+
+Major 2 is closed by mounting only
+`../../data/marzban/internal.crt:/app/data/marzban/internal.crt:ro` into the
+scheduler. Major 3 is closed by mapping local TLS trust construction failures
+before HTTP dispatch to the typed create outcome
+`AccountingCreateEffect.NO_SIDE_EFFECT`; health remains fail-closed. Major 4
+is closed by requiring a valid, credential-free, fragment-free HTTPS
+`MARZBAN_BASE_URL` for production Marzban selections. Major 5 is closed by an
+exact SAN-token migration gate; `DNS:marzban.example.com`,
+`DNS:notmarzban`, and localhost-only SANs do not satisfy `DNS:marzban`. The
+lazy accounting provider now becomes permanently closed before it can create
+a client after `close()`, while injected-client ownership remains unchanged.
+
+ADR-022 is `Proposed`, not `Accepted`, and is documentation-only in this
+slice. It audits every discovered `GatewayRouteBinding` writer, compares
+apply-before-commit plus explicit compensation with commit-first durable
+reconciliation, keeps the named lock across mutation/apply/commit/rollback/
+compensation, and explicitly fails closed to DEGRADED/manual intervention if
+compensation cannot restore the previous desired projection. No domain,
+`providers/base.py`, provisioning saga, or `release_egress()` contract was
+implemented here.
+
+Phase status: Phase 2B COMPLETE; Phase 2C ACTIVE; Phase 2C1 COMPLETE; Phase
+2C2 COMPLETE; Phase 2C3A COMPLETE; Phase 2C3B runtime wiring remains present
+but production enablement is gated by ADR-022 and awaits renewed independent
+exact-head review. Mihomo remains separately architecture-blocked.

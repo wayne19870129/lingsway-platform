@@ -859,3 +859,34 @@ Fresh internal TLS generation now includes `DNS:marzban`,
 rotation. The default provider selections remain mock/noop, Mihomo remains
 architecture-blocked, and no real Marzban operation or deployment is part of
 this slice.
+
+## Latest authoritative handoff — PR #114 remediation and ADR-022 gate
+
+PR #114 exact head `d8dbe7f1bb1bdef64661ced733c8e4bbb2c6fb3a`
+(canonical review `5221920838`) was reviewed with five Majors and one Minor.
+This slice is limited to the scheduler CA mount, local TLS pre-dispatch
+certainty, production HTTPS enforcement, exact certificate SAN migration
+matching, and the lazy accounting-client post-close guard. It also adds the
+proposed, not accepted,
+`docs/80-decisions/ADR-022-gateway-runtime-reconciliation.md`.
+
+The scheduler receives only the shared `/app/data/marzban/internal.crt`
+certificate read-only; it receives no Marzban key/DB mount and publishes no
+control port. Local TLS trust setup failure is a typed pre-dispatch error
+mapped to `AccountingCreateEffect.NO_SIDE_EFFECT`, while dispatched transport
+failure remains ambiguous. Production Marzban selections require a valid HTTPS
+URL without embedded credentials or fragments. Existing certificate migration
+accepts only the exact SAN token `DNS:marzban`; prefix/suffix lookalikes fail
+closed without automatic rotation. A provider closed before lazy client
+creation cannot reopen through a stale reference, and injected-client
+ownership is unchanged.
+
+ADR-022 audits provisioning binding creation/update/enable,
+`release_egress()` disable/release, and confirmed manual principal
+reconciliation. It proposes apply-before-commit with explicit downstream
+compensation as the minimal launch direction, compares commit-first durable
+reconciliation, requires the named lock through compensation, and makes
+compensation failure DEGRADED/manual-intervention rather than a stale APPLIED
+baseline. It does not implement domain/application changes in this slice.
+PR #114 remains OPEN and unmerged; no real Marzban operation, Xray reload,
+certificate rotation, or deployment was performed.

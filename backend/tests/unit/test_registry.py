@@ -424,6 +424,18 @@ def test_malformed_marzban_contract_fails_closed_before_client_creation(
         build_registry(_marzban_settings(**overrides))
 
 
+def test_production_marzban_requires_verified_https_before_construction() -> None:
+    with pytest.raises(ValueError, match="verified HTTPS"):
+        build_registry(
+            _marzban_settings(
+                app_env="production",
+                jwt_secret="J" * 32,
+                secret_encryption_key="S" * 44,
+                marzban_base_url="http://marzban:8000",
+            )
+        )
+
+
 def test_production_default_marzban_credential_fails_closed() -> None:
     with pytest.raises(ValueError, match="credentials"):
         Settings.from_env(

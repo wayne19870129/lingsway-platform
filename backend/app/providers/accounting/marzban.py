@@ -51,7 +51,10 @@ from backend.app.providers.base import (
     AccountUserDTO,
     UsageDTO,
 )
-from backend.app.providers.marzban_tls import build_marzban_tls_verify
+from backend.app.providers.marzban_tls import (
+    MarzbanTlsConfigurationError,
+    build_marzban_tls_verify,
+)
 
 #: Marzban's own documented httpx default is far too generous for a
 #: synchronous provisioning request path; an explicit, finite timeout is
@@ -130,6 +133,14 @@ class MarzbanAuthenticationError(MarzbanApiError):
     to the server with valid credentials: for ``create_user()`` this is
     always ``AccountingCreateEffect.NO_SIDE_EFFECT``, never ``AMBIGUOUS``.
     """
+
+
+class MarzbanPreflightError(MarzbanApiError):
+    """A local provider preflight failed before any HTTP request dispatch."""
+
+
+class MarzbanProviderClosedError(MarzbanPreflightError):
+    """An operation was attempted after this provider was permanently closed."""
 
 
 class MarzbanTransportError(MarzbanApiError):
@@ -392,12 +403,24 @@ class MarzbanAccountingProvider:
         self._client: httpx.Client | None = client
         self._token: str | None = None
         self._close_failed = False
+        self._closed = False
 
     def _client_for_operation(self) -> httpx.Client:
-        if self._client is None:
-            verify = build_marzban_tls_verify(
-                verify_tls=self._verify_tls, ca_cert_path=self._ca_cert_path
+        if self._closed:
+            raise MarzbanProviderClosedError(
+                "MarzbanAccountingProvider is closed",
+                operation="lifecycle",
             )
+        if self._client is None:
+            try:
+                verify = build_marzban_tls_verify(
+                    verify_tls=self._verify_tls, ca_cert_path=self._ca_cert_path
+                )
+            except MarzbanTlsConfigurationError as exc:
+                raise MarzbanPreflightError(
+                    "Marzban TLS trust configuration could not be prepared",
+                    operation="preflight",
+                ) from exc
             self._client = httpx.Client(verify=verify, timeout=self._timeout_seconds)
         return self._client
 
@@ -426,8 +449,6 @@ class MarzbanAccountingProvider:
         every later call instead of calling ``self._client.close()``
         again (see ``SubscriptionTransportProvider.close()`` for the same
         fix and the full rationale)."""
-        if not self._owns_client:
-            return
         if self._close_failed:
             raise RuntimeError(
                 "MarzbanAccountingProvider's owned httpx.Client previously failed "
@@ -437,6 +458,9 @@ class MarzbanAccountingProvider:
                 "provider instance and must keep surfacing rather than being "
                 "silently treated as success"
             )
+        self._closed = True
+        if not self._owns_client:
+            return
         client = self._client
         if client is None:
             return
@@ -587,6 +611,14 @@ class MarzbanAccountingProvider:
         }
         try:
             response = self._call("POST", "/api/user", operation="create_user", json_body=body)
+        except MarzbanPreflightError as exc:
+            # Local TLS trust construction and lifecycle checks happen before
+            # any HTTP request is dispatched, so create_user has no external
+            # side effect in this branch.
+            raise AccountingCreateUserError(
+                "Marzban create_user could not be prepared locally; no user was created",
+                effect=AccountingCreateEffect.NO_SIDE_EFFECT,
+            ) from exc
         except MarzbanAuthenticationError as exc:
             # Pinned `Admin.get_current` (a FastAPI Depends()) always
             # rejects an unauthenticated/re-rejected request before

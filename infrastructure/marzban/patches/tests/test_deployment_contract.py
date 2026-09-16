@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
+_BASE_COMPOSE = _REPO_ROOT / "infrastructure" / "compose" / "compose.base.yml"
 _STACK_SCRIPT = _REPO_ROOT / "deploy" / "lib" / "40_stack_up.sh"
 _TRANSPORT_COMPOSE = _REPO_ROOT / "infrastructure" / "compose" / "compose.transport.yml"
 _PROBE_COMPOSE = _REPO_ROOT / "infrastructure" / "compose" / "compose.probe.yml"
@@ -57,6 +58,43 @@ for arg in "$@"; do
 done
 exit 0
 """
+
+
+_FAKE_OPENSSL_SCRIPT = """#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$1" == "x509" ]]; then
+  printf '%s' "${FAKE_SAN:?}"
+  exit 0
+fi
+exit 1
+"""
+
+
+def _run_tls_gate(tmp_path: Path, san: str) -> subprocess.CompletedProcess[str]:
+    marzban_dir = tmp_path / "marzban"
+    marzban_dir.mkdir()
+    (marzban_dir / "internal.crt").write_text("placeholder", encoding="utf-8")
+    (marzban_dir / "internal.key").write_text("placeholder", encoding="utf-8")
+    fake_openssl = tmp_path / "openssl"
+    fake_openssl.write_text(_FAKE_OPENSSL_SCRIPT, encoding="utf-8")
+    fake_openssl.chmod(0o755)
+
+    env = os.environ.copy()
+    env.update({"PATH": str(tmp_path) + os.pathsep + env["PATH"], "FAKE_SAN": san})
+    return subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; ensure_marzban_internal_tls "$2"',
+            "_",
+            str(_STACK_SCRIPT),
+            str(marzban_dir),
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
 
 def _run_resolver(
@@ -167,6 +205,37 @@ def test_custom_quoted_lingsway_env_file_reaches_compose_subprocess(
     )
 
 
+def test_scheduler_can_read_only_the_shared_marzban_ca_certificate() -> None:
+    compose = _BASE_COMPOSE.read_text(encoding="utf-8")
+    scheduler = compose.split("  scheduler:", 1)[1].split(
+        "  traffic-attribution:", 1
+    )[0]
+    assert (
+        "../../data/marzban/internal.crt:/app/data/marzban/internal.crt:ro"
+        in scheduler
+    )
+    assert "internal.key" not in scheduler
+    assert "8000:" not in scheduler
+
+
+@pytest.mark.parametrize(
+    ("san", "expected_success"),
+    [
+        ("X509v3 Subject Alternative Name:\\n DNS:marzban,DNS:localhost,IP:127.0.0.1", True),
+        ("X509v3 Subject Alternative Name:\\n DNS:marzban.example.com", False),
+        ("X509v3 Subject Alternative Name:\\n DNS:notmarzban", False),
+        ("X509v3 Subject Alternative Name:\\n DNS:localhost,IP:127.0.0.1", False),
+    ],
+)
+def test_existing_certificate_requires_exact_marzban_san(
+    tmp_path: Path, san: str, expected_success: bool
+) -> None:
+    result = _run_tls_gate(tmp_path, san)
+    assert (result.returncode == 0) is expected_success
+    if not expected_success:
+        assert "MARZBAN_INTERNAL_TLS_MIGRATION_REQUIRED" in result.stderr
+
+
 def test_compose_defaults_remain_upstream_for_mock_path() -> None:
     prefix = "image: " + "$" + "{MARZBAN_IMAGE:"
     expected = "image: " + "$" + "{MARZBAN_IMAGE:-" + _UPSTREAM_IMAGE + "}"
@@ -206,6 +275,8 @@ def test_existing_internal_certificate_requires_marzban_san_migration() -> None:
         "resolve_accounting_provider() {", 1
     )[0]
     assert 'openssl x509 -in "$certificate" -noout -ext subjectAltName' in tls
+    assert "DNS:marzban([[:space:],]|$)" in tls
+    assert "*'DNS:marzban'*" not in tls
     assert "MARZBAN_INTERNAL_TLS_MIGRATION_REQUIRED" in tls
     assert "refusing to overwrite an existing half-pair" in tls
 
