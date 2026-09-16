@@ -175,42 +175,68 @@ def _confirm_paid_purchase_durable(
     )
     if subscription is None:
         raise RuntimeError("Provisioning subscription was not created")
-    with state.gateway_route_binding_lock():
-        first_commit_attempted = False
-        precommit_handler_started = False
-        try:
-            assert_no_unresolved_gateway_mutation(db)
-            subscription.accounting_user_id = checkpoint.account_user.username
-            raw_token = provisioning.token_factory()
-            state.store_subscription_token(request.customer_id, raw_token)
-            # This flushes/validates the active route skeleton, but the fresh
-            # post-commit snapshot is intentionally built by the reconciler.
-            state.desired_routing_state(
-                request,
-                checkpoint.endpoint,
-                checkpoint.tenant,
-                checkpoint.account_user.routing_principal,
-            )
-            job = enqueue_gateway_reconciliation(
-                db,
-                operation_kind="PURCHASE",
-                subscription_id=subscription.id,
-                order_id=int(command.order_id),
-                provision_run_id=checkpoint.run_id,
-                operation_id=str(command.order_id),
-            )
-            runs.record_step(checkpoint.run_id, ProvisionStep.APPLY_GATEWAY, "PENDING")
-            first_commit_attempted = True
+
+    first_commit_attempted = False
+    precommit_handler_started = False
+    try:
+        with state.gateway_route_binding_lock():
             try:
-                db.commit()
-            except Exception as commit_error:
+                assert_no_unresolved_gateway_mutation(db)
+                subscription.accounting_user_id = checkpoint.account_user.username
+                raw_token = provisioning.token_factory()
+                state.store_subscription_token(request.customer_id, raw_token)
+                # This flushes/validates the active route skeleton, but the fresh
+                # post-commit snapshot is intentionally built by the reconciler.
+                state.desired_routing_state(
+                    request,
+                    checkpoint.endpoint,
+                    checkpoint.tenant,
+                    checkpoint.account_user.routing_principal,
+                )
+                job = enqueue_gateway_reconciliation(
+                    db,
+                    operation_kind="PURCHASE",
+                    subscription_id=subscription.id,
+                    order_id=int(command.order_id),
+                    provision_run_id=checkpoint.run_id,
+                    operation_id=str(command.order_id),
+                )
+                runs.record_step(checkpoint.run_id, ProvisionStep.APPLY_GATEWAY, "PENDING")
+                first_commit_attempted = True
                 try:
-                    outcome = classify_first_commit_outcome(
-                        db,
-                        dedupe_key=f"GATEWAY_RECONCILE:PURCHASE:{command.order_id}",
-                        subscription_id=subscription.id,
-                    )
-                except GatewayCommitOutcomeUnknown:
+                    db.commit()
+                except Exception as commit_error:
+                    try:
+                        outcome = classify_first_commit_outcome(
+                            db,
+                            dedupe_key=f"GATEWAY_RECONCILE:PURCHASE:{command.order_id}",
+                            subscription_id=subscription.id,
+                        )
+                    except GatewayCommitOutcomeUnknown:
+                        try:
+                            db.rollback()
+                        except Exception:
+                            pass
+                        return _mark_first_commit_unknown(
+                            command, order_state, provisioning, checkpoint
+                        )
+                    if outcome is FirstCommitOutcome.LANDED:
+                        try:
+                            db.rollback()
+                        except Exception:
+                            pass
+                        return ProvisionOutcome(checkpoint.run_id, ProvisionStatus.RUNNING)
+                    if outcome is FirstCommitOutcome.ABSENT:
+                        db.rollback()
+                        precommit_handler_started = True
+                        return _handle_pre_gateway_failure(
+                            command,
+                            order_state,
+                            provisioning,
+                            checkpoint,
+                            request,
+                            commit_error,
+                        )
                     try:
                         db.rollback()
                     except Exception:
@@ -218,42 +244,29 @@ def _confirm_paid_purchase_durable(
                     return _mark_first_commit_unknown(
                         command, order_state, provisioning, checkpoint
                     )
-                if outcome is FirstCommitOutcome.LANDED:
-                    try:
-                        db.rollback()
-                    except Exception:
-                        pass
-                    return ProvisionOutcome(checkpoint.run_id, ProvisionStatus.RUNNING)
-                if outcome is FirstCommitOutcome.ABSENT:
-                    db.rollback()
-                    precommit_handler_started = True
-                    return _handle_pre_gateway_failure(
-                        command,
-                        order_state,
-                        provisioning,
-                        checkpoint,
-                        request,
-                        commit_error,
-                    )
+                result = reconcile_gateway_job_in_session(db, job.id, registry)
+            except Exception as error:
+                if first_commit_attempted or precommit_handler_started:
+                    raise
                 try:
                     db.rollback()
                 except Exception:
                     pass
-                return _mark_first_commit_unknown(
-                    command, order_state, provisioning, checkpoint
+                precommit_handler_started = True
+                return _handle_pre_gateway_failure(
+                    command, order_state, provisioning, checkpoint, request, error
                 )
-            result = reconcile_gateway_job_in_session(db, job.id, registry)
-        except Exception as error:
-            if first_commit_attempted or precommit_handler_started:
-                raise
-            try:
-                db.rollback()
-            except Exception:
-                pass
-            precommit_handler_started = True
-            return _handle_pre_gateway_failure(
-                command, order_state, provisioning, checkpoint, request, error
-            )
+    except Exception as error:
+        if first_commit_attempted or precommit_handler_started:
+            raise
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return _handle_pre_gateway_failure(
+            command, order_state, provisioning, checkpoint, request, error
+        )
+
     if result.applied:
         try:
             registry.notify.send(
