@@ -56,71 +56,31 @@ ensure_marzban_internal_tls() {
 }
 
 resolve_accounting_provider() {
-  # Ask Docker Compose for the resolved service model instead of re-parsing
-  # dotenv text. This uses the same LINGSWAY_ENV_FILE interpolation and
-  # env_file resolution that backend-api will use. Only the selected
-  # ACCOUNTING_PROVIDER is emitted; the JSON may contain secrets but is
-  # never logged or included in an error.
-  local compose_json provider
-  compose_json="$(compose config --format json)" || \
-    die 'unable to resolve the effective Compose configuration; refusing deployment'
-  provider="$(
-    python3 -c '
-import json
-import sys
+  # Ask the backend-api container for its own resolved
+  # Settings.accounting_provider instead of hand-parsing dotenv text or
+  # depending on `compose config --format json` -- that flag is Compose
+  # v2-only, and common.sh's compose() deliberately also supports the
+  # `docker-compose` v1 fallback this repository's deploy docs record for
+  # Debian 12 hosts, so a v2-only dependency here would break deployment
+  # even on the default ACCOUNTING_PROVIDER=mock path on a v1-only host.
+  # `compose run` is supported by both Compose generations and executes
+  # backend-api under the exact env_file/environment either generation
+  # resolves for it, so this reads the identical effective value the real
+  # container will use -- not a re-derivation of it. Requires backend-api
+  # already built (main() does `compose build backend-api` earlier).
+  local raw_output provider
+  raw_output="$(compose run --rm --no-deps backend-api python -c '
+from backend.app.core.config import get_settings
 
-try:
-    model = json.load(sys.stdin)
-except (json.JSONDecodeError, OSError, TypeError):
-    raise SystemExit(1)
-
-services = model.get("services")
-if isinstance(services, dict):
-    backend = services.get("backend-api")
-elif isinstance(services, list):
-    backend = next(
-        (
-            item
-            for item in services
-            if isinstance(item, dict) and item.get("name") == "backend-api"
-        ),
-        None,
-    )
-else:
-    backend = None
-
-if not isinstance(backend, dict):
-    raise SystemExit(1)
-
-environment = backend.get("environment")
-if environment is None:
-    value = None
-elif isinstance(environment, dict):
-    value = environment.get("ACCOUNTING_PROVIDER")
-elif isinstance(environment, list):
-    value = None
-    for item in environment:
-        if isinstance(item, str) and item.startswith("ACCOUNTING_PROVIDER="):
-            value = item.split("=", 1)[1]
-            break
-        if isinstance(item, dict) and "ACCOUNTING_PROVIDER" in item:
-            value = item["ACCOUNTING_PROVIDER"]
-            break
-else:
-    raise SystemExit(1)
-
-# Settings.accounting_provider defaults to mock when Compose does not inject
-# the variable. Blank, non-string, and unsupported values are ambiguous and
-# fail closed rather than being coerced to mock.
-if value is None:
-    print("mock")
-elif isinstance(value, str) and value in {"mock", "marzban"}:
-    print(value)
-else:
-    raise SystemExit(1)
-' <<<"$compose_json"
-  )" || die 'effective ACCOUNTING_PROVIDER is not exactly "mock" or "marzban"; refusing deployment'
-  printf '%s' "$provider"
+print(get_settings().accounting_provider)
+')" || die 'unable to resolve the effective ACCOUNTING_PROVIDER from backend-api; refusing deployment'
+  # The last stdout line is the print() output; anything before it is
+  # Compose/Python startup noise some configurations route to stdout.
+  provider="$(printf '%s\n' "$raw_output" | tail -n 1)"
+  case "$provider" in
+    mock|marzban) printf '%s' "$provider" ;;
+    *) die 'effective ACCOUNTING_PROVIDER is not exactly "mock" or "marzban"; refusing deployment' ;;
+  esac
 }
 
 
@@ -136,11 +96,11 @@ verify_marzban_image_identity() {
   # default must stay the unpatched upstream tag -- a fresh machine that
   # has never run build_patched_image.sh must still be able to deploy
   # with the default ACCOUNTING_PROVIDER=mock. Only for the genuinely
-  # dangerous combination (accounting_provider resolves to anything other
-  # than an exact "mock" -- i.e. "marzban", or anything ambiguous this
-  # parser can't positively confirm is "mock") does this function
-  # override MARZBAN_IMAGE to the local patched tag (unless the caller's
-  # environment already set one) and export it, so the `compose up` call
+  # dangerous combination (resolve_accounting_provider() returns
+  # "marzban" -- it already dies closed on anything else, so this never
+  # sees an ambiguous value) does this function override MARZBAN_IMAGE to
+  # the local patched tag (unless the caller's environment already set
+  # one) and export it, so the `compose up` call
   # that follows resolves the identical image this just verified -- then
   # fail closed via verify_patched_image.py's docker-inspect-based label
   # check before Marzban is ever started. There is no override that skips
@@ -250,15 +210,9 @@ main() {
   [[ "$expected_sha" =~ ^[0-9a-f]{64}$ ]] || \
     die 'renderer did not return a valid expected repo-owned Xray fingerprint'
   validate_runtime_files
-  # LINGSWAY_ENV_FILE (not APP_ENV_FILE) matches exactly what
-  # compose.base.yml/compose.transport.yml's `env_file:` directives
-  # resolve for the backend-api/marzban services themselves -- this must
-  # read the same file Compose will actually load, not a separately-named
-  # deploy-script convention that could point elsewhere. If an operator
-  # sets LINGSWAY_ENV_FILE to a *relative* path, Compose resolves it
-  # relative to the compose files' own directory while this resolves it
-  # relative to the current shell -- an absolute path (the norm for this
-  # kind of override) resolves identically either way.
+  # Delegates to Compose (via resolve_accounting_provider's `compose run`)
+  # for the effective ACCOUNTING_PROVIDER, so this needs no env-file path
+  # of its own -- see verify_marzban_image_identity()/resolve_accounting_provider().
   verify_marzban_image_identity
   compose up --detach
   if is_true "${RESTART_TRANSPORT:-false}"; then
