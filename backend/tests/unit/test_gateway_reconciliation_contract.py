@@ -66,7 +66,10 @@ def test_paid_and_release_writers_enqueue_before_runtime_reconcile() -> None:
 def test_scheduler_never_executes_real_xray_runtime() -> None:
     source = _SCHEDULER.read_text(encoding="utf-8")
     assert "reconcile_gateway_job" not in source
-    assert 'runtime_gateway = None if settings.gateway_provider == "xray_file" else registry.gateway' in source
+    assert (
+        'runtime_gateway = None if settings.gateway_provider == "xray_file" '
+        "else registry.gateway"
+    ) in source
     assert "gateway=runtime_gateway" in source
 
 
