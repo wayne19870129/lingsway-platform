@@ -486,8 +486,8 @@ class MarzbanXrayRuntime(LocalXrayRuntime):
     """
 
     control_base_url: str = ""
-    admin_username: str = ""
-    admin_password: str = ""
+    _admin_username: str = ""
+    _admin_password: str = ""
     verify_tls: bool = True
     ca_cert_path: str = "/app/data/marzban/internal.crt"
     health_host: str = "marzban"
@@ -514,8 +514,8 @@ class MarzbanXrayRuntime(LocalXrayRuntime):
             response = client.post(
                 f"{self.control_base_url.rstrip('/')}/api/admin/token",
                 data={
-                    "username": self.admin_username,
-                    "password": self.admin_password,
+                    "username": self._admin_username,
+                    "password": self._admin_password,
                 },
             )
         except httpx.HTTPError as exc:
