@@ -8,17 +8,16 @@ import shutil
 import socket
 import subprocess
 import tempfile
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterator, NoReturn, Protocol
+from typing import NoReturn, Protocol
 
 import httpx
 
 from backend.app.core.config import Settings
-from backend.app.providers.marzban_tls import build_marzban_tls_verify
 from backend.app.providers.base import (
     ApplyResult,
     CandidateConfig,
@@ -27,6 +26,7 @@ from backend.app.providers.base import (
     HealthReport,
     ValidationResult,
 )
+from backend.app.providers.marzban_tls import build_marzban_tls_verify
 from backend.app.providers.gateway.xray_baseline import (
     XrayAppliedStateStore,
     XrayBaselineError,
