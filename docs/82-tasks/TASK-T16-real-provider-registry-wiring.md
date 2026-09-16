@@ -2410,53 +2410,53 @@ Exact-head evidence: CI #366 success with 69 Marzban contract tests passed, Secu
 
 ## Latest authoritative handoff — Phase 2C3A Xray runtime-control ADR
 
-Authoritative base \`main\`: \`99d299b1df1172583d221c0e19f6c421480c2c8c\` (PR #112
-merged). This ADR-only vehicle is PR \`TASK-T16 Phase 2C: define Xray runtime
-control boundary\` on branch
-\`task/t16-2c3a-xray-runtime-control-adr\`. Codex / GPT-5.6 Luna High is the
+Authoritative base `main`: `99d299b1df1172583d221c0e19f6c421480c2c8c` (PR #112
+merged). This ADR-only vehicle is PR `TASK-T16 Phase 2C: define Xray runtime
+control boundary` on branch
+`task/t16-2c3a-xray-runtime-control-adr`. Codex / GPT-5.6 Luna High is the
 sole implementation writer; Claude Code Web is fully stopped. The User retains
 manual merge and production approval. No production code, deployment script,
 infrastructure file, test, workflow, AGENTS.md, Issue, or schema was changed.
 
 Phase 2C3's Xray and Mihomo audit found two independent blockers. This slice
 only resolves the Xray runtime-control architecture question in
-\`docs/80-decisions/ADR-021-xray-runtime-control-boundary.md\`; it does not
+`docs/80-decisions/ADR-021-xray-runtime-control-boundary.md`; it does not
 wire a real provider and does not resolve Mihomo.
 
 ADR-021 is a Proposed / Accepted-candidate decision, not formally Accepted
 until human merge. It records the verified current topology: backend-api is a
 normal Python container that may run the pinned Xray binary for candidate
-\`xray run -test\), while the Marzban container owns the running Xray process
-and mounts the same persistent \`xray_config.json\). It rejects
-\`systemctl reload xray\` from backend-api, Docker socket/API, privileged or
+`xray run -test\), while the Marzban container owns the running Xray process
+and mounts the same persistent `xray_config.json\). It rejects
+`systemctl reload xray` from backend-api, Docker socket/API, privileged or
 host-PID access, application-driven Compose/Docker restart, and any arbitrary
 host command.
 
 The selected future activation boundary is the authenticated Marzban
-\`PUT /api/core/config\` endpoint. The exact upstream Marzban v0.8.4 source
+`PUT /api/core/config` endpoint. The exact upstream Marzban v0.8.4 source
 at commit
-\`7f396db3e703d71a28060bc9ce4a532ec64cb1f4\` was rechecked in
-\`app/routers/core.py\`: \`POST /api/core/restart\` starts from Marzban's
-in-memory \`xray.config\` and cannot prove activation of a file externally
-changed by Lingsway; \`PUT /api/core/config\` validates the payload, replaces
-in-memory configuration, writes \`XRAY_JSON\`, includes DB users, restarts the
+`7f396db3e703d71a28060bc9ce4a532ec64cb1f4` was rechecked in
+`app/routers/core.py`: `POST /api/core/restart` starts from Marzban's
+in-memory `xray.config` and cannot prove activation of a file externally
+changed by Lingsway; `PUT /api/core/config` validates the payload, replaces
+in-memory configuration, writes `XRAY_JSON`, includes DB users, restarts the
 core, and returns the submitted payload. The next implementation must send
 the exact candidate already validated and atomically installed by Lingsway,
 verify API acceptance, verify Marzban core/API health plus backend-network
-\`marzban:8443\`, verify the repo-owned projection, and persist APPLIED only
+`marzban:8443`, verify the repo-owned projection, and persist APPLIED only
 after all checks. Failure uses the existing exact-backup restore and the same
 PUT activation path; inability to prove rollback remains DEGRADED/fail-closed.
 
 Lingsway retains DB desired-state, credential-resolution, full composition,
 candidate validation, shared-file projection, writer baseline, backup,
 rollback, drift, and post-activation verification ownership. Marzban retains
-runtime process lifecycle and dynamic user membership. \`include_db_users()\`
-does not transfer repo desired-state ownership, and \`runtime.current()\` is
+runtime process lifecycle and dynamic user membership. `include_db_users()`
+does not transfer repo desired-state ownership, and `runtime.current()` is
 not a desired-state source. Process-lifetime provider state remains immutable,
 non-secret, and process-stable; authentication is lazy and operation-time.
 No generic control-plane framework or new generic gateway DTO is introduced.
 
-Mihomo remains blocked under \`MIHOMO_RENDER_BOUNDARY_BLOCKER\`, plus two
+Mihomo remains blocked under `MIHOMO_RENDER_BOUNDARY_BLOCKER`, plus two
 additional blockers recorded for its dedicated ADR: downstream forwarder
 compensation after a later saga step fails, and serialization/freshness/
 commit-order rules for its global full-config writer. No Mihomo implementation
