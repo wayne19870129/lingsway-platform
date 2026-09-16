@@ -14,6 +14,7 @@ from backend.app.providers.egress.mock import MockEgressProvider
 from backend.app.providers.email.noop import NoopEmailProvider
 from backend.app.providers.forwarder.mock import MockForwarderProvider
 from backend.app.providers.gateway.mock import MockGatewayProvider
+from backend.app.providers.gateway.xray_file import MarzbanXrayRuntime, XrayFileProvider
 from backend.app.providers.notify.noop import NoopNotifyProvider
 from backend.app.providers.payment.mock import MockPaymentProvider
 from backend.app.providers.registry import (
@@ -312,11 +313,72 @@ def test_registry_selects_marzban_from_settings_without_http(
     assert client.request_calls == 0
     assert registry.accounting._base_url == "https://marzban.example.invalid"
     assert registry.accounting._admin_username == "admin"
+    assert registry.accounting._client is None  # noqa: SLF001
 
     registry.close()
     registry.close()
-    assert client.close_calls == 1
+    assert client.close_calls == 0
 
+
+
+def _xray_settings(**overrides: object) -> Settings:
+    values: dict[str, object] = {
+        "gateway_provider": "xray_file",
+        "marzban_base_url": "https://marzban.internal.invalid",
+        "marzban_admin_username": "admin",
+        "marzban_admin_password": "test-password",
+        "marzban_default_protocol": "vless",
+        "marzban_default_inbounds_json": '{"vless": ["inbound-vless"]}',
+        "xray_reality_dest": "example.com:443",
+        "xray_reality_server_name": "example.com",
+    }
+    values.update(overrides)
+    return Settings(**values)  # type: ignore[arg-type]
+
+
+def test_registry_selects_xray_file_without_external_io() -> None:
+    registry = build_registry(_xray_settings())
+    try:
+        assert isinstance(registry.gateway, XrayFileProvider)
+        assert isinstance(registry.gateway._runtime, MarzbanXrayRuntime)  # noqa: SLF001
+        runtime = registry.gateway._runtime  # noqa: SLF001
+        assert runtime.control_base_url == "https://marzban.internal.invalid"
+        assert runtime.health_host == "marzban"
+        assert runtime.health_port == 8443
+    finally:
+        registry.close()
+
+
+def test_xray_registry_does_not_load_ca_or_touch_runtime_at_construction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "backend.app.providers.marzban_tls.ssl.create_default_context",
+        lambda **_kwargs: pytest.fail("CA file must load only during an operation"),
+    )
+    monkeypatch.setattr(
+        "backend.app.providers.gateway.xray_file.subprocess.run",
+        lambda *_args, **_kwargs: pytest.fail("runtime command must not run"),
+    )
+    build_registry(_xray_settings())
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"marzban_ca_cert_path": ""},
+        {"marzban_verify_tls": False, "app_env": "production"},
+        {"marzban_admin_password": "CHANGE_ME", "app_env": "production"},
+    ],
+)
+def test_xray_runtime_safety_requirements_fail_closed(
+    overrides: dict[str, object],
+) -> None:
+    with pytest.raises(ValueError):
+        settings = _xray_settings(
+            app_env=overrides.pop("app_env", "development"), **overrides
+        )
+        settings.validate_runtime_safety()
 
 def test_unsupported_accounting_provider_fails_closed() -> None:
     with pytest.raises(ProviderConfigurationError, match="ACCOUNTING_PROVIDER"):
