@@ -11,6 +11,7 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
@@ -21,11 +22,11 @@ from backend.app.infra.gateway_route_lock import gateway_route_binding_write
 from backend.app.infra.provisioning_state import full_desired_routing_snapshot
 from backend.app.models import (
     AuditLog,
+    GatewayRouteBinding,
     Job,
     JobStatus,
     Order,
     OrderStatus,
-    ReconcileState,
     Subscription,
     SubscriptionStatus,
 )
@@ -43,6 +44,18 @@ class GatewayReconciliationBlocked(RuntimeError):
 
 class GatewayReconciliationError(RuntimeError):
     """A secret-safe gateway reconciliation failure."""
+
+
+class FirstCommitOutcome(StrEnum):
+    """Fresh-DB classification after an acknowledgement-loss commit error."""
+
+    LANDED = "LANDED"
+    ABSENT = "ABSENT"
+    UNKNOWN = "UNKNOWN"
+
+
+class GatewayCommitOutcomeUnknown(GatewayReconciliationError):
+    """The first authoritative commit cannot be classified safely."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,22 +103,66 @@ def _job_payload(job: Job) -> dict[str, object]:
     return value
 
 
-def assert_no_unresolved_gateway_mutation(db: Session, subscription_id: int | None = None) -> None:
-    """Block every new Class-A writer behind an older unresolved intent."""
-    statement = select(Job).where(
-        Job.job_type == GATEWAY_RECONCILE_JOB_TYPE,
-        Job.status != JobStatus.SUCCEEDED,
-    )
-    if subscription_id is not None:
-        statement = statement.where(
-            Job.payload_json.like(f'%"subscription_id": {subscription_id}%')
+def assert_no_unresolved_gateway_mutation(db: Session) -> None:
+    """Block new Class-A writers using a MySQL current read under the named lock."""
+    statement = (
+        select(Job.id)
+        .where(
+            Job.job_type == GATEWAY_RECONCILE_JOB_TYPE,
+            Job.status != JobStatus.SUCCEEDED,
         )
-    existing = db.scalar(statement.order_by(Job.id).limit(1))
-    if existing is not None:
+        .order_by(Job.id)
+        .limit(1)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    existing_id = db.scalar(statement)
+    if existing_id is not None:
         raise GatewayReconciliationBlocked(
             "an older gateway reconciliation is unresolved; recovery or manual "
             "resolution is required before a new projection mutation"
         )
+
+
+def classify_first_commit_outcome(
+    db: Session, *, dedupe_key: str, subscription_id: int
+) -> FirstCommitOutcome:
+    """Classify an uncertain first commit from a fresh, independent Session.
+
+    The caller keeps the projection named lock while this probe runs. Both
+    the intent row and the active route must be present to call the commit
+    landed; both absent is the only safe not-landed result. Any partial
+    evidence, or an unavailable database, is UNKNOWN and therefore
+    fail-closed without external compensation.
+    """
+    try:
+        bind = db.get_bind()
+        with Session(bind=bind, autoflush=False, expire_on_commit=False) as probe:
+            job_id = probe.scalar(
+                select(Job.id)
+                .where(Job.dedupe_key == dedupe_key)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            route_id = probe.scalar(
+                select(GatewayRouteBinding.id)
+                .where(
+                    GatewayRouteBinding.subscription_id == subscription_id,
+                    GatewayRouteBinding.enabled.is_(True),
+                    GatewayRouteBinding.released_at.is_(None),
+                )
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+    except Exception as exc:
+        raise GatewayCommitOutcomeUnknown(
+            "GATEWAY_FIRST_COMMIT_OUTCOME_UNKNOWN"
+        ) from exc
+    if job_id is not None and route_id is not None:
+        return FirstCommitOutcome.LANDED
+    if job_id is None and route_id is None:
+        return FirstCommitOutcome.ABSENT
+    return FirstCommitOutcome.UNKNOWN
 
 
 def enqueue_gateway_reconciliation(
@@ -125,8 +182,16 @@ def enqueue_gateway_reconciliation(
         provision_run_id=provision_run_id,
     )
     dedupe_key = f"GATEWAY_RECONCILE:{operation_kind}:{operation_id}"
-    existing = db.scalar(select(Job).where(Job.dedupe_key == dedupe_key))
-    if existing is not None:
+    existing_id = db.scalar(
+        select(Job.id)
+        .where(Job.dedupe_key == dedupe_key)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if existing_id is not None:
+        existing = db.get(Job, existing_id, populate_existing=True)
+        if existing is None:
+            raise GatewayReconciliationError("GATEWAY_RECONCILIATION_JOB_MISSING")
         return existing
     job = Job(
         job_type=GATEWAY_RECONCILE_JOB_TYPE,
@@ -195,9 +260,6 @@ def _record_failure(
             provision_run.last_error_code = reason_code[:80]
 
     if subscription is not None:
-        subscription.reconcile_state = (
-            ReconcileState.FAILED if exhausted else ReconcileState.PENDING
-        )
         subscription.provision_error = (
             "gateway reconciliation requires manual intervention"
             if exhausted
@@ -249,8 +311,6 @@ def _finalize(
         order.status = OrderStatus.ACTIVATED
         order.activated_at = order.activated_at or datetime.now(UTC)
         subscription.provision_error = None
-    subscription.reconcile_state = ReconcileState.SYNCED
-    subscription.reconcile_attempts = 0
     job.status = JobStatus.SUCCEEDED
     job.locked_at = None
     job.last_error_code = None
