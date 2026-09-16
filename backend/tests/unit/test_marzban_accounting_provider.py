@@ -23,7 +23,6 @@ from typing import Any
 import httpx
 import pytest
 
-from backend.app.providers.accounting import marzban as marzban_module
 from backend.app.providers.accounting.marzban import (
     MarzbanAccountingProvider,
     MarzbanApiError,
@@ -978,7 +977,7 @@ def test_concurrent_lazy_client_creation_is_single_owned_client(
         created.append(client)
         return client
 
-    monkeypatch.setattr(marzban_module.httpx, "Client", client_factory)
+    monkeypatch.setattr(httpx, "Client", client_factory)
     provider = MarzbanAccountingProvider(
         base_url=_BASE_URL,
         admin_username=_ADMIN_USERNAME,
