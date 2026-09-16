@@ -182,16 +182,13 @@ def enqueue_gateway_reconciliation(
         provision_run_id=provision_run_id,
     )
     dedupe_key = f"GATEWAY_RECONCILE:{operation_kind}:{operation_id}"
-    existing_id = db.scalar(
-        select(Job.id)
+    existing = db.scalar(
+        select(Job)
         .where(Job.dedupe_key == dedupe_key)
         .with_for_update()
         .execution_options(populate_existing=True)
     )
-    if existing_id is not None:
-        existing = db.get(Job, existing_id, populate_existing=True)
-        if existing is None:
-            raise GatewayReconciliationError("GATEWAY_RECONCILIATION_JOB_MISSING")
+    if existing is not None:
         return existing
     job = Job(
         job_type=GATEWAY_RECONCILE_JOB_TYPE,
