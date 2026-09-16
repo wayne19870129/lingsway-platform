@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 
 from backend.app.core.config import get_settings
+from backend.app.core.config import get_settings
 from backend.app.domain.capacity import ensure_capacity
 from backend.app.domain.ordering import (
     BillingCommand,
@@ -25,6 +26,7 @@ from backend.app.domain.ordering import (
 )
 from backend.app.domain.provisioning import (
     PENDING_MANUAL_BUSINESS_MESSAGES,
+    ProvisioningCheckpoint,
     ProvisioningService,
     ProvisioningState,
     ProvisionOutcome,
@@ -109,7 +111,7 @@ def _confirm_paid_purchase_durable(
     runs: ProvisionRunStore,
     order_state: OrderWorkflowState,
     provisioning: ProvisioningService,
-    checkpoint: object,
+    checkpoint: ProvisioningCheckpoint,
     registry: ProviderRegistry,
 ) -> ProvisionOutcome:
     """Commit DB B plus a pending gateway intent before any runtime mutation."""
@@ -277,7 +279,11 @@ def confirm_payment_and_provision(
     # Real SQLAlchemy paid provisioning follows ADR-022 Direction B. Test
     # doubles retain the legacy composition below so the domain contract stays
     # unchanged and does not gain an infrastructure/session dependency.
-    if getattr(order_state, "db", None) is not None and hasattr(prepared, "account_user"):
+    if (
+        get_settings().gateway_provider == "xray_file"
+        and getattr(order_state, "db", None) is not None
+        and isinstance(prepared, ProvisioningCheckpoint)
+    ):
         return _confirm_paid_purchase_durable(
             command,
             request,
