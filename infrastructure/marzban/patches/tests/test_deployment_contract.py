@@ -194,6 +194,21 @@ def test_probe_uses_settings_from_env_and_exact_sentinel_contract() -> None:
     assert "compose run --rm --no-deps backend-api" not in resolver
 
 
+
+def test_fresh_internal_certificate_contains_all_required_sans() -> None:
+    script = _STACK_SCRIPT.read_text(encoding="utf-8")
+    assert "subjectAltName=DNS:marzban,DNS:localhost,IP:127.0.0.1" in script
+
+
+def test_existing_internal_certificate_requires_marzban_san_migration() -> None:
+    script = _STACK_SCRIPT.read_text(encoding="utf-8")
+    tls = script.split("ensure_marzban_internal_tls() {", 1)[1].split(
+        "resolve_accounting_provider() {", 1
+    )[0]
+    assert 'openssl x509 -in "$certificate" -noout -ext subjectAltName' in tls
+    assert "MARZBAN_INTERNAL_TLS_MIGRATION_REQUIRED" in tls
+    assert "refusing to overwrite an existing half-pair" in tls
+
 def test_real_marzban_selects_patched_image_and_mock_does_not_override() -> None:
     script = _STACK_SCRIPT.read_text(encoding="utf-8")
     assert f"MARZBAN_IMAGE:-{_PATCHED_IMAGE}" in script
