@@ -2510,3 +2510,38 @@ were corrected: `xray run -test` and `xray_config.json`.
 Phase status remains unchanged: Phase 2B COMPLETE; Phase 2C ACTIVE; Phase 2C1
 COMPLETE; Phase 2C2 COMPLETE; Phase 2C3A awaits renewed independent review;
 Mihomo remains blocked.
+
+
+## Latest authoritative handoff — Phase 2C3B Xray runtime provider wiring
+
+This section records the implementation slice after PR #113 was manually
+merged at main commit
+`3943bfdb149bfdfa204ad627d11e37c1ce161abe`. The authorized vehicle is
+branch `task/t16-2c3b-xray-runtime-provider-wiring`; the default provider
+selections remain mock/noop until an operator explicitly selects a real
+provider.
+
+Phase 2C3B implements only the Xray gateway side of the accepted ADR-021
+boundary. `GATEWAY_PROVIDER=xray_file` now assembles the existing
+`XrayFileProvider` with the canonical static skeleton, Settings-derived
+deployment values, the shared persistent config/baseline paths, and a
+concrete `MarzbanXrayRuntime`. The runtime activates the exact installed
+candidate through authenticated `PUT /api/core/config`, validates the
+returned JSON against that candidate, checks authenticated `GET /api/core`
+for `started=true`, and checks TCP `marzban:8443`. It never invokes
+systemd, Docker, a restart endpoint, or a host-local Xray control path.
+
+`MARZBAN_CA_CERT_PATH` is the central explicit trust configuration for both
+Marzban accounting and Xray control. CA loading and owned accounting-client
+creation are lazy; registry construction performs no certificate read,
+network request, socket probe, subprocess, config write, or database access.
+Accounting and gateway providers remain independent and share no client,
+token, Session, or mutable operation context. Xray control bearer tokens are
+operation-local and are not retained by the runtime.
+
+Fresh internal certificates now include `DNS:marzban`,
+`DNS:localhost`, and `IP:127.0.0.1`. Existing half-pairs and existing
+certificates without `DNS:marzban` fail closed; no automatic rotation is
+performed. Mihomo remains blocked and is not part of this slice. No schema,
+workflow, AGENTS.md, deployment, credential, DNS, or real Marzban side
+effect is included.
