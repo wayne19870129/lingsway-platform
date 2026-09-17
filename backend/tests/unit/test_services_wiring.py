@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
@@ -29,7 +30,9 @@ from backend.app.providers.base import (
     DesiredForwarderState,
     DesiredRoutingState,
     EgressEndpointDTO,
+    NotifyEvent,
     PaymentProvider,
+    ProviderRegistry,
     TenantDTO,
     XrayOutboundDTO,
 )
@@ -40,7 +43,6 @@ from backend.app.providers.forwarder.mock import MockForwarderProvider
 from backend.app.providers.gateway.mock import MockGatewayProvider
 from backend.app.providers.notify.noop import NoopNotifyProvider
 from backend.app.providers.payment.mock import MockPaymentProvider
-from backend.app.providers.registry import ProviderRegistry
 from backend.app.providers.storage.mock import MockBlobStorage
 from backend.app.providers.transport.mock import MockTransportProvider
 from backend.app.services import (
@@ -239,30 +241,37 @@ def command(
 
 @dataclass
 class RecordingNotifyProvider:
-    events: list[object] = field(default_factory=list)
+    events: list[NotifyEvent] = field(default_factory=list)
 
-    def send(self, event: object) -> None:
+    def send(self, event: NotifyEvent) -> None:
         self.events.append(event)
 
 
 @dataclass
+class DurableSubscription:
+    id: int = 7
+    order_id: int = 1
+    status: str = "PROVISIONING"
+    accounting_user_id: str | None = None
+    provision_error: str | None = None
+
+
+@dataclass
+class DurableOrder:
+    status: str = "PAID"
+
+
+@dataclass
+class DurableJob:
+    status: str = "RUNNING"
+    last_error_code: str = "GATEWAY_FINALIZATION_COMMIT_OUTCOME_UNKNOWN"
+
+
+@dataclass
 class DurableConfirmationDB:
-    subscription: object = field(
-        default_factory=lambda: SimpleNamespace(
-            id=7,
-            order_id=1,
-            status="PROVISIONING",
-            accounting_user_id=None,
-            provision_error=None,
-        )
-    )
-    order: object = field(default_factory=lambda: SimpleNamespace(status="PAID"))
-    unresolved_job: object = field(
-        default_factory=lambda: SimpleNamespace(
-            status="RUNNING",
-            last_error_code="GATEWAY_FINALIZATION_COMMIT_OUTCOME_UNKNOWN",
-        )
-    )
+    subscription: DurableSubscription = field(default_factory=DurableSubscription)
+    order: DurableOrder = field(default_factory=DurableOrder)
+    unresolved_job: DurableJob = field(default_factory=DurableJob)
     commit_count: int = 0
     rollback_count: int = 0
 
@@ -330,9 +339,9 @@ def _run_durable_confirmation(
         state,
         Runs(),
         SimpleNamespace(db=db),
-        DurableProvisioning(),
+        cast(ProvisioningService, DurableProvisioning()),
         checkpoint,
-        registry,
+        cast(ProviderRegistry, registry),
     )
     return outcome, db, notify
 
