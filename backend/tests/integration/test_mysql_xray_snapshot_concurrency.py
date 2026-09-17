@@ -758,6 +758,17 @@ def _make_gateway() -> _FakeGateway:
 def _reconcile(
     engine: Engine, gateway: _FakeGateway
 ) -> GatewayReconciliationResult | None:
+    # Make the recovery precondition explicit rather than relying on a
+    # dialect-specific server default for the test's fresh pending row.
+    with Session(engine) as db:
+        job = db.scalar(
+            select(Job)
+            .where(Job.job_type == "GATEWAY_RECONCILE")
+            .order_by(Job.id.desc())
+        )
+        assert job is not None
+        job.available_at = datetime.now(UTC)
+        db.commit()
     return reconcile_gateway_job(  # type: ignore[arg-type]
         gateway,
         db_factory=lambda: Session(engine),
