@@ -507,6 +507,17 @@ def _reconcile_claimed_job(
         if not applied.applied:
             raise GatewayReconciliationError("GATEWAY_APPLY_NOT_CONFIRMED")
         _finalize(db, job, payload)
+        subscription_value = payload.get("subscription_id")
+        order_value = payload.get("order_id")
+        run_value = payload.get("provision_run_id")
+        if not isinstance(subscription_value, int):
+            raise GatewayReconciliationError("GATEWAY_RECONCILIATION_SUBSCRIPTION_INVALID")
+        if order_value is not None and not isinstance(order_value, int):
+            raise GatewayReconciliationError("GATEWAY_RECONCILIATION_ORDER_INVALID")
+        if run_value is not None and (
+            not isinstance(run_value, str) or not run_value.isdigit()
+        ):
+            raise GatewayReconciliationError("GATEWAY_RECONCILIATION_RUN_INVALID")
         try:
             db.commit()
         except Exception as commit_error:
@@ -514,18 +525,9 @@ def _reconcile_claimed_job(
             outcome = classify_finalization_outcome(
                 db,
                 job_id=job_id,
-                subscription_id=int(payload["subscription_id"]),
-                order_id=(
-                    int(payload["order_id"])
-                    if isinstance(payload.get("order_id"), int)
-                    else None
-                ),
-                provision_run_id=(
-                    int(payload["provision_run_id"])
-                    if isinstance(payload.get("provision_run_id"), str)
-                    and payload["provision_run_id"].isdigit()
-                    else None
-                ),
+                subscription_id=subscription_value,
+                order_id=order_value,
+                provision_run_id=int(run_value) if isinstance(run_value, str) else None,
                 operation_kind=(
                     operation_kind if isinstance(operation_kind, str) else ""
                 ),
