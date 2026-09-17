@@ -505,7 +505,11 @@ def test_production_xray_file_is_constructible_without_external_io(
         ("TLS verification disabled", {"MARZBAN_VERIFY_TLS": "false"}, "VERIFY_TLS"),
         ("default credentials", {"MARZBAN_ADMIN_PASSWORD": "CHANGE_ME"}, "credentials"),
         ("blank CA path", {"MARZBAN_CA_CERT_PATH": " "}, "CA_CERT_PATH"),
-        ("example.invalid URL", {"MARZBAN_BASE_URL": "https://marzban.example.invalid"}, "configured"),
+        (
+            "example.invalid URL",
+            {"MARZBAN_BASE_URL": "https://marzban.example.invalid"},
+            "configured",
+        ),
     ],
 )
 def test_production_xray_file_safety_guards_remain_fail_closed(
