@@ -207,6 +207,8 @@ def _confirm_paid_purchase_durable(
                 try:
                     db.commit()
                 except Exception as commit_error:
+                    with suppress(Exception):
+                        db.rollback()
                     try:
                         outcome = classify_first_commit_outcome(
                             db,
