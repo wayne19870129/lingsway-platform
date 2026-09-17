@@ -1,8 +1,8 @@
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from types import SimpleNamespace
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from decimal import Decimal
 
 import pytest
@@ -13,9 +13,9 @@ from backend.app.domain.ordering import (
     PaymentConfirmation,
 )
 from backend.app.domain.provisioning import (
+    ProvisioningCheckpoint,
     ProvisionOutcome,
     ProvisionRequest,
-    ProvisioningCheckpoint,
     ProvisionStatus,
     ProvisionStep,
 )
@@ -224,9 +224,12 @@ def request() -> ProvisionRequest:
     )
 
 
-def command(order_type: BillingOrderType = BillingOrderType.PURCHASE) -> BillingCommand:
+def command(
+    order_type: BillingOrderType = BillingOrderType.PURCHASE,
+    order_id: str = "order-1",
+) -> BillingCommand:
     return BillingCommand(
-        order_id="order-1",
+        order_id=order_id,
         subscription_id="subscription-1" if order_type is not BillingOrderType.PURCHASE else None,
         order_type=order_type,
         addon_bytes=10 if order_type is BillingOrderType.ADDON else 0,
@@ -322,7 +325,7 @@ def _run_durable_confirmation(
         lambda database, job_id, providers: result,
     )
     outcome = services_module._confirm_paid_purchase_durable(
-        command(),
+        command(order_id="1"),
         request(),
         state,
         Runs(),
