@@ -683,6 +683,7 @@ class _FaultSession(Session):
     def commit(self) -> None:
         self._commit_calls += 1
         if self._commit_calls == 2 and self._fail_mode == "before":
+            self.rollback()
             raise RuntimeError("injected finalization commit failure")
         super().commit()
         if self._commit_calls == 2 and self._fail_mode == "ack":
@@ -729,6 +730,7 @@ def _seed_pending_gateway_case(
             job_type="PROVISION",
             dedupe_key=f"PROVISION:{operation_id}",
             status=JobStatus.RUNNING,
+            available_at=datetime.now(UTC),
         )
         db.add(provision_run)
         db.flush()
