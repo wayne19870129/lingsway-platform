@@ -3,7 +3,7 @@
 import asyncio
 import logging
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
@@ -59,9 +59,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     finally:
         stop.set()
         if recovery_task is not None:
-            recovery_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await recovery_task
+            # Let the in-flight worker finish before closing the registry it uses.
+            # The loop observes stop immediately after that attempt returns.
+            await recovery_task
         registry.close()
 
 
