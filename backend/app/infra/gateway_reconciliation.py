@@ -521,6 +521,10 @@ def _reconcile_claimed_job(
         try:
             db.commit()
         except Exception as commit_error:
+            # Release any local locks before the independent certainty probe;
+            # a failed COMMIT leaves this Session unable to be the observer.
+            with suppress(Exception):
+                db.rollback()
             operation_kind = payload.get("operation_kind")
             outcome = classify_finalization_outcome(
                 db,
