@@ -628,6 +628,18 @@ class ProvisioningService:
         except Exception:
             return
 
+    def fail_before_gateway_authoritative_commit(
+        self, checkpoint: ProvisioningCheckpoint, request: ProvisionRequest, error: Exception
+    ) -> ProvisionOutcome:
+        """Reuse ADR-018 compensation before the first durable gateway commit.
+
+        The caller must roll back its business Session before calling this
+        method. A confirmed accounting user is disabled through the existing
+        certainty-aware helper; an ambiguous disable result stays
+        ``PENDING_MANUAL`` and is never treated as an ordinary failure.
+        """
+        return self._compensate_created_accounting_user(checkpoint.run_id, request, error)
+
     def fail_apply_gateway_lock_acquisition(
         self, checkpoint: ProvisioningCheckpoint, request: ProvisionRequest, error: Exception
     ) -> None:

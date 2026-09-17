@@ -123,15 +123,17 @@ def run_batch(
     would build a registry nothing ever closes. ``build_scheduler_registry()``
     now only ever runs at the actual process ownership boundary, ``main()``.
     """
+    settings = get_settings()
+    runtime_gateway = None if settings.gateway_provider == "xray_file" else registry.gateway
     with db_factory() as db:
         transport_records = sync_transport_capacity_and_inventory(db, registry)
         reconciled = run_pending_reconcile(
-            db, registry.accounting, get_settings().accounting_sync_batch_size
+            db, registry.accounting, settings.accounting_sync_batch_size
         )
         reconcile_usage_period_cache(db)
         usage_jobs = 0
-        for _ in range(get_settings().accounting_sync_batch_size):
-            job = run_next_usage_job(db, registry.accounting)
+        for _ in range(settings.accounting_sync_batch_size):
+            job = run_next_usage_job(db, registry.accounting, gateway=runtime_gateway)
             if job is None:
                 break
             usage_jobs += 1

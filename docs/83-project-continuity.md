@@ -914,3 +914,93 @@ ADR-022 remains `Proposed` and no implementation is included. PR #114 remains OP
 The renewed architecture review accepted ADR-022's Direction B contract but required a production hard gate because durable reconciliation is not yet implemented. At reviewed head `6f0bde97f5e4e995c55410110e6dc18cd3f06c60` (canonical review `5223833065`), Settings validation now rejects only production `GATEWAY_PROVIDER=xray_file` before registry/provider construction. It does not disable production Marzban accounting when the gateway remains mock, and it does not block development/test Xray contract construction.
 
 This is a safety-only boundary; no ADR-022 state machine or production reconciliation implementation is part of PR #114. The next independent vehicle is Phase 2C3C — ADR-022 durable gateway reconciliation. PR #114 remains OPEN and unmerged. Phase 2B COMPLETE; Phase 2C ACTIVE; Phase 2C1 COMPLETE; Phase 2C2 COMPLETE; Phase 2C3A COMPLETE; Phase 2C3B runtime plumbing COMPLETE but production-gated. Mihomo remains separately architecture-blocked.
+## Latest authoritative handoff — Phase 2C3C durable gateway reconciliation
+
+Starting from accepted main 86304819fa0779bbe1e2c925636086e71fb551f1,
+Codex created task/t16-2c3c-durable-gateway-reconciliation for
+TASK-T16 Phase 2C: implement durable gateway reconciliation.
+
+ADR-022 was verified against the reviewed Direction B content and changed only
+from Proposed to Accepted. The existing Job model is reused for
+GATEWAY_RECONCILE pending intents with identifier-only JSON payloads; there is
+no new table, enum, migration, provider-neutral DTO, or second GatewayProvider
+interface. The new reconciler uses the existing named lock, fresh Sessions and
+fresh DB desired-state reads, the operation-scoped SqlAlchemyCredentialResolver,
+and the existing provider registry. The backend-api lifespan owns one bounded
+recovery loop and closes it before the registry.
+
+Paid provisioning now establishes the route, accounting identity, token
+Secret/hash, and pending intent in the first durable DB commit; runtime
+render/validate/apply follows; finalization activates the Subscription/Order
+and marks the provision run only after successful runtime verification. Release
+commits route disable/release plus a pending intent before removal; runtime
+failure never rolls back DB B or disables the accounting user automatically.
+The manual principal writer fails closed when a real Xray provider is selected,
+and unresolved older gateway intents block later Class-A mutations.
+
+The production Xray hard gate remains because independent review must still
+verify all recovery, writer, concurrency, crash-matrix, release, finalization,
+and notify tests before enablement. No real external side effect was run.
+Phase status: Phase 2B COMPLETE; Phase 2C ACTIVE; Phase 2C1 COMPLETE; Phase
+2C2 COMPLETE; Phase 2C3A COMPLETE; Phase 2C3B COMPLETE but production-gated;
+Phase 2C3C implementation awaiting exact-head review; Mihomo remains blocked.
+
+
+## Review follow-up — Phase 2C3C durability
+
+At reviewed exact head `3d3a770160bdf7b45fb91789b209688438c99c1b` (canonical review `5225093815`) the independent review found five Majors and one Minor. The implementation follow-up keeps ADR-022 Accepted and the production Xray hard gate.
+
+The first purchase commit now uses a fresh independent Session, while the
+projection named lock is still held, to classify the deterministic pending
+intent plus active route as LANDED, ABSENT, or UNKNOWN after an acknowledgement
+error. Only an explicitly ABSENT outcome invokes the existing ADR-018
+certainty-aware accounting compensation; UNKNOWN is secret-safe,
+fail-closed, and never blind-disables an external user. Pre-commit failures
+reuse the same compensation helper, including PENDING_MANUAL handling.
+
+Gateway unresolved-intent and dedupe reads are locking/current reads. The
+scheduler no longer calls the reconciliation executor and passes no runtime
+gateway in `xray_file` mode; backend-api remains the sole real-Xray recovery
+executor. Gateway reconciliation no longer writes the accounting-owned
+`Subscription.reconcile_state` or `reconcile_attempts`. The recovery loop emits
+only exception type diagnostics and continues.
+
+Real MySQL integration coverage now exercises stale-snapshot blocking,
+current-read dedupe recovery, and first-commit evidence classification with
+real Sessions, Job rows, and the existing named lock. Phase status remains:
+Phase 2B COMPLETE; Phase 2C ACTIVE; Phase 2C1 COMPLETE; Phase 2C2 COMPLETE;
+Phase 2C3A COMPLETE; Phase 2C3B COMPLETE but production-gated; Phase 2C3C
+ACTIVE and production-gated, awaiting renewed exact-head review. Mihomo
+remains blocked.
+
+
+## Latest authoritative handoff — Phase 2C3C finalization certainty
+
+Reviewed exact head: `e2f9a9cdf6ff4971db5ff38cee3a636a7f206b5f`; canonical review:
+`5229348434`. Finalization now uses a fresh independent Engine-backed
+observer. For PURCHASE, `LANDED` requires the gateway Job, Subscription,
+Order, and any referenced ProvisionRun to all show their committed success
+states. Only explicit absence is retryable; partial or unavailable evidence
+is `UNKNOWN` with the stable secret-safe
+`GATEWAY_FINALIZATION_COMMIT_OUTCOME_UNKNOWN` diagnostic in an unresolved
+writer-blocking state. A commit ACK-loss after successful durable finalization
+never invokes the ordinary failure path.
+
+The real MySQL test matrix covers crash-before-apply, runtime failure/retry,
+second-commit failure, second-commit ACK-loss, stale RUNNING recovery,
+retry exhaustion, two-worker single apply, expiry release handoff, and token
+recovery. Shutdown sets the stop event, waits for the in-flight recovery
+attempt to return, then closes the process-owned registry. Production
+`APP_ENV=production + GATEWAY_PROVIDER=xray_file` remains fail-closed and
+Phase 2C3C remains ACTIVE/production-gated pending renewed exact-head review.
+
+## Latest independent-review follow-up — customer-success finalization guard
+
+Reviewed exact head: `4fd71c0edb6917ec531283969a7b3305025f84a6`; canonical review:
+`5230150152`. `_confirm_paid_purchase_durable()` now requires both
+`result.applied` and `result.finalized` before notification, SUCCESS status,
+or subscription URL. An applied-but-unfinalized outcome, including
+`GATEWAY_FINALIZATION_COMMIT_OUTCOME_UNKNOWN`, remains unresolved and
+writer-blocking without rolling runtime B back or activating DB state. Behavior
+tests cover both the unknown and finalized-success orchestration paths. Phase
+2C3C remains ACTIVE, production-gated, and awaiting renewed exact-head review.

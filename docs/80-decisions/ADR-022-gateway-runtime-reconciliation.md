@@ -1,9 +1,9 @@
 # ADR-022 — Gateway desired-state reconciliation and downstream compensation
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-16
 - Decision owners: repository owner / human approval
-- Scope: TASK-T16 Phase 2C3B follow-up
+- Scope: TASK-T16 Phase 2C3C implementation
 - Depends on: ADR-014, ADR-015, ADR-016, ADR-017, ADR-019, ADR-020, ADR-021
 
 ## Context
@@ -28,9 +28,9 @@ The authoritative invariant is:
   DEGRADED/manual intervention or durable reconciliation; stale B must not
   remain a normal APPLIED state.
 
-This ADR is a proposed architecture decision only. It does not change domain
-contracts, provisioning orchestration, release signatures, provider
-interfaces, or production behavior in this slice.
+This ADR is the accepted architecture decision for Phase 2C3C. Its
+implementation uses the existing generic Job table and one application/infra
+reconciler; it does not add a new provider interface or schema migration.
 
 ## Supersession relationship with ADR-017
 
@@ -175,8 +175,9 @@ Direction B is the selected crash-safe architecture. The normal sequence is:
    projection verification. `runtime/file = B` and `APPLIED B` are valid
    only after these checks succeed; APPLIED remains projection evidence, never
    DB authority.
-6. Perform the second durable finalization transaction: pending becomes
-   APPLIED/SYNCED, Subscription becomes ACTIVE, Order becomes ACTIVATED, and
+6. Perform the second durable finalization transaction: the gateway
+   reconciliation Job becomes SUCCEEDED, Subscription becomes ACTIVE, Order
+   becomes ACTIVATED, and
    other customer-facing success state is committed together. Only after
    this commit may the run be SUCCEEDED, a subscription URL be returned, or
    customer success be reported.
@@ -229,11 +230,64 @@ and convergence are complete.
 No row uses apply-before-commit as the normal contract. No recovery branch
 infers desired state from APPLIED, runtime, filesystem, or fingerprint alone.
 
-## Deferred implementation boundary
+## Implementation status boundary
 
-This ADR remains `Proposed`. It does not implement the state machine or any
-new reconciliation table/model, enum, schema/Alembic migration,
-`current_desired_routing_state()`, new domain protocol, provider finalize API,
-provisioning-state/service ordering, token-step move, accounting compensation
-change, scheduler worker, or release orchestration. Those changes require a
-separate implementation slice after independent review and human acceptance.
+This ADR remains `Accepted`. Phase 2C3C implements the Direction B state
+machine in the existing application/infra paths and tests; it does not add a
+reconciliation table/model, schema/Alembic migration, generic transaction
+framework, new domain protocol, provider finalize API, or provider-neutral
+gateway DTO. Future writer-guard/drift, reconciliation extensions, and Mihomo
+work remain separate slices.
+
+## Implementation boundary — Phase 2C3C
+
+The accepted implementation reuses the existing jobs table with
+job_type=GATEWAY_RECONCILE. Its payload contains only operation_kind,
+subscription_id, order_id, and provision_run_id; tokens, credentials,
+candidates, bearer values, and Reality plaintext never enter the payload or
+audit detail. Existing attempts/available_at/locked_at fields provide retry,
+stale-running recovery, and exhaustion handling.
+
+backend/app/infra/gateway_reconciliation.py is the single application/infra
+entry point. It opens a fresh Session per recovery attempt, uses the existing
+named lock, rereads committed DB desired state, constructs the existing
+operation-scoped credential resolver, calls the existing
+GatewayProvider.render(desired, resolver) / validate / apply contract, and
+commits finalization only after runtime verification. The backend-api lifespan
+starts one bounded background recovery loop that reuses the process-owned
+ProviderRegistry and closes deterministically. No ContextVar, global mutable
+state, provider-held Session, or plaintext cache is used.
+
+Paid provisioning and expiry release now commit DB B plus a pending gateway
+intent before runtime mutation. Post-commit runtime failure keeps DB B
+authoritative and schedules retry or durable manual intervention. New Class-A
+writers check unresolved gateway jobs under the same projection lock; the
+manual principal command fails closed for a real Xray selection until routed
+through this reconciler. The production GATEWAY_PROVIDER=xray_file hard gate
+remains until the implementation and its independent review prove every
+writer and recovery path safe.
+
+Gateway retry and exhaustion state is owned by the GATEWAY_RECONCILE Job,
+safe AuditLog entries, and provision_error where customer-facing business
+state requires it. Gateway reconciliation does not write
+Subscription.reconcile_state or reconcile_attempts; those fields remain
+owned by the accounting reconciliation worker.
+
+
+## Finalization commit certainty — Phase 2C3C review follow-up
+
+At reviewed exact head `e2f9a9cdf6ff4971db5ff38cee3a636a7f206b5f` (canonical review
+`5229348434`), the second durable finalization commit is classified through
+a fresh independent Engine-backed Session. For PURCHASE, `LANDED` requires
+the gateway Job to be `SUCCEEDED`, Subscription to be `ACTIVE`, Order to be
+`ACTIVATED`, and any payload-referenced ProvisionRun to be `SUCCEEDED`.
+Explicitly absent finalization is the only path that records a retryable
+failure; it never rolls DB B back to A. Partial evidence or an unavailable
+observer is `UNKNOWN`, recorded with the stable
+`GATEWAY_FINALIZATION_COMMIT_OUTCOME_UNKNOWN` diagnostic in an unresolved,
+writer-blocking Job state, without guessing FAILED or SUCCEEDED.
+
+A commit acknowledgement loss after the database has durably committed
+finalization therefore classifies as `LANDED` and never calls the ordinary
+failure recorder. The existing named lock and identifier-only Job payload
+contracts remain unchanged.

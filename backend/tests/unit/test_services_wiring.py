@@ -3,6 +3,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
@@ -12,18 +14,24 @@ from backend.app.domain.ordering import (
     PaymentConfirmation,
 )
 from backend.app.domain.provisioning import (
+    ProvisioningCheckpoint,
+    ProvisioningService,
+    ProvisionOutcome,
     ProvisionRequest,
     ProvisionStatus,
     ProvisionStep,
 )
 from backend.app.domain.subscription_render import RenderedSubscription
+from backend.app.infra.gateway_reconciliation import GatewayReconciliationResult
 from backend.app.infra.gateway_route_lock import GatewayRouteBindingLockError
 from backend.app.providers.accounting.mock import MockAccountingProvider
 from backend.app.providers.base import (
+    AccountUserDTO,
     CredentialDTO,
     DesiredForwarderState,
     DesiredRoutingState,
     EgressEndpointDTO,
+    NotifyEvent,
     PaymentProvider,
     TenantDTO,
     XrayOutboundDTO,
@@ -219,13 +227,179 @@ def request() -> ProvisionRequest:
     )
 
 
-def command(order_type: BillingOrderType = BillingOrderType.PURCHASE) -> BillingCommand:
+def command(
+    order_type: BillingOrderType = BillingOrderType.PURCHASE,
+    order_id: str = "order-1",
+) -> BillingCommand:
     return BillingCommand(
-        order_id="order-1",
+        order_id=order_id,
         subscription_id="subscription-1" if order_type is not BillingOrderType.PURCHASE else None,
         order_type=order_type,
         addon_bytes=10 if order_type is BillingOrderType.ADDON else 0,
     )
+
+
+
+@dataclass
+class RecordingNotifyProvider:
+    events: list[NotifyEvent] = field(default_factory=list)
+
+    def send(self, event: NotifyEvent) -> None:
+        self.events.append(event)
+
+
+@dataclass
+class DurableSubscription:
+    id: int = 7
+    order_id: int = 1
+    status: str = "PROVISIONING"
+    accounting_user_id: str | None = None
+    provision_error: str | None = None
+
+
+@dataclass
+class DurableOrder:
+    status: str = "PAID"
+
+
+@dataclass
+class DurableJob:
+    status: str = "RUNNING"
+    last_error_code: str = "GATEWAY_FINALIZATION_COMMIT_OUTCOME_UNKNOWN"
+
+
+@dataclass
+class DurableConfirmationDB:
+    subscription: DurableSubscription = field(default_factory=DurableSubscription)
+    order: DurableOrder = field(default_factory=DurableOrder)
+    unresolved_job: DurableJob = field(default_factory=DurableJob)
+    commit_count: int = 0
+    rollback_count: int = 0
+
+    def scalar(self, statement: object) -> object:
+        del statement
+        return self.subscription
+
+    def commit(self) -> None:
+        self.commit_count += 1
+
+    def rollback(self) -> None:
+        self.rollback_count += 1
+
+
+@dataclass
+class DurableProvisioning:
+    def token_factory(self) -> str:
+        return "token-not-customer-visible"
+
+
+def _run_durable_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+    result: GatewayReconciliationResult,
+) -> tuple[ProvisionOutcome, DurableConfirmationDB, RecordingNotifyProvider]:
+    import backend.app.services as services_module
+
+    db = DurableConfirmationDB()
+    notify = RecordingNotifyProvider()
+    registry = SimpleNamespace(notify=notify)
+    state = State()
+    checkpoint = ProvisioningCheckpoint(
+        run_id="run-1",
+        endpoint=EgressEndpointDTO("egress-1", "127.0.0.1", 1080),
+        tenant=TenantDTO("tenant-1", "tenant-1", Decimal("50"), 100),
+        account_user=AccountUserDTO(
+            "customer-1",
+            50 * 1024**3,
+            request().expire_at,
+            "7.customer-1",
+        ),
+    )
+    monkeypatch.setattr(
+        services_module,
+        "get_settings",
+        lambda: SimpleNamespace(gateway_provider="xray_file"),
+    )
+    monkeypatch.setattr(
+        services_module,
+        "assert_no_unresolved_gateway_mutation",
+        lambda database: None,
+    )
+    monkeypatch.setattr(
+        services_module,
+        "enqueue_gateway_reconciliation",
+        lambda *args, **kwargs: SimpleNamespace(id=99),
+    )
+    monkeypatch.setattr(
+        services_module,
+        "reconcile_gateway_job_in_session",
+        lambda database, job_id, providers: result,
+    )
+    outcome = services_module._confirm_paid_purchase_durable(
+        command(order_id="1"),
+        request(),
+        state,
+        Runs(),
+        SimpleNamespace(db=db),
+        cast(ProvisioningService, DurableProvisioning()),
+        checkpoint,
+        cast(ProviderRegistry, registry),
+    )
+    return outcome, db, notify
+
+
+def test_unknown_finalization_never_reports_customer_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    outcome, db, notify = _run_durable_confirmation(
+        monkeypatch,
+        GatewayReconciliationResult(
+            job_id=99,
+            applied=True,
+            finalized=False,
+            retryable=False,
+            reason_code="GATEWAY_FINALIZATION_COMMIT_OUTCOME_UNKNOWN",
+        ),
+    )
+
+    assert outcome.status is ProvisionStatus.RUNNING
+    assert outcome.subscription_url is None
+    assert notify.events == []
+    assert db.subscription.status == "PROVISIONING"
+    assert db.order.status == "PAID"
+    assert db.unresolved_job.status == "RUNNING"
+    assert (
+        db.unresolved_job.last_error_code
+        == "GATEWAY_FINALIZATION_COMMIT_OUTCOME_UNKNOWN"
+    )
+
+
+def test_finalized_gateway_result_reports_customer_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import backend.app.services as services_module
+
+    class URLState:
+        def __init__(self, database: object, subscription_id: int) -> None:
+            del database, subscription_id
+
+        def current_subscription_url(self, domain: str) -> str:
+            return f"https://{domain}/s/final-token"
+
+    monkeypatch.setattr(services_module, "SqlAlchemyProvisioningState", URLState)
+    outcome, _, notify = _run_durable_confirmation(
+        monkeypatch,
+        GatewayReconciliationResult(
+            job_id=99,
+            applied=True,
+            finalized=True,
+            retryable=False,
+        ),
+    )
+
+    assert outcome.status is ProvisionStatus.SUCCEEDED
+    assert outcome.subscription_url == "https://subs.example.invalid/s/final-token"
+    assert len(notify.events) == 1
+    assert notify.events[0].event_type == "PROVISION_SUCCEEDED"
 
 
 def test_external_failure_keeps_paid_order_marks_subscription_failed_and_disables_user() -> None:
