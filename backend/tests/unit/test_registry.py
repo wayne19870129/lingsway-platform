@@ -14,6 +14,7 @@ from backend.app.providers.egress.mock import MockEgressProvider
 from backend.app.providers.email.noop import NoopEmailProvider
 from backend.app.providers.forwarder.mock import MockForwarderProvider
 from backend.app.providers.gateway.mock import MockGatewayProvider
+from backend.app.providers.gateway.xray_composition import XrayCompositionError
 from backend.app.providers.gateway.xray_file import MarzbanXrayRuntime, XrayFileProvider
 from backend.app.providers.notify.noop import NoopNotifyProvider
 from backend.app.providers.payment.mock import MockPaymentProvider
@@ -452,31 +453,85 @@ def test_production_default_marzban_credential_fails_closed() -> None:
             }
         )
 
-def test_production_xray_file_is_rejected_before_provider_construction() -> None:
-    gateway_secret = "gateway-admin-password-that-must-not-be-printed"
-    ca_path = "/etc/lingsway/marzban/internal.crt"
-    with pytest.raises(
-        ValueError, match="Production GATEWAY_PROVIDER=xray_file is disabled"
-    ) as excinfo:
-        Settings.from_env(
-            {
-                "APP_ENV": "production",
-                "JWT_SECRET": "J" * 32,
-                "SECRET_ENCRYPTION_KEY": "S" * 44,
-                "GATEWAY_PROVIDER": "xray_file",
-                "ACCOUNTING_PROVIDER": "marzban",
-                "MARZBAN_BASE_URL": "https://marzban.test",
-                "MARZBAN_ADMIN_USERNAME": "admin",
-                "MARZBAN_ADMIN_PASSWORD": gateway_secret,
-                "MARZBAN_VERIFY_TLS": "true",
-                "MARZBAN_CA_CERT_PATH": ca_path,
-                "XRAY_REALITY_DEST": "example.com:443",
-                "XRAY_REALITY_SERVER_NAME": "example.com",
-            }
+def _production_xray_env(**overrides: str) -> dict[str, str]:
+    values = {
+        "APP_ENV": "production",
+        "JWT_SECRET": "J" * 32,
+        "SECRET_ENCRYPTION_KEY": "S" * 44,
+        "ACCOUNTING_PROVIDER": "mock",
+        "GATEWAY_PROVIDER": "xray_file",
+        "MARZBAN_BASE_URL": "https://marzban:8000",
+        "MARZBAN_ADMIN_USERNAME": "production-admin",
+        "MARZBAN_ADMIN_PASSWORD": "production-password",
+        "MARZBAN_VERIFY_TLS": "true",
+        "MARZBAN_CA_CERT_PATH": "/etc/lingsway/marzban/internal.crt",
+        "XRAY_REALITY_DEST": "example.com:443",
+        "XRAY_REALITY_SERVER_NAME": "example.com",
+    }
+    values.update(overrides)
+    return values
+
+
+def test_production_xray_file_is_constructible_without_external_io(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def reject_network(*args: object, **kwargs: object) -> None:
+        raise AssertionError("production Xray construction attempted network access")
+
+    monkeypatch.setattr(socket, "socket", reject_network)
+    monkeypatch.setattr(
+        "backend.app.providers.gateway.xray_file.subprocess.run",
+        lambda *_args, **_kwargs: pytest.fail("Xray subprocess must be lazy"),
+    )
+    monkeypatch.setattr(
+        "backend.app.providers.marzban_tls.ssl.create_default_context",
+        lambda **_kwargs: pytest.fail("CA file must load only during an operation"),
+    )
+
+    settings = Settings.from_env(_production_xray_env())
+    registry = build_registry(settings)
+    try:
+        assert settings.gateway_provider == "xray_file"
+        assert isinstance(registry.gateway, XrayFileProvider)
+        assert isinstance(registry.gateway._runtime, MarzbanXrayRuntime)  # noqa: SLF001
+    finally:
+        registry.close()
+
+
+@pytest.mark.parametrize(
+    ("name", "overrides", "expected"),
+    [
+        ("http Marzban URL", {"MARZBAN_BASE_URL": "http://marzban:8000"}, "verified HTTPS"),
+        ("TLS verification disabled", {"MARZBAN_VERIFY_TLS": "false"}, "VERIFY_TLS"),
+        ("default credentials", {"MARZBAN_ADMIN_PASSWORD": "CHANGE_ME"}, "credentials"),
+        ("blank CA path", {"MARZBAN_CA_CERT_PATH": " "}, "CA_CERT_PATH"),
+        (
+            "example.invalid URL",
+            {"MARZBAN_BASE_URL": "https://marzban.example.invalid"},
+            "configured",
+        ),
+    ],
+)
+def test_production_xray_file_safety_guards_remain_fail_closed(
+    name: str, overrides: dict[str, str], expected: str
+) -> None:
+    del name
+    with pytest.raises(ValueError, match=expected):
+        Settings.from_env(_production_xray_env(**overrides))
+
+
+def test_production_xray_file_rejects_malformed_reality() -> None:
+    with pytest.raises(XrayCompositionError, match="XRAY_REALITY_DEST"):
+        build_registry(
+            _xray_settings(
+                app_env="production",
+                jwt_secret="J" * 32,
+                secret_encryption_key="S" * 44,
+                marzban_base_url="https://marzban:8000",
+                xray_reality_dest="",
+            )
         )
 
-    assert gateway_secret not in str(excinfo.value)
-    assert ca_path not in str(excinfo.value)
 
 
 def test_production_marzban_accounting_with_mock_gateway_remains_allowed(

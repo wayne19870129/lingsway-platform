@@ -2701,3 +2701,29 @@ intent remain authoritative; runtime B is not rolled back. Only
 `applied=True` and `finalized=True` enables customer-facing success. ADR-022
 also has the finalization Markdown typo corrected. Phase 2C3C remains
 production-gated pending renewed exact-head review.
+
+## Latest authoritative handoff — Phase 2C3D production Xray selection
+
+PR #115 is merged; merge commit/current `main` is
+`37db3788d1bd5f71abf50891a737847d19fe6f53`. Phase 2C3C is COMPLETE and
+Phase 2C3D is ACTIVE. ADR-022 durable gateway reconciliation is implemented
+and independently reviewed.
+
+The obsolete Settings rejection whose reason was “ADR-022 durable gateway
+reconciliation is not implemented” is removed. Production
+`GATEWAY_PROVIDER=xray_file` may now be selected technically, subject to all
+existing HTTPS, credential, CA, Reality, provider-selection, and production
+safety validation. `build_registry(settings)` remains construction-only and
+zero-I/O: no Marzban login, HTTP request, CA-file read, subprocess, socket
+probe, config write, reload, or DB query occurs during construction. The
+backend lifespan builds one registry and starts the existing bounded recovery
+loop only for the selected Xray provider; an empty queue performs no gateway
+apply, while a durable pending intent is still eligible for fake-backed crash
+recovery under ADR-022.
+
+This does not authorize deployment. No real credentials, Marzban/Xray action,
+VPS/DNS change, certificate rotation, or customer provisioning is allowed.
+`MARZBAN_AGPL_DEPLOYMENT_COMPLIANCE_PENDING` remains in force, and actual
+deployment requires the remaining legal disposition and explicit user
+production approval. Mihomo, Webshare, and the manual principal writer remain
+separately gated.
