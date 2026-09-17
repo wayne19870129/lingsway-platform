@@ -972,3 +972,24 @@ Phase 2B COMPLETE; Phase 2C ACTIVE; Phase 2C1 COMPLETE; Phase 2C2 COMPLETE;
 Phase 2C3A COMPLETE; Phase 2C3B COMPLETE but production-gated; Phase 2C3C
 ACTIVE and production-gated, awaiting renewed exact-head review. Mihomo
 remains blocked.
+
+
+## Latest authoritative handoff — Phase 2C3C finalization certainty
+
+Reviewed exact head: `e2f9a9cdf6ff4971db5ff38cee3a636a7f206b5f`; canonical review:
+`5229348434`. Finalization now uses a fresh independent Engine-backed
+observer. For PURCHASE, `LANDED` requires the gateway Job, Subscription,
+Order, and any referenced ProvisionRun to all show their committed success
+states. Only explicit absence is retryable; partial or unavailable evidence
+is `UNKNOWN` with the stable secret-safe
+`GATEWAY_FINALIZATION_COMMIT_OUTCOME_UNKNOWN` diagnostic in an unresolved
+writer-blocking state. A commit ACK-loss after successful durable finalization
+never invokes the ordinary failure path.
+
+The real MySQL test matrix covers crash-before-apply, runtime failure/retry,
+second-commit failure, second-commit ACK-loss, stale RUNNING recovery,
+retry exhaustion, two-worker single apply, expiry release handoff, and token
+recovery. Shutdown sets the stop event, waits for the in-flight recovery
+attempt to return, then closes the process-owned registry. Production
+`APP_ENV=production + GATEWAY_PROVIDER=xray_file` remains fail-closed and
+Phase 2C3C remains ACTIVE/production-gated pending renewed exact-head review.
