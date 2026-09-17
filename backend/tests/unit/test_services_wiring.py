@@ -32,7 +32,6 @@ from backend.app.providers.base import (
     EgressEndpointDTO,
     NotifyEvent,
     PaymentProvider,
-    ProviderRegistry,
     TenantDTO,
     XrayOutboundDTO,
 )
@@ -43,6 +42,7 @@ from backend.app.providers.forwarder.mock import MockForwarderProvider
 from backend.app.providers.gateway.mock import MockGatewayProvider
 from backend.app.providers.notify.noop import NoopNotifyProvider
 from backend.app.providers.payment.mock import MockPaymentProvider
+from backend.app.providers.registry import ProviderRegistry
 from backend.app.providers.storage.mock import MockBlobStorage
 from backend.app.providers.transport.mock import MockTransportProvider
 from backend.app.services import (
