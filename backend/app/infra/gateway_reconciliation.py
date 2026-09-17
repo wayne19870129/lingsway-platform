@@ -297,6 +297,7 @@ def enqueue_gateway_reconciliation(
         payload_json=json.dumps(payload, sort_keys=True),
         status=JobStatus.PENDING,
         attempts=0,
+        available_at=datetime.now(UTC),
         max_attempts=_GATEWAY_RETRY_LIMIT,
     )
     db.add(job)
