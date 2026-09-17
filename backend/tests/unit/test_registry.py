@@ -518,7 +518,15 @@ def test_production_xray_file_safety_guards_remain_fail_closed(
 
 def test_production_xray_file_rejects_malformed_reality() -> None:
     with pytest.raises(XrayCompositionError, match="XRAY_REALITY_DEST"):
-        build_registry(_xray_settings(app_env="production", xray_reality_dest=""))
+        build_registry(
+            _xray_settings(
+                app_env="production",
+                jwt_secret="J" * 32,
+                secret_encryption_key="S" * 44,
+                marzban_base_url="https://marzban:8000",
+                xray_reality_dest="",
+            )
+        )
 
 
 
