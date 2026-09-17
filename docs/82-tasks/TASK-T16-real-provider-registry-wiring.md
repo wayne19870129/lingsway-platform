@@ -2666,3 +2666,26 @@ block, current-read dedupe recovery, and first-commit evidence classification
 using real Sessions, Job rows, and the named lock. The production
 `APP_ENV=production + GATEWAY_PROVIDER=xray_file` hard gate remains. Phase
 2C3C is ACTIVE and production-gated, awaiting renewed exact-head review.
+
+
+## Latest authoritative handoff — Phase 2C3C finalization certainty
+
+Reviewed exact head: `e2f9a9cdf6ff4971db5ff38cee3a636a7f206b5f`; canonical review:
+`5229348434`. The second durable finalization commit now has a fresh
+independent Engine-backed observer. PURCHASE is `LANDED` only when the
+gateway Job is `SUCCEEDED`, Subscription is `ACTIVE`, Order is
+`ACTIVATED`, and any referenced ProvisionRun is `SUCCEEDED`. Only
+explicitly absent finalization enters retryable failure; partial or unavailable
+evidence records the stable secret-safe
+`GATEWAY_FINALIZATION_COMMIT_OUTCOME_UNKNOWN` state and blocks later
+projection writers. A post-commit ACK-loss exception is classified as landed
+and cannot downgrade the Job to FAILED.
+
+Real MySQL behavior coverage now includes crash-before-runtime recovery,
+runtime failure and retry, second-commit failure and ACK-loss, stale RUNNING
+recovery, retry exhaustion and writer blocking, two-worker single-apply
+serialization, release handoff, and subscription-token recovery. The backend
+lifespan waits for the in-flight recovery worker before closing the registry.
+Production `APP_ENV=production + GATEWAY_PROVIDER=xray_file` remains gated.
+Phase 2C3C remains ACTIVE and production-gated, awaiting renewed independent
+exact-head review.
