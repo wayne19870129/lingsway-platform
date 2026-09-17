@@ -1004,3 +1004,25 @@ or subscription URL. An applied-but-unfinalized outcome, including
 writer-blocking without rolling runtime B back or activating DB state. Behavior
 tests cover both the unknown and finalized-success orchestration paths. Phase
 2C3C remains ACTIVE, production-gated, and awaiting renewed exact-head review.
+
+## Latest authoritative handoff — Phase 2C3D production Xray selection
+
+PR #115 is merged at `6055953e2c5bc8cfc8ab350c159983139e8ea7e6`; merge
+commit/current `main` is
+`37db3788d1bd5f71abf50891a737847d19fe6f53`. Phase 2C3C is COMPLETE and
+Phase 2C3D is ACTIVE. ADR-022 durable gateway reconciliation is implemented
+and independently reviewed.
+
+The stale production `xray_file` Settings gate tied to unimplemented ADR-022
+has been removed. Technical production provider selection remains subject to
+the existing fail-closed HTTPS, credential, CA, Reality, and provider
+validation. Registry construction is still zero-I/O, and the FastAPI lifespan
+uses exactly one registry with the bounded recovery loop; empty recovery queues
+do not apply a gateway, while durable pending intents remain recoverable through
+the ADR-022 path. The manual principal writer remains gated for real Xray.
+
+This is not deployment authorization: no real Marzban/Xray action, VPS/DNS
+change, certificate rotation, real credentials, or customer provisioning has
+occurred. `MARZBAN_AGPL_DEPLOYMENT_COMPLIANCE_PENDING` and explicit user
+production approval remain deployment blockers. Webshare and Mihomo remain
+separate future work.
