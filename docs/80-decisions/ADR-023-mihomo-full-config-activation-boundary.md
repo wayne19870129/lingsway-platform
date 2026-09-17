@@ -11,7 +11,7 @@ Lingsway 应用拥有 Mihomo 的完整、repo-owned 配置 projection。未来�
 
 DB committed desired state 是唯一 desired-state authority。transport cache 只能提供已由 DB desired state 引用且经过 freshness 校验的物化 transport input；它不是独立意图来源。Mihomo `runtime.current()`、磁盘当前文件、运行时 fingerprint 和 API 返回的 current/config 都只能作为观察、baseline、rollback 或 verification evidence，严禁反向成为 desired state source。
 
-采用 commit-first 的 durable state machine：先把 DB desired state B 与 pending Mihomo intent 一起提交，再对 B 进行全量渲染和运行时激活，健康及 exact projection verification 成功后再提交 finalization。只有 finalization commit 成功且锁释放前的结果可证明时，业务才可报告 APPLIED/success。任何不确定性都进入 DEGRADED / manual-intervention 的 fail-closed 状态并阻止后续 Mihomo writers。
+采用 commit-first 的 durable state machine：先把 DB desired state B 与 pending Mihomo intent 一起提交，再对 B 进行全量渲染和运行时激活，健康及 exact projection verification 成功后再提交 finalization。只有 Mihomo projection finalization commit 成功且锁释放前的结果可证明时，Mihomo projection 才可标记 `MIHOMO_APPLIED`；这不改变外层 Order/Subscription 状态，customer-facing APPLIED/success 仍须等现有九步 provisioning saga 完成。任何不确定性都进入 DEGRADED / manual-intervention 的 fail-closed 状态并阻止后续 Mihomo writers。
 
 ## 1. Render ownership / boundary
 
@@ -61,16 +61,18 @@ finalization commit 前必须再次以锁定/current read 确认仍在 finalize 
 4. 仍持锁，重新读取已提交 B，生成完整 candidate，进行 schema/semantic validation 和 exact ownership checks。
 5. 保存 exact previous runtime baseline A（原始 bytes/config identity，不是重新 render 的 A），原子 install candidate，执行 allowlisted Mihomo reload/apply。
 6. 对 post-apply runtime 做 health verification，并验证 repo-owned projection 与 candidate fingerprint/operation identity 一致。仅 HTTP reload 成功、文件写成功或 fingerprint 相同都不足以视为健康。
-7. verification 全部成功后，提交第二 durable finalization：pending intent 标记完成，记录 candidate fingerprint、DB revision、verification evidence，并将业务状态转为 APPLIED/ACTIVE。
+7. verification 全部成功后，提交第二 durable finalization：仅将 Mihomo pending intent 标记为 `MIHOMO_APPLIED`，记录 candidate fingerprint、DB revision、verification evidence；不得在此处将外层 Order/Subscription 或 customer provisioning 标记为 APPLIED/ACTIVE。
 8. 成功提交的 acknowledgement 可证明后释放锁；再执行非阻断通知。锁释放未确认时不得伪称 clean success，须报告 committed-with-warning 并阻止不安全的并发 writer，直到恢复确认。
 
 DB commit 不得发生在 runtime apply 前作为“成功”提交，也不得在 apply 后把 DB B 回滚为 A 以掩盖 crash/ack uncertainty。第二 commit 的异常或 acknowledgement loss 必须由 fresh independent DB read 分类为 LANDED、ABSENT 或 UNKNOWN：UNKNOWN 进入 writer-blocking DEGRADED/manual state，绝不猜测成功或失败。
 
 ## 4. Activation, health, rollback and compensation
 
-### 4.1 Activation and APPLIED
+### 4.1 Mihomo projection APPLIED vs outer business success
 
-`APPLIED` 只允许在以下条件全部成立时产生：
+本 ADR 有两个不可混淆的状态机：Mihomo projection 的 `MIHOMO_APPLIED` 只表示第 5 步的 full-config 已激活并完成本 ADR 的证据确认；它不是外层 provisioning 的 `APPLIED/ACTIVE`，也不是 customer-facing success。外层 saga 仍按既有九步顺序继续执行第 6 步 `CREATE_ACCOUNTING_USER`、第 7 步 `APPLY_GATEWAY`、第 8 步 `ISSUE_SUBSCRIPTION` 和第 9 步 `NOTIFY`。在这些后续步骤及其既有 authoritative completion boundary 完成前，Order/Subscription 必须保持 PROVISIONING/PENDING 或对应非成功状态，绝不得返回订阅 URL 或 `PROVISION_SUCCEEDED`。
+
+`MIHOMO_APPLIED` 只允许在以下条件全部成立时产生：
 
 - 第一 durable commit 已确认，且当前 fresh DB desired state 仍是该 operation 的 B；
 - candidate 是从该 fresh B 全量 deterministic render 的结果，并通过完整 validation；
@@ -78,10 +80,11 @@ DB commit 不得发生在 runtime apply 前作为“成功”提交，也不得�
 - install、allowlisted reload/apply 均成功；
 - post-apply Mihomo health endpoint/API 可达且报告健康；
 - repo-owned projection readback/observation 与 candidate fingerprint、operation identity 和 DB revision 一致；
-- 第二 durable finalization commit 成功且结果可由 fresh read 证明；
+- 第二 durable finalization commit 成功且结果可由 fresh read 证明，且该 commit 只确认 Mihomo projection 的 `MIHOMO_APPLIED`；
+- 外层 Order/Subscription/customer provisioning 的成功状态不属于本步骤，必须由既有九步 saga 的最终 completion boundary 独立确认；
 - 未发生 lock-release uncertainty。
 
-`install`、`reload` 或 health 任一阶段失败都不得返回 APPLIED。健康无法查询、readback 不一致、revision 过期、锁状态未知均为 UNKNOWN/DEGRADED，不是健康或成功。
+`install`、`reload` 或 health 任一阶段失败都不得返回 `MIHOMO_APPLIED`，更不得返回外层业务 APPLIED/customer success。健康无法查询、readback 不一致、revision 过期、锁状态未知均为 UNKNOWN/DEGRADED，不是健康或成功。
 
 ### 4.2 Exact rollback baseline
 
@@ -108,8 +111,8 @@ Mihomo activation 之后的 accounting/gateway/subscription/notification 等后�
 | After B+pending commit, before install | Fresh DB B is authority; runtime A/unknown. Keep pending; recover B under lock. |
 | During install/reload | DB B is authority; runtime outcome unknown. Fail closed, retain pending, verify/converge B before another writer. |
 | After runtime B, before health/readback | B is authority; APPLIED is not proven. Verify B or enter DEGRADED; never claim success. |
-| After health/readback, before finalization commit | B is authority; retry finalization after fresh evidence. Do not restore A merely because the process crashed. |
-| During/after finalization commit | Fresh DB observer classifies LANDED/ABSENT/UNKNOWN. UNKNOWN is writer-blocking manual state. |
+| After health/readback, before Mihomo finalization commit | B is authority; retry the Mihomo projection finalization after fresh evidence. `MIHOMO_APPLIED` and outer customer success are both unproven; do not restore A merely because the process crashed. |
+| During/after Mihomo finalization commit | Fresh DB observer classifies the Mihomo projection as LANDED/ABSENT/UNKNOWN. UNKNOWN is writer-blocking manual state; even LANDED/`MIHOMO_APPLIED` does not activate outer Order/Subscription success. |
 | During exact A rollback | If restore/reload/health evidence is incomplete, runtime is UNKNOWN and the writer remains locked out until controlled recovery. |
 | After finalization, before lock release | B/APPLIED is authority; verify lock release. If release is unverified, committed-with-warning and no concurrent writer assumption. |
 
