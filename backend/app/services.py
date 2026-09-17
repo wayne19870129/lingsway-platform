@@ -260,7 +260,7 @@ def _confirm_paid_purchase_durable(
             command, order_state, provisioning, checkpoint, request, error
         )
 
-    if result.applied:
+    if result.applied and result.finalized:
         try:
             registry.notify.send(
                 NotifyEvent(
