@@ -20,6 +20,7 @@ from backend.app.infra.credential_resolver import SqlAlchemyCredentialResolver
 from backend.app.infra.gateway_reconciliation import (
     FinalizationCommitOutcome,
     FirstCommitOutcome,
+    GatewayReconciliationResult,
     GatewayReconciliationBlocked,
     assert_no_unresolved_gateway_mutation,
     classify_first_commit_outcome,
@@ -673,8 +674,8 @@ class _FakeGateway:
 class _FaultSession(Session):
     """Inject a deterministic second-commit failure after claim commit."""
 
-    def __init__(self, *args: object, fail_mode: str | None = None, **kwargs: object) -> None:
-        super().__init__(*args, **kwargs)
+    def __init__(self, bind: Engine, *, fail_mode: str | None = None) -> None:
+        super().__init__(bind=bind)
         self._fail_mode = fail_mode
         self._commit_calls = 0
 
@@ -750,8 +751,10 @@ def _make_gateway() -> _FakeGateway:
     return _FakeGateway()
 
 
-def _reconcile(engine: Engine, gateway: _FakeGateway) -> object:
-    return reconcile_gateway_job(
+def _reconcile(
+    engine: Engine, gateway: _FakeGateway
+) -> GatewayReconciliationResult | None:
+    return reconcile_gateway_job(  # type: ignore[arg-type]
         gateway,
         db_factory=lambda: Session(engine),
     )
@@ -831,7 +834,7 @@ def test_mysql_finalization_commit_failure_is_retryable_without_rollback(
 
     first = reconcile_gateway_job(
         gateway,
-        db_factory=lambda: _FaultSession(bind=mysql_engine, fail_mode="before"),
+        db_factory=lambda: _FaultSession(mysql_engine, fail_mode="before"),
     )
 
     assert first is not None
@@ -863,7 +866,7 @@ def test_mysql_finalization_ack_loss_classifies_landed_without_false_failure(
 
     result = reconcile_gateway_job(
         gateway,
-        db_factory=lambda: _FaultSession(bind=mysql_engine, fail_mode="ack"),
+        db_factory=lambda: _FaultSession(mysql_engine, fail_mode="ack"),
     )
 
     assert result is not None
