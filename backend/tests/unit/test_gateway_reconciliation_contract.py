@@ -44,6 +44,11 @@ def test_reconciler_uses_existing_job_retry_fields_and_fresh_state() -> None:
     assert "select(Job.id)" in text
     assert ".with_for_update()" in text
     assert "classify_first_commit_outcome" in text
+    assert "classify_finalization_outcome" in text
+    assert "FinalizationCommitOutcome" in text
+    assert "GATEWAY_FINALIZATION_COMMIT_OUTCOME_UNKNOWN" in text
+    assert "_independent_engine" in text
+    assert "result.applied and result.finalized" in text
     assert "reconcile_state" not in text
     assert tree.body
 
@@ -78,3 +83,6 @@ def test_recovery_loop_logs_only_safe_exception_type() -> None:
     assert "logger.warning(" in source
     assert "type(exc).__name__" in source
     assert "str(exc)" not in source
+    assert ".cancel()" not in source
+    assert "await recovery_task" in source
+    assert source.index("await recovery_task") < source.index("registry.close()")
