@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
 from sqlalchemy import or_, select
+from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import Session
 
 from backend.app.core.database import SessionLocal
@@ -48,6 +50,14 @@ class GatewayReconciliationError(RuntimeError):
 
 class FirstCommitOutcome(StrEnum):
     """Fresh-DB classification after an acknowledgement-loss commit error."""
+
+    LANDED = "LANDED"
+    ABSENT = "ABSENT"
+    UNKNOWN = "UNKNOWN"
+
+
+class FinalizationCommitOutcome(StrEnum):
+    """Fresh-DB classification after the second durable commit attempt."""
 
     LANDED = "LANDED"
     ABSENT = "ABSENT"
@@ -124,6 +134,16 @@ def assert_no_unresolved_gateway_mutation(db: Session) -> None:
         )
 
 
+def _independent_engine(db: Session) -> Engine:
+    """Return an Engine so outcome probes never reuse an active Connection."""
+    bind = db.get_bind()
+    if isinstance(bind, Connection):
+        return bind.engine
+    if isinstance(bind, Engine):
+        return bind
+    raise GatewayCommitOutcomeUnknown("GATEWAY_COMMIT_OBSERVER_UNAVAILABLE")
+
+
 def classify_first_commit_outcome(
     db: Session, *, dedupe_key: str, subscription_id: int
 ) -> FirstCommitOutcome:
@@ -137,7 +157,7 @@ def classify_first_commit_outcome(
     """
     try:
         bind = db.get_bind()
-        with Session(bind=bind, autoflush=False, expire_on_commit=False) as probe:
+        with Session(bind=_independent_engine(db), autoflush=False, expire_on_commit=False) as probe:
             job_id = probe.scalar(
                 select(Job.id)
                 .where(Job.dedupe_key == dedupe_key)
@@ -163,6 +183,86 @@ def classify_first_commit_outcome(
     if job_id is None and route_id is None:
         return FirstCommitOutcome.ABSENT
     return FirstCommitOutcome.UNKNOWN
+
+
+def classify_finalization_outcome(
+    db: Session,
+    *,
+    job_id: int,
+    subscription_id: int,
+    order_id: int | None,
+    provision_run_id: int | None,
+    operation_kind: str,
+) -> FinalizationCommitOutcome:
+    """Classify the second durable commit from an independent fresh observer."""
+    try:
+        with Session(
+            bind=_independent_engine(db), autoflush=False, expire_on_commit=False
+        ) as probe:
+            job_status = probe.scalar(
+                select(Job.status)
+                .where(Job.id == job_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if operation_kind == "PURCHASE":
+                subscription_status = probe.scalar(
+                    select(Subscription.status)
+                    .where(Subscription.id == subscription_id)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+                if order_id is None:
+                    return FinalizationCommitOutcome.UNKNOWN
+                order_status = probe.scalar(
+                    select(Order.status)
+                    .where(Order.id == order_id)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+                run_status = (
+                    probe.scalar(
+                        select(Job.status)
+                        .where(Job.id == provision_run_id)
+                        .with_for_update()
+                        .execution_options(populate_existing=True)
+                    )
+                    if provision_run_id is not None
+                    else JobStatus.SUCCEEDED
+                )
+                if (
+                    job_status is None
+                    or subscription_status is None
+                    or order_status is None
+                    or run_status is None
+                ):
+                    return FinalizationCommitOutcome.UNKNOWN
+                if (
+                    job_status is JobStatus.SUCCEEDED
+                    and subscription_status is SubscriptionStatus.ACTIVE
+                    and order_status is OrderStatus.ACTIVATED
+                    and run_status is JobStatus.SUCCEEDED
+                ):
+                    return FinalizationCommitOutcome.LANDED
+                if (
+                    job_status is not JobStatus.SUCCEEDED
+                    and subscription_status is not SubscriptionStatus.ACTIVE
+                    and order_status is not OrderStatus.ACTIVATED
+                    and run_status is not JobStatus.SUCCEEDED
+                ):
+                    return FinalizationCommitOutcome.ABSENT
+                return FinalizationCommitOutcome.UNKNOWN
+            if job_status is None:
+                return FinalizationCommitOutcome.UNKNOWN
+            return (
+                FinalizationCommitOutcome.LANDED
+                if job_status is JobStatus.SUCCEEDED
+                else FinalizationCommitOutcome.ABSENT
+            )
+    except Exception as exc:
+        raise GatewayCommitOutcomeUnknown(
+            "GATEWAY_FINALIZATION_COMMIT_OUTCOME_UNKNOWN"
+        ) from exc
 
 
 def enqueue_gateway_reconciliation(
@@ -328,6 +428,65 @@ def _finalize(
             run.last_error_code = None
 
 
+def _mark_finalization_unknown(
+    db: Session,
+    job_id: int,
+    payload: dict[str, object],
+    now: datetime,
+) -> GatewayReconciliationResult:
+    """Keep an unresolved, writer-blocking state without guessing commit truth."""
+    diagnostic = "GATEWAY_FINALIZATION_COMMIT_OUTCOME_UNKNOWN"
+    db.rollback()
+    try:
+        job = db.scalar(
+            select(Job)
+            .where(Job.id == job_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if job is None:
+            raise GatewayReconciliationError("GATEWAY_RECONCILIATION_JOB_MISSING")
+        job.status = JobStatus.RUNNING
+        job.locked_at = now
+        job.last_error_code = diagnostic
+        subscription_id = payload.get("subscription_id")
+        if isinstance(subscription_id, int):
+            subscription = db.scalar(
+                select(Subscription)
+                .where(Subscription.id == subscription_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if subscription is not None:
+                subscription.provision_error = (
+                    "gateway finalization requires manual review"
+                )
+                db.add(
+                    AuditLog(
+                        action="GATEWAY_FINALIZATION_OUTCOME_UNKNOWN",
+                        entity_type="SUBSCRIPTION",
+                        entity_id=str(subscription.id),
+                        result="MANUAL",
+                        detail=(
+                            "runtime projection may be applied; finalization "
+                            "commit outcome requires review"
+                        ),
+                    )
+                )
+        db.commit()
+    except Exception as exc:
+        with suppress(Exception):
+            db.rollback()
+        raise GatewayCommitOutcomeUnknown(diagnostic) from exc
+    return GatewayReconciliationResult(
+        job_id=job_id,
+        applied=True,
+        finalized=False,
+        retryable=False,
+        reason_code=diagnostic,
+    )
+
+
 def _reconcile_claimed_job(
     db: Session,
     job: Job,
@@ -335,6 +494,7 @@ def _reconcile_claimed_job(
 ) -> GatewayReconciliationResult:
     payload = _job_payload(job)
     gateway = registry.gateway if isinstance(registry, ProviderRegistry) else registry
+    job_id = job.id
     try:
         desired = full_desired_routing_snapshot(db)
         resolver = SqlAlchemyCredentialResolver(db)
@@ -346,10 +506,41 @@ def _reconcile_claimed_job(
         if not applied.applied:
             raise GatewayReconciliationError("GATEWAY_APPLY_NOT_CONFIRMED")
         _finalize(db, job, payload)
-        db.commit()
+        try:
+            db.commit()
+        except Exception as commit_error:
+            operation_kind = payload.get("operation_kind")
+            outcome = classify_finalization_outcome(
+                db,
+                job_id=job_id,
+                subscription_id=int(payload["subscription_id"]),
+                order_id=(
+                    int(payload["order_id"])
+                    if isinstance(payload.get("order_id"), int)
+                    else None
+                ),
+                provision_run_id=(
+                    int(payload["provision_run_id"])
+                    if isinstance(payload.get("provision_run_id"), str)
+                    and payload["provision_run_id"].isdigit()
+                    else None
+                ),
+                operation_kind=(
+                    operation_kind if isinstance(operation_kind, str) else ""
+                ),
+            )
+            if outcome is FinalizationCommitOutcome.LANDED:
+                with suppress(Exception):
+                    db.rollback()
+                return GatewayReconciliationResult(job_id, True, True, False)
+            if outcome is FinalizationCommitOutcome.ABSENT:
+                return _record_failure(db, job_id, commit_error, datetime.now(UTC))
+            return _mark_finalization_unknown(db, job_id, payload, datetime.now(UTC))
+    except GatewayCommitOutcomeUnknown:
+        raise
     except Exception as exc:
-        return _record_failure(db, job.id, exc, datetime.now(UTC))
-    return GatewayReconciliationResult(job.id, True, True, False)
+        return _record_failure(db, job_id, exc, datetime.now(UTC))
+    return GatewayReconciliationResult(job_id, True, True, False)
 
 
 def _notify_after_lock(
@@ -394,7 +585,7 @@ def reconcile_gateway_job(
             if job is None:
                 return None
             result = _reconcile_claimed_job(db, job, registry)
-        if result.applied:
+        if result.applied and result.finalized:
             _notify_after_lock(db, registry, result)
         return result
 
