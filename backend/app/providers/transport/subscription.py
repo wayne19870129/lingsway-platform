@@ -3,6 +3,9 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
+import tempfile
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -112,24 +115,45 @@ def normalize_uri(provider_code: str, uri: str) -> TransportEndpointDTO | None:
 
 
 def parse_subscription(provider_code: str, content: str) -> list[TransportEndpointDTO]:
+    if not content.strip():
+        raise ValueError("Subscription content is empty")
     try:
         document = yaml.safe_load(content)
-    except yaml.YAMLError:
-        document = None
+    except yaml.YAMLError as exc:
+        raise ValueError("Subscription is not valid YAML or encoded URI data") from exc
     if isinstance(document, dict) and isinstance(document.get("proxies"), list):
-        return [
-            normalize_clash_proxy(provider_code, item)
-            for item in document["proxies"]
-            if isinstance(item, dict) and item.get("server") and item.get("port")
-        ]
+        endpoints: list[TransportEndpointDTO] = []
+        for item in document["proxies"]:
+            if not isinstance(item, dict) or not item.get("server") or not item.get("port"):
+                raise ValueError("Subscription contains a malformed proxy entry")
+            try:
+                endpoints.append(normalize_clash_proxy(provider_code, item))
+            except (TypeError, ValueError):
+                raise ValueError("Subscription contains a malformed proxy entry") from None
+        if not endpoints:
+            raise ValueError("Subscription contains no supported endpoints")
+        return endpoints
     decoded = content.strip()
     if "://" not in decoded:
         try:
             decoded = decode_base64_text(decoded)
         except (ValueError, UnicodeDecodeError):
-            return []
-    endpoints = [normalize_uri(provider_code, line.strip()) for line in decoded.splitlines()]
-    return [endpoint for endpoint in endpoints if endpoint is not None]
+            raise ValueError("Subscription is not valid base64 URI data") from None
+    endpoints: list[TransportEndpointDTO] = []
+    for line in decoded.splitlines():
+        value = line.strip()
+        if not value:
+            continue
+        try:
+            endpoint = normalize_uri(provider_code, value)
+        except (TypeError, ValueError):
+            raise ValueError("Subscription contains an unsupported or malformed URI") from None
+        if endpoint is None:
+            raise ValueError("Subscription contains an unsupported or malformed URI")
+        endpoints.append(endpoint)
+    if not endpoints:
+        raise ValueError("Subscription contains no supported endpoints")
+    return endpoints
 
 
 def validate_mihomo_provider_document(content: str) -> None:
@@ -145,14 +169,22 @@ def validate_mihomo_provider_document(content: str) -> None:
 
 def write_provider_cache(path: Path, content: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(f"{path.suffix}.tmp")
+    temporary_name: str | None = None
     try:
-        temporary.write_bytes(content)
-        temporary.chmod(0o600)
-        temporary.replace(path)
+        with tempfile.NamedTemporaryFile(
+            mode="wb", dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", delete=False
+        ) as temporary:
+            temporary_name = temporary.name
+            os.chmod(temporary.name, 0o600)
+            temporary.write(content)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        os.replace(temporary_name, path)
+        os.chmod(path, 0o600)
     finally:
-        if temporary.exists():
-            temporary.unlink()
+        if temporary_name is not None:
+            with suppress(FileNotFoundError):
+                os.unlink(temporary_name)
 
 
 class SubscriptionTransportProvider:
@@ -176,6 +208,12 @@ class SubscriptionTransportProvider:
         self._endpoints: list[TransportEndpointDTO] = []
         self._capacity: TransportCapacityDTO | None = None
         self._close_failed = False
+
+    def __repr__(self) -> str:
+        return (
+            f"{type(self).__name__}(provider_code={self.provider_code!r}, "
+            f"cache_path={self._cache_path!r})"
+        )
 
     def close(self) -> None:
         """Closes the self-created client, never a client this provider
@@ -226,20 +264,23 @@ class SubscriptionTransportProvider:
         # Providers commonly negotiate a Mihomo-compatible YAML document from
         # the Clash.Meta user agent. A generic "mihomo" UA may instead return
         # a base64 URI list, which cannot be consumed by a file provider.
-        response = self._client.get(
-            self._url, headers={"User-Agent": "clash.meta/1.19"}
-        )
-        response.raise_for_status()
-        self._capacity = parse_subscription_userinfo(
+        try:
+            response = self._client.get(
+                self._url, headers={"User-Agent": "clash.meta/1.19"}
+            )
+            response.raise_for_status()
+        except httpx.HTTPError:
+            raise RuntimeError("Subscription fetch failed") from None
+        capacity = parse_subscription_userinfo(
             response.headers.get("subscription-userinfo"), datetime.now(UTC)
         )
         endpoints = parse_subscription(self.provider_code, response.text)
-        if not endpoints:
-            raise ValueError("Subscription contained no supported endpoints")
         if self._cache_path is not None:
             validate_mihomo_provider_document(response.text)
             write_provider_cache(self._cache_path, response.content)
+        # Publish the new snapshot only after parsing and cache persistence succeed.
         self._endpoints = endpoints
+        self._capacity = capacity
 
     def list_endpoints(self) -> list[TransportEndpointDTO]:
         return list(self._endpoints)
