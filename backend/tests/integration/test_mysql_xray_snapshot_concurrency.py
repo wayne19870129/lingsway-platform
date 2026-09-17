@@ -746,6 +746,7 @@ def _seed_pending_gateway_case(
             job_id = job.id
             run_id = provision_run.id
             order_id = subscription.order_id
+            job.available_at = datetime.now(UTC)
             db.commit()
     return subscription_id, order_id, job_id, run_id
 
