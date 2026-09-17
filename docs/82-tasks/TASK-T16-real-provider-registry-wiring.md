@@ -78,6 +78,43 @@ Xray、Mihomo 等任何外部系统——所有"看起来接好的"业务流程�
 接入的具体顺序建议。**没有启用任何真实 provider、没有调用任何写接口、
 没有接触真实凭据、没有部署。**
 
+## S03-A — Transport Multi-Provider Architecture（架构合同）
+
+S03-A 已将 Subscription transport registry wiring 前的多 provider blocker
+记录为 [ADR-024](../80-decisions/ADR-024-transport-multi-provider-selection-ownership.md)。
+该 ADR 是 S03-B 的前置接受条件；S03-A 不实现 production wiring。
+
+S03-B 只能按以下合同实施：
+
+1. 保留多个同时启用的 `TransportProviderRecord`；以每条 record 的稳定
+   `code` 做确定性、唯一、精确匹配。unknown、duplicate、unsupported 或
+   ambiguous mapping 必须 fail closed，禁止 mutable current-provider、静默
+   mock fallback 或跨 record fallback。
+2. 在 `ProviderRegistry` 的进程生命周期边界持有 registry-owned resolver/
+   factory 及每条 record 的 concrete provider instance。scheduler 必须按
+   record code 解析后调用 `refresh_provider_inventory(db, record, provider)`；
+   每条失败独立降级，不能阻塞同批其他 record。
+3. `TransportProviderRecord.secret_ref` 是订阅 URL/token 的唯一 opaque secret
+   handle。不得增加 plaintext URL 配置通路；`.env.example` 中的
+   `PROVIDER_A_SUBSCRIPTION_URL` / `PROVIDER_B_SUBSCRIPTION_URL` 仅为 legacy
+   名称，不得作为 runtime fallback。secret value 不得进入 repr、日志、异常、
+   文档、commit 或 PR。
+4. 每个 provider 必须绑定 record identity、provider code 与独立 cache identity/
+   path；Provider A 不得覆盖或读取 Provider B cache。ProviderRegistry 继续
+   负责所有 factory-created client 的 deterministic close，construction 保持
+   zero external I/O。
+5. 订阅同步/缓存物化不是 Mihomo activation。S03-B 不得安装、reload、apply
+   或宣称 Mihomo production readiness；默认仍是 mock/noop，真实 subscription
+   必须显式选择。
+6. 若 S03-B 需要修改 `backend/app/providers/base.py`，仅限 ADR-024 第 7 节
+   授权的最小 provider-neutral identity/ownership/lifecycle contract；不得引入
+   Session/ORM、明文 secret 或 activation API。更大范围变更须先新增或修订 ADR。
+
+S03-B 的最小验收集必须覆盖：多 record 映射、unknown/duplicate fail-closed、
+cache 隔离、secret-ref 失败、client close ownership、zero-I/O construction、
+以及单 provider failure isolation。S03-A 允许修改范围仅为 ADR、TASK 与
+continuity 文档，不包含代码、schema、测试或真实 provider 请求。
+
 ### 关键发现：真实 provider 至少分三类，不是简单的"外部 vs 本机"二分
 
 **这一节是第一版盘点的修正版**——第一版把"四个非 mock/noop 实现"分成
