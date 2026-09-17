@@ -801,6 +801,20 @@ def _assert_purchase_finalized(
         assert run.status is JobStatus.SUCCEEDED
 
 
+def test_mysql_empty_gateway_queue_does_not_apply(
+    mysql_engine: Engine,
+) -> None:
+    gateway = _make_gateway()
+
+    result = reconcile_gateway_job(
+        gateway,  # type: ignore[arg-type]
+        db_factory=lambda: Session(mysql_engine),
+    )
+
+    assert result is None
+    assert gateway.apply_calls == 0
+
+
 def test_mysql_gateway_crash_before_runtime_apply_recovers(
     mysql_engine: Engine,
 ) -> None:
