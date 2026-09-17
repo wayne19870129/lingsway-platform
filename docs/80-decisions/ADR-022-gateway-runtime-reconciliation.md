@@ -230,14 +230,14 @@ and convergence are complete.
 No row uses apply-before-commit as the normal contract. No recovery branch
 infers desired state from APPLIED, runtime, filesystem, or fingerprint alone.
 
-## Deferred implementation boundary
+## Implementation status boundary
 
-This ADR remains `Accepted`. It does not implement the state machine or any
-new reconciliation table/model, enum, schema/Alembic migration,
-`current_desired_routing_state()`, new domain protocol, provider finalize API,
-provisioning-state/service ordering, token-step move, accounting compensation
-change, scheduler worker, or release orchestration. Those changes require a
-separate implementation slice after independent review and human acceptance.
+This ADR remains `Accepted`. Phase 2C3C implements the Direction B state
+machine in the existing application/infra paths and tests; it does not add a
+reconciliation table/model, schema/Alembic migration, generic transaction
+framework, new domain protocol, provider finalize API, or provider-neutral
+gateway DTO. Future writer-guard/drift, reconciliation extensions, and Mihomo
+work remain separate slices.
 
 ## Implementation boundary — Phase 2C3C
 
@@ -272,3 +272,22 @@ safe AuditLog entries, and provision_error where customer-facing business
 state requires it. Gateway reconciliation does not write
 Subscription.reconcile_state or reconcile_attempts; those fields remain
 owned by the accounting reconciliation worker.
+
+
+## Finalization commit certainty — Phase 2C3C review follow-up
+
+At reviewed exact head `e2f9a9cdf6ff4971db5ff38cee3a636a7f206b5f` (canonical review
+`5229348434`), the second durable finalization commit is classified through
+a fresh independent Engine-backed Session. For PURCHASE, `LANDED` requires
+the gateway Job to be `SUCCEEDED`, Subscription to be `ACTIVE`, Order to be
+`ACTIVATED`, and any payload-referenced ProvisionRun to be `SUCCEEDED).
+Explicitly absent finalization is the only path that records a retryable
+failure; it never rolls DB B back to A. Partial evidence or an unavailable
+observer is `UNKNOWN`, recorded with the stable
+`GATEWAY_FINALIZATION_COMMIT_OUTCOME_UNKNOWN` diagnostic in an unresolved,
+writer-blocking Job state, without guessing FAILED or SUCCEEDED.
+
+A commit acknowledgement loss after the database has durably committed
+finalization therefore classifies as `LANDED` and never calls the ordinary
+failure recorder. The existing named lock and identifier-only Job payload
+contracts remain unchanged.
