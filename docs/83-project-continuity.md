@@ -993,3 +993,14 @@ recovery. Shutdown sets the stop event, waits for the in-flight recovery
 attempt to return, then closes the process-owned registry. Production
 `APP_ENV=production + GATEWAY_PROVIDER=xray_file` remains fail-closed and
 Phase 2C3C remains ACTIVE/production-gated pending renewed exact-head review.
+
+## Latest independent-review follow-up — customer-success finalization guard
+
+Reviewed exact head: `4fd71c0edb6917ec531283969a7b3305025f84a6`; canonical review:
+`5230150152`. `_confirm_paid_purchase_durable()` now requires both
+`result.applied` and `result.finalized` before notification, SUCCESS status,
+or subscription URL. An applied-but-unfinalized outcome, including
+`GATEWAY_FINALIZATION_COMMIT_OUTCOME_UNKNOWN`, remains unresolved and
+writer-blocking without rolling runtime B back or activating DB state. Behavior
+tests cover both the unknown and finalized-success orchestration paths. Phase
+2C3C remains ACTIVE, production-gated, and awaiting renewed exact-head review.
