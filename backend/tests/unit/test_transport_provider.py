@@ -1,4 +1,5 @@
 import base64
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -267,3 +268,84 @@ def test_registry_close_never_falsely_reports_the_transport_provider_closed() ->
 
     assert transport.close_calls == 1  # httpx never actually retries the transport close
     assert len(other.close_calls) == 1  # never re-closed
+
+
+def test_fetch_failure_does_not_expose_subscription_url() -> None:
+    url = "https://provider.invalid/private-token"
+
+    def fail(_: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError(f"failed to reach {url}")
+
+    adapter = SubscriptionTransportProvider(
+        "PROVIDER_A", url, client=httpx.Client(transport=httpx.MockTransport(fail))
+    )
+
+    with pytest.raises(RuntimeError) as error:
+        adapter.sync_nodes()
+    assert url not in str(error.value)
+
+
+def test_construction_is_zero_io_and_repr_redacts_subscription_url(tmp_path: Path) -> None:
+    url = "https://provider.invalid/private-token"
+    target = tmp_path / "provider.yaml"
+    adapter = SubscriptionTransportProvider("CAP", url, cache_path=target)
+
+    assert not target.exists()
+    assert url not in repr(adapter)
+
+
+@pytest.mark.parametrize("content", ["", "not-base64", "vless://not-a-valid-uri"])
+def test_invalid_subscription_content_fails_without_cache_or_state_change(
+    tmp_path: Path, content: str
+) -> None:
+    target = tmp_path / "provider.yaml"
+    adapter = SubscriptionTransportProvider(
+        "CAP",
+        "https://provider.invalid/private",
+        client=httpx.Client(
+            transport=httpx.MockTransport(lambda _: httpx.Response(200, text=content))
+        ),
+        cache_path=target,
+    )
+
+    with pytest.raises(ValueError):
+        adapter.sync_nodes()
+    assert adapter.list_endpoints() == []
+    assert adapter.get_capacity() is None
+    assert not target.exists()
+
+
+def test_cache_requires_mihomo_document_and_keeps_state_unpublished(tmp_path: Path) -> None:
+    target = tmp_path / "provider.yaml"
+    uri = "vless://uuid@us.invalid:443?security=tls#US"
+    adapter = SubscriptionTransportProvider(
+        "CAP",
+        "https://provider.invalid/private",
+        client=httpx.Client(
+            transport=httpx.MockTransport(lambda _: httpx.Response(200, text=uri))
+        ),
+        cache_path=target,
+    )
+
+    with pytest.raises(ValueError, match="Mihomo-compatible"):
+        adapter.sync_nodes()
+    assert adapter.list_endpoints() == []
+    assert not target.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows does not expose POSIX mode bits")
+def test_cache_is_restrictive_and_no_temp_file_remains(tmp_path: Path) -> None:
+    target = tmp_path / "provider.yaml"
+    content = "proxies:\n  - {name: US, type: trojan, server: us.invalid, port: 443}\n"
+    adapter = SubscriptionTransportProvider(
+        "CAP",
+        "https://provider.invalid/private",
+        client=httpx.Client(
+            transport=httpx.MockTransport(lambda _: httpx.Response(200, content=content.encode()))
+        ),
+        cache_path=target,
+    )
+
+    adapter.sync_nodes()
+    assert os.stat(target).st_mode & 0o777 == 0o600
+    assert list(tmp_path.glob(".*.tmp")) == []
