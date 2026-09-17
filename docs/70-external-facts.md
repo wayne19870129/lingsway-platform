@@ -25,6 +25,30 @@ Verified, documented, support-confirmed, and unverified provider behavior is rec
   `UrllibTransport` 默认不读取环境代理，CLI 的 `--proxy-url` 仍只注入当前
   进程 transport。
 
+## Webshare Provider Readiness (S02-B, 2026-09-17)
+
+- 状态: 官方 API 文档核验；未使用真实账号或真实凭据。
+- `GET /api/v2/proxy/list/` 是分页响应，proxy object 的 authoritative 字段
+  包括 string `id`、string `proxy_address`（residential pool 可为 null）、int
+  `port`、string `username` 和 string `password`。Provider 只在 `id`、非空
+  `proxy_address` 和合法 port 存在时映射 `EgressEndpointDTO`；credentials
+  通过同一 proxy list contract 查找 endpoint，并使用 `X-Subuser` header，
+  不把 username/password 写入 endpoint DTO、错误消息或日志。
+- Sub-user object 的 authoritative 字段包括 int `id`、string `label`、
+  numeric `proxy_limit`（GB）和 int `max_thread_count`；create/update 的
+  DTO mapping 只接受这些字段，缺失或类型错误时 fail closed。
+- `capacity()` 保持 gated：subscription/plan contract 只明确了 bandwidth
+  limit，不能从已记录的 Webshare response 推导本项目 `CapacityDTO` 的
+  `allocated_gb` 与 `reserved_gb`，因此不返回假零值。
+- `get_tenant_usage()` 保持 gated：官方 aggregate-stats response 的
+  `bandwidth_total` 单位及 tenant-specific `UsageDTO.measured_at` 语义未在
+  仓库已验证 contract 中确定，因此不猜测字节映射。
+- Source: <https://apidocs.webshare.io/proxy-list/list>,
+  <https://apidocs.webshare.io/proxy-list>,
+  <https://apidocs.webshare.io/subuser>,
+  <https://apidocs.webshare.io/subscription>,
+  <https://apidocs.webshare.io/proxystats/aggregate>.
+
 ## 客户订阅分流规则：生产当前为全局代理
 
 - 状态: 已实测
@@ -45,3 +69,4 @@ Verified, documented, support-confirmed, and unverified provider behavior is rec
   模式复杂化时，可能提高住宅 IP 被风控的概率。
 - 后续: 是否启用客户端分流规则属于待决业务事项。任何变更必须先在单个
   订阅上灰度验证，再决定是否推广。
+

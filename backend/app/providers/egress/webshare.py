@@ -31,6 +31,10 @@ class WebshareRateLimitError(RuntimeError):
     pass
 
 
+class WebshareContractError(RuntimeError):
+    """Raised when a response cannot be mapped without guessing its schema."""
+
+
 class Response(Protocol):
     status_code: int
 
@@ -146,6 +150,7 @@ class WebshareProvider:
         dry_run: bool | None = None,
         params: Mapping[str, object] | None = None,
         json: Mapping[str, object] | None = None,
+        extra_headers: Mapping[str, str] | None = None,
         **options: object,
     ) -> Response:
         """Validate policy before rate limiting or invoking the transport.
@@ -157,6 +162,8 @@ class WebshareProvider:
         normalized_path = unquote(urlsplit(path).path)
         if {"force", "override", "bypass"}.intersection(options):
             raise WebshareGuardError("force/override/bypass options are not supported")
+        if extra_headers and any(key.lower() == "authorization" for key in extra_headers):
+            raise WebshareGuardError("authorization header cannot be overridden")
         self._guard(normalized_method, normalized_path, dry_run=dry_run)
         self._general_limiter.acquire()
         if "/proxy/" in normalized_path:
@@ -167,7 +174,10 @@ class WebshareProvider:
             response = self._transport(
                 normalized_method,
                 url,
-                headers={"Authorization": f"Token {self._api_key}"},
+                headers={
+                    "Authorization": f"Token {self._api_key}",
+                    **(dict(extra_headers) if extra_headers else {}),
+                },
                 params=params,
                 json=json,
             )
@@ -209,26 +219,86 @@ class WebshareProvider:
 
     # Provider DTO adapters. All network operations still pass through request().
     def list_endpoints(self) -> list[EgressEndpointDTO]:
-        self.request("GET", "/api/v2/proxy/list/")
-        return []
+        payloads = self._paginate(
+            "/api/v2/proxy/list/", params={"mode": "direct", "page_size": 100}
+        )
+        return [_parse_endpoint(item) for item in payloads]
 
     def capacity(self) -> CapacityDTO:
-        self.request("GET", "/api/v2/subscription/")
-        return CapacityDTO(Decimal(0), Decimal(0), Decimal(0))
+        raise WebshareContractError(
+            "capacity mapping is gated: Webshare does not expose the DTO's "
+            "allocated_gb and reserved_gb fields in the recorded contract"
+        )
 
     def create_tenant(self, label: str, quota_gb: Decimal, thread_limit: int) -> TenantDTO:
-        self.request("POST", "/api/v2/subuser/", json={"label": label})
-        return TenantDTO(label, label, quota_gb, thread_limit)
+        response = self.request(
+            "POST",
+            "/api/v2/subuser/",
+            json={
+                "label": label,
+                "proxy_limit": float(quota_gb),
+                "max_thread_count": thread_limit,
+            },
+        )
+        return _parse_tenant(response.json())
 
     def update_tenant_quota(self, tenant_id: str, quota_gb: Decimal) -> TenantDTO:
-        self.request("PATCH", f"/api/v2/subuser/{tenant_id}/", json={"quota": str(quota_gb)})
-        return TenantDTO(tenant_id, tenant_id, quota_gb, 0)
+        response = self.request(
+            "PATCH",
+            f"/api/v2/subuser/{tenant_id}/",
+            json={"proxy_limit": float(quota_gb)},
+        )
+        return _parse_tenant(response.json())
 
     def get_tenant_usage(self, tenant_id: str) -> UsageDTO:
-        raise NotImplementedError("response mapping arrives with T5 migration")
+        raise WebshareContractError(
+            "tenant usage mapping is gated: the recorded Webshare aggregate-stats "
+            "contract does not establish a byte unit for UsageDTO"
+        )
 
     def get_credentials(self, tenant_id: str, endpoint_id: str) -> CredentialDTO:
-        raise NotImplementedError("response mapping arrives with T5 migration")
+        payloads = self._paginate(
+            "/api/v2/proxy/list/",
+            params={"mode": "direct", "page_size": 100},
+            extra_headers={"X-Subuser": tenant_id},
+        )
+        for item in payloads:
+            if item.get("id") == endpoint_id:
+                username = _required_string(item, "username", "proxy credential")
+                password = _required_string(item, "password", "proxy credential")
+                return CredentialDTO(username, password)
+        raise WebshareContractError("proxy endpoint was not found for credentials")
+
+    def _paginate(
+        self,
+        path: str,
+        *,
+        params: Mapping[str, object] | None = None,
+        extra_headers: Mapping[str, str] | None = None,
+    ) -> list[dict[str, object]]:
+        results: list[dict[str, object]] = []
+        next_path: str | None = path
+        next_params = params
+        while next_path:
+            response = self.request(
+                "GET", next_path, params=next_params, extra_headers=extra_headers
+            )
+            payload = response.json()
+            if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+                raise WebshareContractError("Webshare paginated response is malformed")
+            for item in payload["results"]:
+                if not isinstance(item, dict):
+                    raise WebshareContractError("Webshare result item is malformed")
+                results.append(item)
+            next_value = payload.get("next")
+            if next_value:
+                parsed_next = urlsplit(str(next_value))
+                next_path = parsed_next.path
+                next_params = dict(parse_qsl(parsed_next.query, keep_blank_values=True))
+            else:
+                next_path = None
+                next_params = None
+        return results
 
     def replace_endpoint(self, endpoint_id: str, dry_run: bool = True) -> ReplacementDTO:
         self.request("POST", f"/api/v3/proxy/replace/{endpoint_id}/", dry_run=dry_run)
@@ -241,7 +311,69 @@ class WebshareApiError(RuntimeError):
     def __init__(self, message: str, status_code: int, payload: object) -> None:
         super().__init__(message)
         self.status_code = status_code
-        self.payload = payload
+        self.payload = _redact_payload(payload)
+
+
+def _required_string(item: Mapping[str, object], field: str, operation: str) -> str:
+    value = item.get(field)
+    if not isinstance(value, str) or not value.strip():
+        raise WebshareContractError(f"{operation} field {field!r} is missing or malformed")
+    return value
+
+
+def _parse_endpoint(item: Mapping[str, object]) -> EgressEndpointDTO:
+    endpoint_id = _required_string(item, "id", "proxy endpoint")
+    host = _required_string(item, "proxy_address", "proxy endpoint")
+    port = item.get("port")
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        raise WebshareContractError("proxy endpoint field 'port' is missing or malformed")
+    return EgressEndpointDTO(endpoint_id, host, port, protocol="socks5", public_ip=host)
+
+
+def _parse_tenant(payload: object) -> TenantDTO:
+    if not isinstance(payload, dict):
+        raise WebshareContractError("Webshare sub-user response is malformed")
+    tenant_id = payload.get("id")
+    if isinstance(tenant_id, bool) or not isinstance(tenant_id, int):
+        raise WebshareContractError("Webshare sub-user field 'id' is missing or malformed")
+    label = _required_string(payload, "label", "sub-user")
+    proxy_limit = payload.get("proxy_limit")
+    if isinstance(proxy_limit, bool) or not isinstance(proxy_limit, (int, float, str)):
+        raise WebshareContractError(
+            "Webshare sub-user field 'proxy_limit' is missing or malformed"
+        )
+    thread_limit = payload.get("max_thread_count")
+    if isinstance(thread_limit, bool) or not isinstance(thread_limit, int):
+        raise WebshareContractError(
+            "Webshare sub-user field 'max_thread_count' is missing or malformed"
+        )
+    try:
+        quota_gb = Decimal(str(proxy_limit))
+    except Exception as error:
+        raise WebshareContractError(
+            "Webshare sub-user field 'proxy_limit' is missing or malformed"
+        ) from error
+    if not quota_gb.is_finite() or quota_gb < 0:
+        raise WebshareContractError(
+            "Webshare sub-user field 'proxy_limit' is missing or malformed"
+        )
+    return TenantDTO(str(tenant_id), label, quota_gb, thread_limit)
+
+
+def _redact_payload(payload: object) -> object:
+    if isinstance(payload, dict):
+        return {
+            key: "<redacted>"
+            if any(
+                marker in key.lower()
+                for marker in ("password", "username", "token", "api_key", "secret")
+            )
+            else _redact_payload(value)
+            for key, value in payload.items()
+        }
+    if isinstance(payload, list):
+        return [_redact_payload(value) for value in payload]
+    return payload
 
 
 class WebshareReadOnlyAdapter:
@@ -282,7 +414,7 @@ class WebshareReadOnlyAdapter:
         payload = response.json()
         if response.status_code >= 400:
             raise WebshareApiError(
-                f"Webshare API HTTP {response.status_code}: {payload}",
+                f"Webshare API HTTP {response.status_code}",
                 response.status_code,
                 payload,
             )
@@ -342,3 +474,4 @@ def _merge_query_params(
     if params:
         merged.update(params)
     return merged or None
+
