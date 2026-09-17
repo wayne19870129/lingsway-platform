@@ -2689,3 +2689,15 @@ lifespan waits for the in-flight recovery worker before closing the registry.
 Production `APP_ENV=production + GATEWAY_PROVIDER=xray_file` remains gated.
 Phase 2C3C remains ACTIVE and production-gated, awaiting renewed independent
 exact-head review.
+
+## Latest independent-review follow-up — customer-success finalization guard
+
+Reviewed exact head: `4fd71c0edb6917ec531283969a7b3305025f84a6`; canonical review:
+`5230150152`. The paid-purchase orchestration now treats
+`applied=True, finalized=False` as unresolved `RUNNING`/manual state:
+it does not emit `PROVISION_SUCCEEDED`, return a subscription URL, or report
+`ProvisionStatus.SUCCEEDED`. DB B and the writer-blocking unresolved gateway
+intent remain authoritative; runtime B is not rolled back. Only
+`applied=True` and `finalized=True` enables customer-facing success. ADR-022
+also has the finalization Markdown typo corrected. Phase 2C3C remains
+production-gated pending renewed exact-head review.
