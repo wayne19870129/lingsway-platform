@@ -280,7 +280,7 @@ At reviewed exact head `e2f9a9cdf6ff4971db5ff38cee3a636a7f206b5f` (canonical rev
 `5229348434`), the second durable finalization commit is classified through
 a fresh independent Engine-backed Session. For PURCHASE, `LANDED` requires
 the gateway Job to be `SUCCEEDED`, Subscription to be `ACTIVE`, Order to be
-`ACTIVATED`, and any payload-referenced ProvisionRun to be `SUCCEEDED).
+`ACTIVATED`, and any payload-referenced ProvisionRun to be `SUCCEEDED`.
 Explicitly absent finalization is the only path that records a retryable
 failure; it never rolls DB B back to A. Partial evidence or an unavailable
 observer is `UNKNOWN`, recorded with the stable
