@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from threading import Barrier, Lock
 from uuid import uuid4
 
@@ -18,11 +18,13 @@ from backend.app.core.database import Base, build_engine
 from backend.app.core.secrets import put_secret
 from backend.app.infra.credential_resolver import SqlAlchemyCredentialResolver
 from backend.app.infra.gateway_reconciliation import (
+    FinalizationCommitOutcome,
     FirstCommitOutcome,
     GatewayReconciliationBlocked,
     assert_no_unresolved_gateway_mutation,
     classify_first_commit_outcome,
     enqueue_gateway_reconciliation,
+    reconcile_gateway_job,
 )
 from backend.app.infra.gateway_route_lock import gateway_route_binding_write
 from backend.app.infra.provisioning_state import SqlAlchemyProvisioningState
@@ -32,25 +34,34 @@ from backend.app.infra.xray_reality import (
     bootstrap_reality_identity,
 )
 from backend.app.models import (
+    AuditLog,
     Customer,
     EgressBinding,
     EgressEndpoint,
     EgressGroup,
     GatewayRouteBinding,
+    Job,
     JobStatus,
+    OrderStatus,
     Order,
     Plan,
     Secret,
     Subscription,
     SubscriptionStatus,
 )
-from backend.app.providers.base import EgressEndpointDTO
+from backend.app.providers.base import (
+    ApplyResult,
+    CandidateConfig,
+    EgressEndpointDTO,
+    ValidationResult,
+)
 from backend.app.providers.gateway.xray_composition import (
     XrayDeploymentConfig,
     XrayRealityConfig,
     XrayStaticSkeleton,
 )
 from backend.app.providers.gateway.xray_file import XrayFileProvider
+from backend.app.workers.accounting_sync import release_egress
 
 
 @pytest.fixture
@@ -618,3 +629,462 @@ def test_mysql_first_commit_probe_requires_complete_authoritative_evidence(
             dedupe_key=f"GATEWAY_RECONCILE:PURCHASE:absent-{uuid4().hex}",
             subscription_id=absent_subscription,
         ) is FirstCommitOutcome.ABSENT
+
+
+class _FakeNotify:
+    def send(self, event: object) -> object:
+        del event
+        return object()
+
+
+class _FakeGateway:
+    """Deterministic gateway double; no external network or Xray process."""
+
+    def __init__(self, *, failures: int = 0, block: Barrier | None = None) -> None:
+        self.failures = failures
+        self.block = block
+        self.apply_calls = 0
+        self._calls_lock = Lock()
+        self.notify = _FakeNotify()
+
+    def render(self, desired: object, resolver: object) -> CandidateConfig:
+        del desired, resolver
+        return CandidateConfig({}, "mysql-test")
+
+    def validate(self, candidate: CandidateConfig) -> ValidationResult:
+        del candidate
+        return ValidationResult(True)
+
+    def apply(self, candidate: CandidateConfig) -> ApplyResult:
+        del candidate
+        with self._calls_lock:
+            self.apply_calls += 1
+            call_number = self.apply_calls
+        if self.block is not None:
+            self.block.wait(timeout=15)
+        if call_number <= self.failures:
+            raise RuntimeError("deterministic gateway failure")
+        return ApplyResult(True, "mysql-test")
+
+    def health(self) -> object:
+        return object()
+
+
+class _FaultSession(Session):
+    """Inject a deterministic second-commit failure after claim commit."""
+
+    def __init__(self, *args: object, fail_mode: str | None = None, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)
+        self._fail_mode = fail_mode
+        self._commit_calls = 0
+
+    def commit(self) -> None:
+        self._commit_calls += 1
+        if self._commit_calls == 2 and self._fail_mode == "before":
+            raise RuntimeError("injected finalization commit failure")
+        super().commit()
+        if self._commit_calls == 2 and self._fail_mode == "ack":
+            raise RuntimeError("injected finalization commit acknowledgement loss")
+
+
+def _seed_pending_gateway_case(
+    engine: Engine, *, token: str | None = None
+) -> tuple[int, int, int, int]:
+    """Seed durable DB B, a pending gateway job, and an optional token."""
+    subscription_id, _, endpoint, _ = _seed(engine)
+    operation_id = f"orchestration-{uuid4().hex}"
+    with Session(engine) as db:
+        subscription = db.get(Subscription, subscription_id)
+        assert subscription is not None
+        if token is not None:
+            SqlAlchemyProvisioningState(db, subscription_id).store_subscription_token(
+                str(subscription.customer_id), token
+            )
+        credential_ref = f"mysql-test/{uuid4().hex}"
+        put_secret(
+            db,
+            credential_ref,
+            '{"username":"mysql-test-user","password":"mysql-test-password"}',
+            "EGRESS_CREDENTIAL",
+        )
+        db.add(
+            EgressBinding(
+                subscription_id=subscription_id,
+                egress_id=endpoint.id,
+                credential_secret_ref=credential_ref,
+            )
+        )
+        db.add(
+            GatewayRouteBinding(
+                subscription_id=subscription_id,
+                egress_id=endpoint.id,
+                gateway_principal=f"mysql-principal-{operation_id}",
+                outbound_tag=f"mysql-egress-{operation_id}",
+                enabled=True,
+            )
+        )
+        provision_run = Job(
+            job_type="PROVISION",
+            dedupe_key=f"PROVISION:{operation_id}",
+            status=JobStatus.RUNNING,
+        )
+        db.add(provision_run)
+        db.flush()
+        with gateway_route_binding_write(db):
+            job = enqueue_gateway_reconciliation(
+                db,
+                operation_kind="PURCHASE",
+                subscription_id=subscription_id,
+                order_id=subscription.order_id,
+                provision_run_id=str(provision_run.id),
+                operation_id=operation_id,
+            )
+            job_id = job.id
+            run_id = provision_run.id
+            order_id = subscription.order_id
+            db.commit()
+    return subscription_id, order_id, job_id, run_id
+
+
+def _make_gateway() -> _FakeGateway:
+    return _FakeGateway()
+
+
+def _reconcile(engine: Engine, gateway: _FakeGateway) -> object:
+    return reconcile_gateway_job(
+        gateway,
+        db_factory=lambda: Session(engine),
+    )
+
+
+def _set_job_available_now(engine: Engine, job_id: int) -> None:
+    with Session(engine) as db:
+        job = db.get(Job, job_id)
+        assert job is not None
+        job.available_at = datetime.now(UTC)
+        db.commit()
+
+
+def _assert_purchase_finalized(
+    engine: Engine, subscription_id: int, order_id: int, job_id: int, run_id: int
+) -> None:
+    with Session(engine) as db:
+        subscription = db.get(Subscription, subscription_id)
+        order = db.get(Order, order_id)
+        job = db.get(Job, job_id)
+        run = db.get(Job, run_id)
+        assert subscription is not None
+        assert order is not None
+        assert job is not None
+        assert run is not None
+        assert subscription.status is SubscriptionStatus.ACTIVE
+        assert order.status is OrderStatus.ACTIVATED
+        assert job.status is JobStatus.SUCCEEDED
+        assert run.status is JobStatus.SUCCEEDED
+
+
+def test_mysql_gateway_crash_before_runtime_apply_recovers(
+    mysql_engine: Engine,
+) -> None:
+    subscription_id, order_id, job_id, run_id = _seed_pending_gateway_case(mysql_engine)
+    gateway = _make_gateway()
+
+    result = _reconcile(mysql_engine, gateway)
+
+    assert result is not None
+    assert gateway.apply_calls == 1
+    _assert_purchase_finalized(mysql_engine, subscription_id, order_id, job_id, run_id)
+
+
+def test_mysql_gateway_runtime_failure_then_retry_preserves_db_b(
+    mysql_engine: Engine,
+) -> None:
+    subscription_id, order_id, job_id, run_id = _seed_pending_gateway_case(mysql_engine)
+    gateway = _FakeGateway(failures=1)
+
+    first = _reconcile(mysql_engine, gateway)
+    assert first is not None
+    with Session(mysql_engine) as db:
+        job = db.get(Job, job_id)
+        subscription = db.get(Subscription, subscription_id)
+        order = db.get(Order, order_id)
+        assert job is not None
+        assert subscription is not None
+        assert order is not None
+        assert job.status is JobStatus.FAILED
+        assert subscription.status is SubscriptionStatus.PROVISIONING
+        assert order.status is OrderStatus.PENDING
+    _set_job_available_now(mysql_engine, job_id)
+
+    second = _reconcile(mysql_engine, gateway)
+
+    assert second is not None
+    assert gateway.apply_calls == 2
+    _assert_purchase_finalized(mysql_engine, subscription_id, order_id, job_id, run_id)
+
+
+def test_mysql_finalization_commit_failure_is_retryable_without_rollback(
+    mysql_engine: Engine,
+) -> None:
+    subscription_id, order_id, job_id, run_id = _seed_pending_gateway_case(mysql_engine)
+    gateway = _make_gateway()
+
+    first = reconcile_gateway_job(
+        gateway,
+        db_factory=lambda: _FaultSession(bind=mysql_engine, fail_mode="before"),
+    )
+
+    assert first is not None
+    assert first.applied is False
+    with Session(mysql_engine) as db:
+        job = db.get(Job, job_id)
+        subscription = db.get(Subscription, subscription_id)
+        order = db.get(Order, order_id)
+        assert job is not None
+        assert subscription is not None
+        assert order is not None
+        assert job.status is JobStatus.FAILED
+        assert subscription.status is SubscriptionStatus.PROVISIONING
+        assert order.status is OrderStatus.PENDING
+    _set_job_available_now(mysql_engine, job_id)
+
+    second = _reconcile(mysql_engine, gateway)
+
+    assert second is not None
+    assert gateway.apply_calls == 2
+    _assert_purchase_finalized(mysql_engine, subscription_id, order_id, job_id, run_id)
+
+
+def test_mysql_finalization_ack_loss_classifies_landed_without_false_failure(
+    mysql_engine: Engine,
+) -> None:
+    subscription_id, order_id, job_id, run_id = _seed_pending_gateway_case(mysql_engine)
+    gateway = _make_gateway()
+
+    result = reconcile_gateway_job(
+        gateway,
+        db_factory=lambda: _FaultSession(bind=mysql_engine, fail_mode="ack"),
+    )
+
+    assert result is not None
+    assert result.applied is True
+    assert result.finalized is True
+    assert result.reason_code is None
+    assert gateway.apply_calls == 1
+    _assert_purchase_finalized(mysql_engine, subscription_id, order_id, job_id, run_id)
+    with Session(mysql_engine) as db:
+        subscription = db.get(Subscription, subscription_id)
+        assert subscription is not None
+        assert subscription.provision_error is None
+        assert db.scalar(
+            select(AuditLog).where(
+                AuditLog.action == "GATEWAY_RECONCILIATION_FAILED",
+                AuditLog.entity_id == str(subscription_id),
+            )
+        ) is None
+
+
+def test_mysql_finalization_classifier_distinguishes_all_states(
+    mysql_engine: Engine,
+) -> None:
+    subscription_id, order_id, job_id, run_id = _seed_pending_gateway_case(mysql_engine)
+    with Session(mysql_engine) as db:
+        assert (
+            classify_finalization_outcome(
+                db,
+                job_id=job_id,
+                subscription_id=subscription_id,
+                order_id=order_id,
+                provision_run_id=run_id,
+                operation_kind="PURCHASE",
+            )
+            is FinalizationCommitOutcome.ABSENT
+        )
+        job = db.get(Job, job_id)
+        subscription = db.get(Subscription, subscription_id)
+        order = db.get(Order, order_id)
+        run = db.get(Job, run_id)
+        assert job is not None
+        assert subscription is not None
+        assert order is not None
+        assert run is not None
+        subscription.status = SubscriptionStatus.ACTIVE
+        order.status = OrderStatus.ACTIVATED
+        job.status = JobStatus.SUCCEEDED
+        run.status = JobStatus.SUCCEEDED
+        db.commit()
+        assert (
+            classify_finalization_outcome(
+                db,
+                job_id=job_id,
+                subscription_id=subscription_id,
+                order_id=order_id,
+                provision_run_id=run_id,
+                operation_kind="PURCHASE",
+            )
+            is FinalizationCommitOutcome.LANDED
+        )
+
+
+def test_mysql_stale_running_gateway_job_is_recovered(
+    mysql_engine: Engine,
+) -> None:
+    subscription_id, order_id, job_id, run_id = _seed_pending_gateway_case(mysql_engine)
+    with Session(mysql_engine) as db:
+        job = db.get(Job, job_id)
+        assert job is not None
+        job.status = JobStatus.RUNNING
+        job.locked_at = datetime.now(UTC) - timedelta(minutes=30)
+        db.commit()
+
+    gateway = _make_gateway()
+    result = _reconcile(mysql_engine, gateway)
+
+    assert result is not None
+    assert gateway.apply_calls == 1
+    _assert_purchase_finalized(mysql_engine, subscription_id, order_id, job_id, run_id)
+
+
+def test_mysql_gateway_retry_exhaustion_blocks_new_writer(
+    mysql_engine: Engine,
+) -> None:
+    subscription_id, order_id, job_id, run_id = _seed_pending_gateway_case(mysql_engine)
+    with Session(mysql_engine) as db:
+        job = db.get(Job, job_id)
+        assert job is not None
+        job.max_attempts = 2
+        db.commit()
+    gateway = _FakeGateway(failures=10)
+
+    first = _reconcile(mysql_engine, gateway)
+    assert first is not None
+    _set_job_available_now(mysql_engine, job_id)
+    second = _reconcile(mysql_engine, gateway)
+
+    assert second is not None
+    assert gateway.apply_calls == 2
+    with Session(mysql_engine) as db:
+        job = db.get(Job, job_id)
+        assert job is not None
+        assert job.status is JobStatus.FAILED
+        assert job.attempts == 2
+        assert job.last_error_code == "GATEWAY_RECONCILIATION_RUNTIMEERROR"
+        assert db.scalar(
+            select(AuditLog).where(
+                AuditLog.action == "GATEWAY_RECONCILIATION_FAILED",
+                AuditLog.result == "MANUAL",
+                AuditLog.entity_id == str(subscription_id),
+            )
+        ) is not None
+        with gateway_route_binding_write(db), pytest.raises(
+            GatewayReconciliationBlocked
+        ):
+            assert_no_unresolved_gateway_mutation(db)
+
+
+def test_mysql_two_recovery_workers_apply_once(
+    mysql_engine: Engine,
+) -> None:
+    _, _, job_id, _ = _seed_pending_gateway_case(mysql_engine)
+    gateway = _make_gateway()
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(
+            executor.map(lambda _: _reconcile(mysql_engine, gateway), range(2))
+        )
+
+    assert sum(result is not None for result in results) == 1
+    assert gateway.apply_calls == 1
+    with Session(mysql_engine) as db:
+        job = db.get(Job, job_id)
+        assert job is not None
+        assert job.status is JobStatus.SUCCEEDED
+
+
+def test_mysql_expiry_release_handoff_enqueues_without_runtime_apply(
+    mysql_engine: Engine,
+) -> None:
+    subscription_id, _, endpoint, _ = _seed(mysql_engine)
+    with Session(mysql_engine) as db:
+        ref = f"release-test/{uuid4().hex}"
+        put_secret(
+            db,
+            ref,
+            '{"username":"release-user","password":"release-password"}',
+            "EGRESS_CREDENTIAL",
+        )
+        db.add(
+            EgressBinding(
+                subscription_id=subscription_id,
+                egress_id=endpoint.id,
+                credential_secret_ref=ref,
+            )
+        )
+        db.add(
+            GatewayRouteBinding(
+                subscription_id=subscription_id,
+                egress_id=endpoint.id,
+                gateway_principal=f"release-principal-{uuid4().hex}",
+                outbound_tag=f"release-egress-{uuid4().hex}",
+                enabled=True,
+            )
+        )
+        db.commit()
+        assert release_egress(db, subscription_id, gateway=None) is False
+        binding = db.scalar(
+            select(EgressBinding).where(EgressBinding.subscription_id == subscription_id)
+        )
+        route = db.scalar(
+            select(GatewayRouteBinding).where(
+                GatewayRouteBinding.subscription_id == subscription_id
+            )
+        )
+        job = db.scalar(
+            select(Job).where(Job.job_type == "GATEWAY_RECONCILE")
+        )
+        assert binding is not None
+        assert route is not None
+        assert job is not None
+        assert binding.released_at is not None
+        assert route.enabled is False
+        assert route.released_at is not None
+        assert job.status is JobStatus.PENDING
+        job_id = job.id
+
+    gateway = _make_gateway()
+    result = _reconcile(mysql_engine, gateway)
+
+    assert result is not None
+    assert gateway.apply_calls == 1
+    with Session(mysql_engine) as db:
+        job = db.get(Job, job_id)
+        assert job is not None
+        assert job.status is JobStatus.SUCCEEDED
+
+
+def test_mysql_subscription_token_survives_request_loss_and_recovery(
+    mysql_engine: Engine,
+) -> None:
+    raw_token = f"token-{uuid4().hex}"
+    subscription_id, order_id, job_id, run_id = _seed_pending_gateway_case(
+        mysql_engine, token=raw_token
+    )
+    with Session(mysql_engine) as db:
+        state = SqlAlchemyProvisioningState(db, subscription_id)
+        assert state.read_subscription_token() == raw_token
+        assert raw_token in state.current_subscription_url("https://sub.example.invalid")
+
+    gateway = _make_gateway()
+    result = _reconcile(mysql_engine, gateway)
+
+    assert result is not None
+    _assert_purchase_finalized(mysql_engine, subscription_id, order_id, job_id, run_id)
+    with Session(mysql_engine) as db:
+        job = db.get(Job, job_id)
+        audit = db.scalar(
+            select(AuditLog).where(AuditLog.action == "GATEWAY_RECONCILIATION_SUCCEEDED")
+        )
+        assert job is not None
+        assert audit is not None
+        assert raw_token not in job.payload_json
+        assert raw_token not in audit.detail
+        assert raw_token not in (job.last_error_code or "")
