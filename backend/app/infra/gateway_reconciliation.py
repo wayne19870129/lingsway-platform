@@ -156,8 +156,9 @@ def classify_first_commit_outcome(
     fail-closed without external compensation.
     """
     try:
-        bind = db.get_bind()
-        with Session(bind=_independent_engine(db), autoflush=False, expire_on_commit=False) as probe:
+        with Session(
+            bind=_independent_engine(db), autoflush=False, expire_on_commit=False
+        ) as probe:
             job_id = probe.scalar(
                 select(Job.id)
                 .where(Job.dedupe_key == dedupe_key)
