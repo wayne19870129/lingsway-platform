@@ -15,9 +15,9 @@ from backend.app.domain.ordering import (
 )
 from backend.app.domain.provisioning import (
     ProvisioningCheckpoint,
+    ProvisioningService,
     ProvisionOutcome,
     ProvisionRequest,
-    ProvisioningService,
     ProvisionStatus,
     ProvisionStep,
 )
