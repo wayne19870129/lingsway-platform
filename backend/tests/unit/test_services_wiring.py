@@ -17,6 +17,7 @@ from backend.app.domain.provisioning import (
     ProvisioningCheckpoint,
     ProvisionOutcome,
     ProvisionRequest,
+    ProvisioningService,
     ProvisionStatus,
     ProvisionStep,
 )
