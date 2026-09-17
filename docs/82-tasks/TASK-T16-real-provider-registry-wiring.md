@@ -2727,3 +2727,25 @@ VPS/DNS change, certificate rotation, or customer provisioning is allowed.
 deployment requires the remaining legal disposition and explicit user
 production approval. Mihomo, Webshare, and the manual principal writer remain
 separately gated.
+
+
+## Phase 2C4A — Mihomo architecture unblock (S02-A, Issue #117)
+
+本节与专用 ADR-023 一起构成后续 Mihomo registry wiring 的唯一架构合同。实现 Agent 不得自行选择另一套 render、lock、freshness、transaction、compensation 或 success 语义。
+
+### 已接受的合同
+
+- 完整 Mihomo repo-owned config 由单一 `MihomoProjectionWriter` authoritative render；`MihomoForwarderProvider.render()` 只是适配入口。任何 standalone ops renderer 必须复用同一 composer，不能成为第二个 production writer。
+- DB committed desired state 是唯一意图来源。transport cache 只是被 DB 引用、带 source identity/content hash/version/freshness deadline 的 materialized input；过期、缺失或无法证明对应关系时拒绝 render。Mihomo `runtime.current()`、磁盘当前文件、API current/config 和 fingerprint 只用于 backup、rollback、drift 和 post-apply evidence，严禁作为 desired-state source。
+- 全局 full-config 只有一个 application/process writer boundary，并由同一稳定命名锁串行化。锁覆盖 fresh DB read、render、validate、backup、install、reload、health/readback、finalization、rollback/compensation 及 lock-release outcome classification。每次取得锁后重新读取 DB；旧 ORM snapshot 不得覆盖较新 revision。
+- 采用 commit-first：先 durable-commit desired B + identifier-only pending intent，再从 fresh committed B 全量 render/apply/verify，最后 durable-commit finalization。只有 finalization 可由 fresh read 证明、健康/readback/fingerprint/revision 全部匹配且 lock release 无 uncertainty 时才可报告 APPLIED/success。
+- exact previous runtime state A 必须是锁内捕获的原始 document/identity。apply 前失败只回滚未提交 DB transaction；B 提交后 activation 失败可 restore/reload/verify exact A，但 DB B 仍是权威，pending 保留并阻塞后续 writer。后续 accounting/gateway/subscription 等 saga step 失败时，不得隐式把 Mihomo 从 B 回滚到 A；只补偿失败步骤自己拥有的副作用。若确需取消，必须先提交新的 desired C，再按同一 writer 合同收敛。
+- install/reload/health/rollback/finalization/lock-release 任一阶段证据不足，均为 UNKNOWN/DEGRADED、fail-closed、writer-blocking/manual；不得猜测 APPLIED、FAILED 或已回滚。进程 crash 后一律从 fresh committed DB desired state + pending intent 恢复，不得从 runtime/cache/backup 反推 desired state。
+
+详见 `docs/80-decisions/ADR-023-mihomo-full-config-activation-boundary.md`。本 ADR 明确关闭 `MIHOMO_RENDER_BOUNDARY_BLOCKER`、downstream forwarder compensation blocker、global full-config writer single-writer/serialization/freshness/commit-order blocker。
+
+### S02-A 范围与实现门槛
+
+本阶段仅更新架构文档：不修改 provider、registry、base contract、schema/migration、workflow、deploy，不执行真实 Mihomo install/reload/health，不使用真实 credentials，不做 VPS、Docker、deployment 或 production side effect。
+
+后续 S02/S03 实现必须先补齐：完整 section ownership、fresh snapshot revision/fingerprint、transport-cache freshness proof、唯一 named lock、exact A backup/verified restore、post-reload health + exact projection verification、durable pending/finalization/crash recovery，以及并发、stale snapshot/cache、各 runtime failure、rollback failure、downstream failure、second-commit ACK-loss、process-crash 和 writer-blocking 测试。缺任一项时，`FORWARDER_PROVIDER=mihomo` 必须保持 fail-closed/mock。
