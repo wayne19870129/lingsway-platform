@@ -767,7 +767,7 @@ def _reconcile(
             .order_by(Job.id.desc())
         )
         assert job is not None
-        job.available_at = datetime.now(UTC)
+        job.available_at = datetime.now(UTC) - timedelta(minutes=1)
         db.commit()
     return reconcile_gateway_job(  # type: ignore[arg-type]
         gateway,
