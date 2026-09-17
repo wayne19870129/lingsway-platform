@@ -13,6 +13,7 @@ from backend.app.domain.ordering import (
     PaymentConfirmation,
 )
 from backend.app.domain.provisioning import (
+    ProvisionOutcome,
     ProvisionRequest,
     ProvisioningCheckpoint,
     ProvisionStatus,
