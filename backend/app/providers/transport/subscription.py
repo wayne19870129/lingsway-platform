@@ -139,7 +139,7 @@ def parse_subscription(provider_code: str, content: str) -> list[TransportEndpoi
             decoded = decode_base64_text(decoded)
         except (ValueError, UnicodeDecodeError):
             raise ValueError("Subscription is not valid base64 URI data") from None
-    endpoints: list[TransportEndpointDTO] = []
+    uri_endpoints: list[TransportEndpointDTO] = []
     for line in decoded.splitlines():
         value = line.strip()
         if not value:
@@ -150,10 +150,10 @@ def parse_subscription(provider_code: str, content: str) -> list[TransportEndpoi
             raise ValueError("Subscription contains an unsupported or malformed URI") from None
         if endpoint is None:
             raise ValueError("Subscription contains an unsupported or malformed URI")
-        endpoints.append(endpoint)
-    if not endpoints:
+        uri_endpoints.append(endpoint)
+    if not uri_endpoints:
         raise ValueError("Subscription contains no supported endpoints")
-    return endpoints
+    return uri_endpoints
 
 
 def validate_mihomo_provider_document(content: str) -> None:
