@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-import importlib.util
 import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from alembic.migration import MigrationContext
-from alembic.operations import Operations
+from alembic import command
+from alembic.config import Config
 from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
@@ -38,19 +37,9 @@ def _write(engine: Engine, ref: str, value: str) -> None:
 
 
 def test_mysql_0023_upgrade_preserves_rows_and_revision_semantics(
-    mysql_engine: Engine,
+    mysql_engine: Engine, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    migration_path = (
-        Path(__file__).parents[3]
-        / "infrastructure"
-        / "alembic"
-        / "versions"
-        / "0023_secret_revision.py"
-    )
-    spec = importlib.util.spec_from_file_location("migration_0023", migration_path)
-    assert spec is not None and spec.loader is not None
-    migration = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(migration)
+    sync_url = str(mysql_engine.url)
     ciphertext = encrypt_secret("https://before.invalid")
     with mysql_engine.begin() as connection:
         connection.execute(text("DROP TABLE IF EXISTS secrets"))
@@ -71,9 +60,22 @@ def test_mysql_0023_upgrade_preserves_rows_and_revision_semantics(
             ),
             {"ref": "migration/old", "ciphertext": ciphertext, "purpose": "TEST"},
         )
-        context = MigrationContext.configure(connection)
-        with Operations.context(context):
-            migration.upgrade()
+    from backend.app.core import config as app_config
+
+    script_location = Path(__file__).parents[3] / "infrastructure" / "alembic"
+    settings = app_config.get_settings()
+    monkey_settings = type(settings)(
+        database_url=sync_url,
+        secret_encryption_key=settings.secret_encryption_key,
+    )
+    monkeypatch.setattr(app_config, "get_settings", lambda: monkey_settings)
+    alembic_config = Config()
+    alembic_config.set_main_option("script_location", str(script_location))
+    alembic_config.set_main_option("sqlalchemy.url", sync_url)
+    command.stamp(alembic_config, "0022_egress_purpose")
+    command.upgrade(alembic_config, "0023_secret_revision")
+
+    with mysql_engine.connect() as connection:
         columns = {column["name"]: column for column in inspect(connection).get_columns("secrets")}
         assert columns["revision"]["nullable"] is False
         assert columns["revision"]["default"] in ("1", "'1'")
@@ -84,6 +86,9 @@ def test_mysql_0023_upgrade_preserves_rows_and_revision_semantics(
         assert row.ciphertext == ciphertext
         assert row.purpose == "TEST"
         assert row.revision == 1
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == (
+            "0023_secret_revision"
+        )
 
     _write(mysql_engine, "migration/new", "https://new.invalid")
     with Session(mysql_engine) as db:

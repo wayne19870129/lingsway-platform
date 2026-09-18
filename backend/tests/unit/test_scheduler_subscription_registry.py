@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 from sqlalchemy import Table, create_engine, select
@@ -15,7 +16,10 @@ from backend.app.models import (
     TransportProviderKind,
     TransportProviderRecord,
 )
-from backend.app.providers.transport.resolver import TransportProviderDescriptor
+from backend.app.providers.transport.resolver import (
+    SubscriptionTransportResolver,
+    TransportProviderDescriptor,
+)
 from backend.app.workers import scheduler
 
 
@@ -141,3 +145,56 @@ def test_scheduler_resolves_each_enabled_record_and_isolates_failure(
     assert refreshed_a is not None and refreshed_a.status is ProviderStatus.DEGRADED
     assert refreshed_b is not None and refreshed_b.status is ProviderStatus.HEALTHY
     assert db_session.scalars(select(AuditLog)).all()
+
+
+def test_secret_revision_drift_fails_before_sync_and_isolates_other_record(
+    db_session: Session, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    record_a = _record(db_session, "DRIFT_A")
+    record_b = _record(db_session, "DRIFT_B")
+    resolver = SubscriptionTransportResolver(tmp_path)
+    revisions = {record_a.secret_ref: 1, record_b.secret_ref: 1}
+    sync_calls: list[str] = []
+
+    monkeypatch.setattr(
+        scheduler,
+        "get_settings",
+        lambda: type("Settings", (), {"transport_provider_mode": "subscription"})(),
+    )
+
+    def secret_factory() -> SecretSession:
+        return SecretSession([])
+
+    def load_secret(_db: object, ref: str, _purpose: str) -> SecretSnapshot:
+        return SecretSnapshot("https://provider.invalid/private", revisions[ref])
+
+    def sync_nodes(provider: object) -> None:
+        sync_calls.append(provider.provider_code)  # type: ignore[attr-defined]
+
+    monkeypatch.setattr(scheduler, "reveal_secret_snapshot_for_purpose", load_secret)
+    monkeypatch.setattr(
+        "backend.app.providers.transport.subscription.SubscriptionTransportProvider.sync_nodes",
+        sync_nodes,
+    )
+    def refresh(_db: object, record: TransportProviderRecord, provider: object) -> None:
+        sync_nodes(provider)
+
+    monkeypatch.setattr(scheduler, "refresh_provider_inventory", refresh)
+    registry = type("Registry", (), {"transport_resolver": resolver, "transport": None})()
+
+    first = scheduler.sync_transport_capacity_and_inventory(
+        db_session, registry, secret_session_factory=secret_factory
+    )
+    assert first == 2
+    assert sync_calls == ["DRIFT_A", "DRIFT_B"]
+
+    revisions[record_a.secret_ref] = 2
+    second = scheduler.sync_transport_capacity_and_inventory(
+        db_session, registry, secret_session_factory=secret_factory
+    )
+    assert second == 1
+    assert sync_calls == ["DRIFT_A", "DRIFT_B", "DRIFT_B"]
+    refreshed_a = db_session.get(TransportProviderRecord, record_a.id)
+    refreshed_b = db_session.get(TransportProviderRecord, record_b.id)
+    assert refreshed_a is not None and refreshed_a.status is ProviderStatus.DEGRADED
+    assert refreshed_b is not None and refreshed_b.status is ProviderStatus.HEALTHY
