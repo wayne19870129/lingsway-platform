@@ -35,6 +35,7 @@ from backend.app.providers.notify.noop import NoopNotifyProvider
 from backend.app.providers.payment.mock import MockPaymentProvider
 from backend.app.providers.storage.mock import MockBlobStorage
 from backend.app.providers.transport.mock import MockTransportProvider
+from backend.app.providers.transport.resolver import SubscriptionTransportResolver
 
 
 class ProviderConfigurationError(ValueError):
@@ -77,7 +78,8 @@ class ProviderRegistry:
     email: EmailProvider
     captcha: CaptchaProvider
     storage: BlobStorage
-    transport: TransportProvider
+    transport: TransportProvider | None
+    transport_resolver: SubscriptionTransportResolver | None = None
     _closed: bool = field(default=False, init=False, repr=False, compare=False)
     #: ids of providers already successfully closed (or found to have no
     #: closeable resource at all) across every close() call so far --
@@ -125,6 +127,8 @@ class ProviderRegistry:
             self.storage,
             self.transport,
         ):
+            if provider is None:
+                continue
             provider_id = id(provider)
             if provider_id in self._closed_provider_ids or provider_id in seen_this_call:
                 # Already closed in a previous call, or the identical
@@ -142,6 +146,11 @@ class ProviderRegistry:
                 errors.append(exc)
             else:
                 self._closed_provider_ids.add(provider_id)
+        if self.transport_resolver is not None:
+            try:
+                self.transport_resolver.close()
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
         if errors:
             raise ExceptionGroup(
                 "ProviderRegistry.close() failed to close one or more providers", errors
@@ -163,7 +172,11 @@ class ProviderRegistry:
 
 def build_registry(settings: Settings) -> ProviderRegistry:
     """Build all providers without external I/O or hidden provider discovery."""
-    if settings.accounting_provider == "marzban" or settings.gateway_provider == "xray_file":
+    if (
+        settings.accounting_provider == "marzban"
+        or settings.gateway_provider == "xray_file"
+        or settings.transport_provider_mode == "subscription"
+    ):
         # Settings.from_env() already validates this, but callers
         # constructing Settings directly need the same fail-closed gate.
         settings.validate_runtime_safety()
@@ -186,7 +199,7 @@ def build_registry(settings: Settings) -> ProviderRegistry:
         raise _unsupported("CAPTCHA_PROVIDER", settings.captcha_provider)
     if settings.storage_provider != "mock":
         raise _unsupported("STORAGE_PROVIDER", settings.storage_provider)
-    if settings.transport_provider_mode != "mock":
+    if settings.transport_provider_mode not in {"mock", "subscription"}:
         raise _unsupported("TRANSPORT_PROVIDER_MODE", settings.transport_provider_mode)
 
     accounting: AccountingProvider
@@ -221,6 +234,11 @@ def build_registry(settings: Settings) -> ProviderRegistry:
             deployment_config=XrayDeploymentConfig.from_settings(settings),
         )
 
+    resolver = (
+        SubscriptionTransportResolver(Path(settings.transport_cache_root))
+        if settings.transport_provider_mode == "subscription"
+        else None
+    )
     return ProviderRegistry(
         egress=MockEgressProvider(),
         accounting=accounting,
@@ -231,7 +249,8 @@ def build_registry(settings: Settings) -> ProviderRegistry:
         email=NoopEmailProvider(),
         captcha=NoopCaptchaProvider(),
         storage=MockBlobStorage(),
-        transport=MockTransportProvider(),
+        transport=MockTransportProvider() if resolver is None else None,
+        transport_resolver=resolver,
     )
 
 def _unsupported(variable: str, value: str) -> ProviderConfigurationError:

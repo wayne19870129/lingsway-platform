@@ -36,11 +36,13 @@ remain subject to the repository safeguards and explicit approval boundaries.
 
 Registry selection is explicit and construction is intended to remain zero-I/O.
 Defaults are mock/noop. Accounting mock/marzban and gateway mock/xray selection
-boundaries exist; Webshare and Subscription transport have readiness evidence
-but remain separately gated for real registry wiring. Mihomo has an accepted
-full-config and activation boundary in ADR-023, but implementation, durable
-activation/recovery, and production readiness remain separate work. Transport
-subscription cache materialization is restricted input, not Mihomo activation.
+boundaries exist; Subscription registry wiring is implemented by S03-B, while
+merge/readiness remains subject to exact-head review and checks. Mihomo
+activation, production deployment, and real-provider production authorization
+remain independent gates. Mihomo has an accepted full-config and activation
+boundary in ADR-023, but implementation, durable activation/recovery, and
+production readiness remain separate work. Transport subscription cache
+materialization is restricted input, not Mihomo activation.
 
 ## 5. Current phase and S03 boundary
 
@@ -51,22 +53,26 @@ subscription cache materialization is restricted input, not Mihomo activation.
   mapping, opaque secret references, per-record cache isolation, registry-owned
   lazy provider lifecycle, zero-I/O construction, and scheduler failure
   isolation.
-- **S03-B:** Registry wiring is the next implementation step but remains
-  blocked until S03-A acceptance and exact-head review are complete. It must
-  not invent DB-aware generic provider contracts, plaintext URL configuration,
-  mutable current-provider state, mock fallback, or Mihomo activation.
+- **S03-B:** Implements the accepted descriptor-based resolver,
+  secret revision/snapshot boundary, lazy registry ownership, isolated cache
+  identity, and scheduler record isolation. It must not invent DB-aware generic
+  provider contracts, plaintext URL configuration, mutable current-provider
+  state, mock fallback, or Mihomo activation. Merge/readiness still depends on
+  exact-head review and green checks; after merge, subscription registry wiring
+  is implemented, but this does not authorize Mihomo activation or production
+  deployment.
 
 ## 6. Current blockers and carry-over
 
-Before S03-B, independently verify the exact mutable GitHub state and confirm
-ADR-024 remains the accepted contract. S03-B must implement the scheduler to
-produce immutable provider-neutral descriptors from current DB records, let a
-process-lifetime registry resolver lazily create and retain providers, resolve
-secrets only at explicit sync time, isolate cache identity, and fail closed on
-identity/configuration drift. New records may be created lazily; unchanged
-descriptors reuse their instance; incompatible changes require controlled
-replacement or restart. No schema, production activation, deployment, or real
-provider request is included in S03-A.
+Before resuming S03-B, independently verify the exact mutable GitHub state and
+confirm ADR-024 remains the accepted contract. The implementation produces
+immutable provider-neutral descriptors from current DB records, lets a
+process-lifetime registry resolver lazily create and retain providers, resolves
+purpose-bound secrets in a short transaction before network I/O, isolates cache
+identity, and fails closed on descriptor or secret-revision drift. New records
+may be created lazily; unchanged descriptors reuse their instance; incompatible
+changes require controlled replacement or restart. No Mihomo activation,
+deployment, or real provider request is included.
 
 ## 7. S03-A delivery reference
 

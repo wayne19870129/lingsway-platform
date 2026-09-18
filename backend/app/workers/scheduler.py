@@ -12,6 +12,11 @@ from sqlalchemy import select
 
 from backend.app.core.config import get_settings
 from backend.app.core.database import SessionLocal
+from backend.app.core.secrets import (
+    SecretSnapshot,
+    SecretStoreError,
+    reveal_secret_snapshot_for_purpose,
+)
 from backend.app.models import (
     AuditLog,
     ProviderStatus,
@@ -21,8 +26,11 @@ from backend.app.models import (
     TransportProviderRecord,
     UsagePeriod,
 )
-from backend.app.providers.base import AccountingProvider
+from backend.app.providers.base import AccountingProvider, TransportProvider
 from backend.app.providers.registry import ProviderRegistry, build_registry
+from backend.app.providers.transport.resolver import (
+    TransportProviderDescriptor,
+)
 from backend.app.workers.accounting_sync import (
     reconcile_usage_period_cache,
     run_next_usage_job,
@@ -54,7 +62,11 @@ def build_scheduler_registry() -> ProviderRegistry:
     return build_registry(get_settings())
 
 
-def sync_transport_capacity_and_inventory(db: Any, registry: ProviderRegistry) -> int:
+def sync_transport_capacity_and_inventory(
+    db: Any,
+    registry: ProviderRegistry,
+    secret_session_factory: Callable[[], Any] = SessionLocal,
+) -> int:
     records = db.scalars(
         select(TransportProviderRecord).where(
             TransportProviderRecord.enabled.is_(True),
@@ -62,9 +74,37 @@ def sync_transport_capacity_and_inventory(db: Any, registry: ProviderRegistry) -
         )
     ).all()
     completed = 0
+    settings = get_settings()
     for record in records:
         try:
-            refresh_provider_inventory(db, record, registry.transport)
+            provider: TransportProvider
+            if settings.transport_provider_mode == "subscription":
+                if registry.transport_resolver is None:
+                    raise RuntimeError("Subscription transport resolver is unavailable")
+                descriptor = TransportProviderDescriptor(
+                    record_id=record.id,
+                    code=record.code,
+                    kind=record.kind.value,
+                    secret_ref=record.secret_ref,
+                )
+
+                def secret_loader(secret_ref: str, purpose: str) -> SecretSnapshot:
+                    secret_db = secret_session_factory()
+                    try:
+                        return reveal_secret_snapshot_for_purpose(
+                            secret_db, secret_ref, purpose
+                        )
+                    except SecretStoreError as exc:
+                        raise RuntimeError("TRANSPORT_SECRET_UNAVAILABLE") from exc
+                    finally:
+                        secret_db.close()
+
+                provider = registry.transport_resolver.resolve(descriptor, secret_loader)
+            else:
+                if registry.transport is None:
+                    raise RuntimeError("Mock transport provider is unavailable")
+                provider = registry.transport
+            refresh_provider_inventory(db, record, provider)
         except Exception:
             db.rollback()
             failed = db.get(TransportProviderRecord, record.id)
@@ -126,7 +166,9 @@ def run_batch(
     settings = get_settings()
     runtime_gateway = None if settings.gateway_provider == "xray_file" else registry.gateway
     with db_factory() as db:
-        transport_records = sync_transport_capacity_and_inventory(db, registry)
+        transport_records = sync_transport_capacity_and_inventory(
+            db, registry, secret_session_factory=db_factory
+        )
         reconciled = run_pending_reconcile(
             db, registry.accounting, settings.accounting_sync_batch_size
         )

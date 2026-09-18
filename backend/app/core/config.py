@@ -53,6 +53,7 @@ class Settings:
     admin_initial_email: str = "admin@example.com"
     admin_initial_password: str = "CHANGE_ME"
     transport_provider_mode: str = "mock"
+    transport_cache_root: str = "/app/data/transport"
     cors_origins: str = "http://localhost:3000"
 
     def __post_init__(self) -> None:
@@ -87,6 +88,10 @@ class Settings:
         return settings
 
     def validate_runtime_safety(self) -> None:
+        if self.transport_provider_mode == "subscription" and not self.transport_cache_root.strip():
+            raise ValueError(
+                "TRANSPORT_CACHE_ROOT must not be blank when subscription transport is selected"
+            )
         if self.app_env == "production" and (
             self.jwt_secret.startswith("development-") or len(self.jwt_secret) < 32
         ):
