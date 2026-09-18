@@ -236,86 +236,115 @@ Claude 的产出形态是：ADR、TASK 文件、`docs/81-reviews/REVIEW-*.md`、
 
 ---
 
-## 5. 当前状态与下一步（2026-09-18 快照 —— 会过期）
+## 5. 派发队列（Claude 维护，你直接照这个派活）
 
-> ⚠️ 本节是写下它那一刻的事实，**不会自动更新**。把它当**背景**，不要当
-> **依据**——要基于事实做判断时，按 §1 重新核对（注意其中一部分可能还在
-> 未合并的分支上，你默认看不到）。
+> **这一节是 Claude Code 的责任，不是快照。** 每当 Claude 落地一个新的
+> ADR 或 TASK，它必须在**同一个 PR 里**更新本节——所以你读到的就是当前
+> 可派发的真实状态，不需要任何人再口头转述一遍。
+>
+> 唯一仍需你自己核对的是**未合并分支**：本节写的是 `main` 上的状态，
+> 刚推上去还没合并的东西看不到（见 §1）。
+>
+> 最后更新：2026-09-18，由 ADR-027 / TASK-S07 那一轮更新。
 
-### 代码健康度
+### 5.1 可以立刻派给 Codex
+
+| # | 任务 | TASK 文件 | 闸门状态 |
+|---|---|---|---|
+| 1 | **S04-B2-B** Mihomo 运行时实现 | `docs/82-tasks/TASK-S04-mihomo-activation.md` | ✅ 两道闸门都已满足（ADR-025 已合并、TASK 已合并）。**必须与 S04-C 分成两个 PR** |
+
+派活时提醒 Codex：B2-B 结束时要有测试证明 `FORWARDER_PROVIDER=mihomo`
+**仍然**被 `build_registry()` 拒绝——防止"接线"顺手变成"激活"。
+
+### 5.2 架构已就绪，但在等 User 拍板
+
+| # | 任务 | TASK 文件 | 卡在哪 |
+|---|---|---|---|
+| 2 | **S07** 订单队列计费（续费/加购） | `docs/82-tasks/TASK-S07-order-queue-billing.md` | ⏸ **ADR-027 仍是 `Proposed`**。需 User 确认其中第 7 条：`RENEWAL` 与 `ADDON` 合并为同一操作。确认前不得开工 |
+
+**不要因为 TASK 文件已经存在就派活。** TASK 自己的「约束」第一条就写着
+ADR 未「已接受」不得开始——Codex 如果照做会正确地停下来，但那是浪费一轮。
+
+#### S07 计费模型速览（权威在 ADR-027，这里是让你拆任务用的）
+
+User 已拍板，模型本身不再变动，只等第 7 条的形式确认：
+
+- **只有一张价目表**：四档（50GB/¥30、100GB/¥50、200GB/¥80、500GB/¥120，
+  30 天，CNY）。**没有独立加购 SKU，也没有加购价格。**"加购"就是再买一单。
+- **入队时机 = 付款确认时**。立即创建一个 `QUEUED` 周期挂到订阅。
+  不是下单时，也不是激活时。
+- **排队期间对当前单零影响**：不改额度、不改到期、不写账务 provider、
+  不动 token。客户在当前周期内看不到任何变化——**前端必须显示
+  "已购待生效"**，否则会被当成钱没到账。
+- **出队条件 = 额度用完 或 到期，先到者生效**。两者语义完全等价。
+- **出队后**：队首变 `ACTIVE`，`period_start` = 激活时刻，
+  `period_end` = 激活时刻 + 30 天。**剩余额度不结转。**
+- **队列为空时才进 `GRACE`**。有排队单就直接顶上，不让已付款的客户等 24 小时。
+- **订阅链接全程不变**（`token_hash` 挂在 `Subscription` 上，已是现状）。
+- 每次滚动都要写账务 provider（`set_quota` + `set_expire`），
+  **复用 ADR-026 的补偿契约**：补偿失败 ⇒ `PENDING_MANUAL`，账务用户永不 DELETE。
+
+派活时要让 Codex 知道的现状：`apply_renewal` / `apply_upgrade` /
+`apply_addon` **三个全是 stub**（`api/admin.py:159-169`），
+**周期滚动代码零行**（`apply_expiry_policy()` 自己的 docstring 就写着
+不碰周期边界）。这是从零做，不是改现有逻辑。
+
+### 5.3 还缺 TASK 文件，派活前要先补
+
+| # | 任务 | 为什么优先 | 为什么还不能派 |
+|---|---|---|---|
+| 3 | **`ops/backup/` 备份恢复工具** | 通往生产的**硬闸门**：`deploy/lib/70_verify.sh` 的 `check_13_backup` 在脚本缺失时直接判失败，部署跑到验收必红。同时卡着 `AGENTS.md` 的生产 alembic 授权 | 触及 `ops/`、`deploy/`、加密备份 → 触发 §2.1 门槛，**必须先有 TASK 文件**。需求见 `docs/30-backup-restore.md` |
+| 4 | **客户端配置指南** | 低风险、无后端依赖，可与 1–3 并行。是"订阅能生成"和"客户能自己用"之间唯一的缺口 | 只碰 `frontend/app/(docs)/guides/**`，**不触发门槛**，可以直接派，PR 描述即记录 |
+
+第 3 项的 TASK 由你写或叫 Claude 写都可以（`docs/82-tasks/` 是 Claude 独占，
+所以你写好草稿也要走 Claude 落地）。
+
+### 5.4 明确不要现在碰
+
+- **Webshare 接线**：`capacity()` 和 `get_tenant_usage()` 是 fail-closed
+  抛错的（API 契约未实测确认单位），接了开通第 1 步就会失败。前置是补
+  `docs/70-external-facts.md` 的实测证据，**不是改代码**。
+- **TASK-T13 分流**：按 ADR-012 就该等外部实测证据，不要因为别的活准备好了
+  就把它提上来。
+- **S04-C**：必须等 S04-B2-B 合并后单独一个 PR。
+
+### 5.5 代码健康度与 provider 接线
 
 `ruff`（含 `ops/` 与 `infrastructure/`）、`mypy --strict`（128 文件）、
 596 个 unit+guard 测试全绿；前端 `tsc` / `eslint` / `next build` 全绿。
 23 个 Alembic migration 单根单头无分叉。`domain/` 层零外部依赖。
-**代码质量是好的。**
-
-### provider 接线矩阵
 
 | Provider | 真实实现可达？ |
 |---|---|
 | accounting（Marzban） | ✅ 已接通 |
 | gateway（Xray） | ✅ 已接通 |
 | transport（subscription） | ✅ 已接通 |
-| egress（Webshare） | ❌ 被挡住 |
+| egress（Webshare） | ❌ 被挡住（见 5.4） |
 | forwarder（Mihomo） | ❌ 被挡住（S04 闸门） |
 | payment/notify/email/captcha/storage | ❌ 只有 mock/noop |
 
-### S04 当前位置
+### 5.6 需要 User 决定的事（不解决就会一直卡着）
 
-- **S04-B2-A：已合并**（PR #128）。产出 **ADR-025**（projection generation
-  authority + durable transport materialization receipt）与
-  `TASK-S04-mihomo-activation.md`。
-- **S04-B2-B：未开始**，两道闸门都已满足（ADR-025 已随 PR 合并、TASK-S04
-  已合并）——**这是现在可以派给 Codex 的最大一块活**。
-- **S04-C：未开始**，必须等 B2-B 合并后单独一个 PR。
+1. **ADR-027 第 7 条**：`RENEWAL` 与 `ADDON` 合并。卡住 S07。
+2. **「未用完额度作废」的对客文案**：这是条款不是实现细节，上线前要定。
+3. **`plans` 表的四行要人工核对** —— 仓库里没有任何代码创建 `Plan` 行
+   （`60_seed.sh` 刻意拒绝隐式种子数据），所以 `catalog.py` 定的价格只是
+   声明。**特别是 `currency`：如果库里现存行是 `USD`，客户会看到
+   "30 USD" 而不是 ¥30，且经 `Order.currency` 带到订单上。**
 
-### 下一步顺序（派活就按这个顺序）
-
-**第 1 位：`ops/backup/` 备份恢复工具。**
-通往生产的**硬闸门**。`deploy/lib/70_verify.sh` 的 `check_13_backup` 在脚本
-缺失时直接判失败，部署跑到验收必红。不是"能不能延后"，是"不做就上不了线"。
-同时它还卡着 `AGENTS.md` 的生产 alembic 授权。要求见 `docs/30-backup-restore.md`。
-**这项还没有 TASK 文件**（触及 `ops/`、`deploy/`、加密与备份 → 触发门槛），
-派活前先让 Claude 或你自己写一份。
-
-**第 2 位：S04-B2-B。**
-TASK 已就绪：`docs/82-tasks/TASK-S04-mihomo-activation.md`，里面有逐文件的
-允许路径、两张表的 planned schema、以及 receipt 的 producer/commit/crash 契约。
-**必须与 S04-C 分成两个 PR**，B2-B 结束时要有测试证明
-`FORWARDER_PROVIDER=mihomo` 仍被拒绝。
-
-**第 3 位：客户端配置指南**（`frontend/app/(docs)/guides/*` 现在只有空目录）。
-低风险、无后端依赖，可与 1、2 并行。是"订阅能生成"和"客户能自己用"之间
-唯一的缺口。
-
-**Webshare 不要急着接线**：`capacity()` 和 `get_tenant_usage()` 是 fail-closed
-抛错的（API 契约未实测确认单位），开通第 1 步就会失败。前置是补
-`docs/70-external-facts.md` 的实测证据，不是改代码。
-
-**TASK-T13（分流）保持阻塞**，按 ADR-012 等外部实测证据。
-
-### 还开着的问题（continuity §8 有完整清单）
+### 5.7 还开着的技术债（continuity §8 有完整清单）
 
 - `ops/**` 有 ruff 了但**没有 mypy**（脚本未加类型标注）。
-- **套餐价格声明了但还没生效。** 目录已定（`backend/app/catalog.py`：
-  50GB/¥30、100GB/¥50、200GB/¥80、500GB/¥120，30 天周期，CNY），但
-  `plans` 表由仓库之外的手段填充，仓库里没有任何代码创建 `Plan` 行。
-  上线前必须人工核对库里现存的四行——**特别是 `currency`，如果是 `USD`，
-  客户会看到 "30 USD" 而不是 ¥30，且经 `Order.currency` 带到订单上。**
-- ~~加购（ADDON）是否要卖、卖多少钱~~ **已拍板（2026-09-18）**：加购就是
-  再买一单，**只有四档那一张价目表，没有独立加购 SKU 也没有加购价格**。
-  订单排队，当前单额度用完或到期（先到者）才顶上下一单，订阅链接不变。
-  架构见 **ADR-027**，实现见 **TASK-S07-order-queue-billing.md**
-  （ADR-027 需 User 确认「已接受」后才能开工，尤其其中
-  `RENEWAL`/`ADDON` 合并那一条）。`addon_*_price` 三个死配置已删除。
 - 前端组件一行一个组件写（单行 1000+ 字符），不可 diff 不可审查。
 - `ops/status.py`、`frontend/lib/api.ts` 真正的类型化客户端——都还不存在。
 
-### 编号防撞（2026-09-18 踩过）
+### 5.8 编号防撞（2026-09-18 踩过）
 
 两个并行分支同一天各自认领了 ADR-025 **和** `TASK-S04-mihomo-activation.md`，
 其中只有一个被 git 判为冲突，另一个差点静默合入。**认领新的 ADR / TASK 编号
 时，要对着当前 `main` 加上所有 open PR 一起查，不能只看 `main`。**
+
+当前已用到：ADR-027、TASK-S07。下一个分别是 ADR-028、TASK-S08。
 
 ## 6. 三条别忘的底线
 
