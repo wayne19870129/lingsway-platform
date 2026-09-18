@@ -106,7 +106,7 @@ S03-B 只能按以下合同实施：
 5. 订阅同步/缓存物化不是 Mihomo activation。S03-B 不得安装、reload、apply
    或宣称 Mihomo production readiness；默认仍是 mock/noop，真实 subscription
    必须显式选择。
-6. 若 S03-B 需要修改 `backend/app/providers/base.py`，仅限 ADR-024 第 7 节
+6. 若 S03-B 需要修改 `backend/app/providers/base.py`，仅限 ADR-024 第 8 节
    授权的最小 provider-neutral identity/ownership/lifecycle contract；不得引入
    Session/ORM、明文 secret 或 activation API。更大范围变更须先新增或修订 ADR。
 

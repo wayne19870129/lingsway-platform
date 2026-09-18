@@ -1,6 +1,6 @@
 # ADR-024 — Transport multi-provider selection and ownership boundary
 
-状态：Proposed for S03-A acceptance
+状态：Accepted
 日期：2026-09-17
 范围：`TransportProviderRecord`、Subscription transport registry wiring、scheduler inventory sync
 
@@ -37,23 +37,42 @@ instance is bound to exactly one record code.
 ### 2. Deterministic resolver boundary
 
 S03-B will add a registry-owned, immutable transport resolver/factory boundary.
-Conceptually:
+The concrete boundary is:
 
 ```text
-TransportProviderRecord.code
-    -> exact configured provider definition
+DB TransportProviderRecord
+    -> scheduler-owned immutable TransportProviderDescriptor
+    -> registry-owned lazy resolver/factory
     -> one provider instance owned by ProviderRegistry
 ```
 
-The resolver is assembled once at the process ownership boundary from explicit
-configuration and injected secret-resolution capability. It exposes a lookup
-operation keyed by the record code. It must reject, before any sync:
+The scheduler reads each enabled record and creates a provider-neutral
+descriptor containing only `record_id`, `code`, `kind`, `secret_ref`, and the
+validated implementation identifier (if the selected transport mode requires
+one). The descriptor is an immutable value, not a SQLAlchemy ORM object. The
+generic provider contract never receives a Session, ORM record, or database
+query capability.
+
+`build_registry(settings)` constructs the registry and an empty resolver only;
+it performs neither DB I/O nor network I/O. The resolver accepts a descriptor
+and an operation-scoped secret-resolution capability at the scheduler sync
+boundary. It lazily constructs the concrete provider on first resolution,
+using the descriptor's identity/configuration and resolving `secret_ref` only
+for that explicit operation. It retains every created provider in the
+registry-owned resolver so the existing registry `close()` path can close all
+owned clients deterministically. No plaintext URL is stored in Settings or in
+the descriptor.
+
+The resolver lookup is exact on the full descriptor identity, not code alone.
+It must reject, before any sync:
 
 - an unknown record code;
 - duplicate configured definitions or duplicate runtime identities;
 - a definition whose kind, implementation, secret reference, or cache identity
   is missing, unsupported, or ambiguous; and
-- a record mapped to more than one concrete provider.
+- a record mapped to more than one concrete provider; and
+- a descriptor whose identity differs from the identity recorded for an
+  already-cached provider instance.
 
 There is no mutable “current provider”, ambient context, code-based fallback,
 or fallback to mock. A lookup failure is a provider-specific failed sync and
@@ -88,12 +107,11 @@ reference.
 ### 4. Cache isolation
 
 Every concrete subscription provider receives a deterministic cache identity
-derived from the owning record identity, not from a shared provider mode or a
-human alias alone. The implementation must bind the tuple
-`(record primary key, record code, provider implementation)` to exactly one
-cache path under the configured transport-cache root. The path is created and
-validated by the resolver/factory; it is not discovered from the subscription
-URL.
+derived from the owning descriptor, not from a shared provider mode or a human
+alias alone. The implementation must bind the tuple
+`(record_id, code, kind, implementation)` to exactly one cache path under the
+configured transport-cache root. The path is created and validated by the
+resolver/factory; it is not discovered from the subscription URL.
 
 Provider A may write only its own cache and provider B may read only its own
 cache. A mismatch between the record identity, provider code, or cache identity
@@ -111,7 +129,27 @@ another provider's close fails. Construction, resolver assembly, and Settings
 loading perform zero external network I/O. Subscription HTTP fetches and cache
 writes occur only inside the explicit scheduler sync path.
 
-### 6. Scheduler contract and failure isolation
+### 6. Runtime descriptor drift
+
+The scheduler rebuilds a descriptor from the current DB row on every sync
+batch. A new valid descriptor is lazily given a new owned provider instance.
+An unchanged descriptor reuses the exact existing instance. For an existing
+`record_id`, any change to `code`, `kind`, `secret_ref`, implementation, or
+derived cache identity is incompatible drift: the resolver fails closed for
+that record, marks its sync degraded through the existing scheduler failure
+path, and does not mutate or silently replace the cached provider. Controlled
+replacement requires a process restart or a separately designed replacement
+lifecycle before a later implementation; it is not inferred by S03-B.
+
+Disabling a record removes it from the scheduler descriptor set but does not
+destroy or reuse its provider during the current process lifetime. Its owned
+resources are closed by the normal registry shutdown. Re-enabling a record
+with the same descriptor may reuse the retained instance; re-enabling with
+incompatible identity/configuration remains fail-closed drift. A changed code
+is therefore never allowed to redirect an old provider instance to a new
+record identity.
+
+### 7. Scheduler contract and failure isolation
 
 For each enabled subscription record, the scheduler must resolve the concrete
 provider using that record's exact code, then call:
@@ -128,7 +166,7 @@ resolution and sync failures per record, rolls back only that record's failed
 transaction, marks it degraded, and continues the batch. One provider failure
 must not prevent other records from being refreshed.
 
-### 7. Provider/base boundary
+### 8. Provider/base boundary
 
 S03-B may add a provider-specific resolver/factory protocol adjacent to the
 transport registry boundary. It may not make the generic domain contract
@@ -139,7 +177,7 @@ plaintext credentials, SQLAlchemy imports, a global current-provider field, or
 Mihomo activation methods. Any broader base-contract change requires a new ADR
 or an amendment accepted before implementation.
 
-### 8. Mihomo boundary and defaults
+### 9. Mihomo boundary and defaults
 
 Subscription fetch, parsing, and isolated cache materialization are not Mihomo
 install, reload, apply, or activation. S03-A and S03-B must not perform those
