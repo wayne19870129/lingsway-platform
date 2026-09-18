@@ -89,7 +89,9 @@ backend/tests/integration/test_models.py
 frontend/app/(customer)/subscriptions/page.tsx
 frontend/app/(customer)/subscriptions/[id]/page.tsx
 frontend/app/(customer)/orders/new/page.tsx
-docs/80-decisions/ADR-027-order-queue-billing-model.md         # 仅状态改为「已接受」
+frontend/app/(customer)/plans/page.tsx
+frontend/app/(customer)/orders/page.tsx
+frontend/app/(admin)/admin/orders/page.tsx
 docs/82-tasks/TASK-S07-order-queue-billing.md
 docs/83-project-continuity.md
 ```
@@ -135,6 +137,12 @@ cd frontend && npx tsc --noEmit && npx eslint . --max-warnings=0 && npm run buil
 - 下单页明确写出两条客户条款：
   - **额度用完或到期，先到者结束本单**；
   - **未用完的额度不结转**。
+- **金额显示改成 `¥30` 而不是 `30 CNY`**（ADR-028）。当前四处渲染的都是
+  `{price} {currency}`：`(customer)/plans/page.tsx`、
+  `(customer)/orders/new/page.tsx`、`(customer)/orders/page.tsx`、
+  `(admin)/admin/orders/page.tsx`。前三处本任务本来就要动；第四处
+  （admin）一并改，已加入允许路径。
+  系统只有人民币一种币种，**不要为此引入 i18n 或货币格式化库**。
 
 ## 人工检查
 

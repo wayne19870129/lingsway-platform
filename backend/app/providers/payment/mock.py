@@ -13,7 +13,9 @@ class MockPaymentProvider:
 
     def create_intent(self, order: object) -> PaymentIntentDTO:
         raise_injected(self.failures, "create_intent")
-        return PaymentIntentDTO("payment-mock-1", "pending", Decimal(), "USD")
+        # ADR-028: CNY is the only currency this system has; the mock must not
+        # demonstrate one that does not exist.
+        return PaymentIntentDTO("payment-mock-1", "pending", Decimal(), "CNY")
 
     def confirm_manual(self, order: object, reference: str) -> None:
         raise_injected(self.failures, "confirm_manual")
