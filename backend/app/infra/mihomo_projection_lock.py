@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.infra.mihomo_blocker import (
     MIHOMO_BLOCKER_KIND_LOCK_RELEASE,
+    MIHOMO_DURABLE_STATE_UNKNOWN,
     MIHOMO_LOCK_RELEASE_PENDING,
     MIHOMO_LOCK_RELEASE_UNKNOWN,
     ensure_mihomo_blocker,
@@ -20,6 +21,7 @@ DEFAULT_LOCK_TIMEOUT_SECONDS = 30
 _LOCK_NAME_MAX_LENGTH = 64
 SESSION_INFO_LOCK_HELD_KEY = "mihomo_projection_lock_held"
 SESSION_INFO_RELEASE_METADATA_KEY = "mihomo_projection_release_metadata"
+SESSION_INFO_DURABLE_STATE_UNKNOWN_KEY = "mihomo_durable_state_unknown"
 
 
 class MihomoProjectionLockError(RuntimeError):
@@ -99,6 +101,9 @@ def mihomo_projection_write(
             yield
         finally:
             metadata = session.info.get(SESSION_INFO_RELEASE_METADATA_KEY)
+            durable_state_unknown = bool(
+                session.info.get(SESSION_INFO_DURABLE_STATE_UNKNOWN_KEY, False)
+            )
             if isinstance(metadata, dict):
                 try:
                     session.rollback()
@@ -110,6 +115,8 @@ def mihomo_projection_write(
                         snapshot_revision=metadata.get("snapshot_revision"),
                         reason_code=MIHOMO_LOCK_RELEASE_PENDING,
                     )
+                    if durable_state_unknown:
+                        release_blocker.last_error_code = MIHOMO_DURABLE_STATE_UNKNOWN
                     session.commit()
                 except Exception as exc:
                     session.rollback()
@@ -130,7 +137,7 @@ def mihomo_projection_write(
                 raise MihomoProjectionLockError(
                     "Mihomo projection lock release outcome is unknown"
                 ) from exc
-            if release_blocker is not None:
+            if release_blocker is not None and not durable_state_unknown:
                 try:
                     session.rollback()
                     resolve_mihomo_blocker(release_blocker)
@@ -143,6 +150,7 @@ def mihomo_projection_write(
     finally:
         session.info[SESSION_INFO_LOCK_HELD_KEY] = previous
         session.info.pop(SESSION_INFO_RELEASE_METADATA_KEY, None)
+        session.info.pop(SESSION_INFO_DURABLE_STATE_UNKNOWN_KEY, None)
         connection.close()
 
 

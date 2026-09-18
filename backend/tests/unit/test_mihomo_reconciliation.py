@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Generator
-from contextlib import nullcontext
+from collections.abc import Callable, Generator
+from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import cast
@@ -16,11 +16,13 @@ from backend.app.infra import mihomo_reconciliation as reconciliation
 from backend.app.infra.mihomo_blocker import (
     MIHOMO_BLOCKER_KIND_FINALIZATION,
     MIHOMO_BLOCKER_KIND_LOCK_RELEASE,
+    MIHOMO_DURABLE_STATE_UNKNOWN,
     MIHOMO_LOCK_RELEASE_PENDING,
     MIHOMO_RECONCILE_BLOCKER_JOB_TYPE,
     MihomoBlockerError,
     ensure_mihomo_blocker,
 )
+from backend.app.infra.mihomo_projection_lock import SESSION_INFO_DURABLE_STATE_UNKNOWN_KEY
 from backend.app.infra.mihomo_reconciliation import (
     MIHOMO_FINALIZATION_UNKNOWN,
     MIHOMO_ROLLBACK_UNKNOWN,
@@ -548,6 +550,254 @@ def test_ack_loss_after_durable_commit_is_landed_without_downgrade(
     assert release_blocker.status is JobStatus.PENDING
 
 
+def test_unknown_marker_precommit_failure_keeps_release_fallback_and_blocks_newer(
+    db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    enqueue_mihomo_reconciliation(
+        db, operation_id="op-r5-marker-before", operation_kind="RECONCILE", snapshot_revision=1
+    )
+    db.commit()
+    provider = _Provider()
+    original_commit = db.commit
+    calls = 0
+
+    def fail_marker_commit() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("marker commit failed before durable write")
+        original_commit()
+
+    monkeypatch.setattr(db, "commit", fail_marker_commit)
+    with pytest.raises(reconciliation.MihomoCommitOutcomeUnknown):
+        _reconcile_with_fake_lock(
+            db,
+            provider,
+            _Verifier(RuntimeError("verifier outcome unknown")),
+            monkeypatch,
+            durable_fallback=True,
+        )
+
+    source = db.get(Job, 1)
+    assert source is not None
+    assert source.status is JobStatus.RUNNING
+    assert source.last_error_code is None
+    blocker = db.scalar(
+        select(Job).where(
+            Job.job_type == MIHOMO_RECONCILE_BLOCKER_JOB_TYPE,
+            Job.dedupe_key == "MIHOMO_BLOCKER:LOCK_RELEASE:1",
+        )
+    )
+    assert blocker is not None
+    assert blocker.status is JobStatus.PENDING
+    assert blocker.last_error_code == MIHOMO_DURABLE_STATE_UNKNOWN
+
+    enqueue_mihomo_reconciliation(
+        db,
+        operation_id="op-r5-marker-before-newer",
+        operation_kind="RECONCILE",
+        snapshot_revision=1,
+    )
+    db.commit()
+    newer_provider = _Provider()
+    assert (
+        _reconcile_with_fake_lock(
+            db,
+            newer_provider,
+            _Verifier(ProjectionVerification(True, "readback-v1")),
+            monkeypatch,
+        )
+        is None
+    )
+    assert newer_provider.apply_count == 0
+
+
+def test_unknown_marker_ack_loss_is_not_retryable_and_keeps_release_fallback(
+    db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    enqueue_mihomo_reconciliation(
+        db, operation_id="op-r5-marker-ack", operation_kind="RECONCILE", snapshot_revision=1
+    )
+    db.commit()
+    provider = _Provider()
+    original_commit = db.commit
+    calls = 0
+
+    def commit_then_lose_marker_ack() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            original_commit()
+            raise RuntimeError("marker commit acknowledgement lost")
+        original_commit()
+
+    monkeypatch.setattr(db, "commit", commit_then_lose_marker_ack)
+    with pytest.raises(reconciliation.MihomoCommitOutcomeUnknown):
+        _reconcile_with_fake_lock(
+            db,
+            provider,
+            _Verifier(RuntimeError("verifier outcome unknown")),
+            monkeypatch,
+            durable_fallback=True,
+        )
+
+    source = db.get(Job, 1)
+    assert source is not None
+    assert source.status is JobStatus.RUNNING
+    assert source.last_error_code == MIHOMO_RUNTIME_UNKNOWN
+    blocker = db.scalar(
+        select(Job).where(
+            Job.job_type == MIHOMO_RECONCILE_BLOCKER_JOB_TYPE,
+            Job.dedupe_key == "MIHOMO_BLOCKER:LOCK_RELEASE:1",
+        )
+    )
+    assert blocker is not None
+    assert blocker.status is JobStatus.PENDING
+    assert blocker.last_error_code == MIHOMO_DURABLE_STATE_UNKNOWN
+
+
+def test_apply_unknown_blocker_commit_failure_uses_release_fallback(
+    db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    enqueue_mihomo_reconciliation(
+        db, operation_id="op-r5-apply-unknown", operation_kind="RECONCILE", snapshot_revision=1
+    )
+    db.commit()
+    provider = _Provider()
+    provider.apply_result = SimpleNamespace(applied=False)
+    original_commit = db.commit
+    calls = 0
+
+    def fail_finalization_blocker_commit() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("finalization blocker commit failed")
+        original_commit()
+
+    monkeypatch.setattr(db, "commit", fail_finalization_blocker_commit)
+    with pytest.raises(reconciliation.MihomoCommitOutcomeUnknown):
+        _reconcile_with_fake_lock(
+            db,
+            provider,
+            _Verifier(ProjectionVerification(True, "readback-v1")),
+            monkeypatch,
+            durable_fallback=True,
+        )
+
+    source = db.get(Job, 1)
+    assert source is not None
+    assert source.status is JobStatus.RUNNING
+    assert source.last_error_code is None
+    release_blocker = db.scalar(
+        select(Job).where(
+            Job.job_type == MIHOMO_RECONCILE_BLOCKER_JOB_TYPE,
+            Job.dedupe_key == "MIHOMO_BLOCKER:LOCK_RELEASE:1",
+        )
+    )
+    assert release_blocker is not None
+    assert release_blocker.status is JobStatus.PENDING
+    assert release_blocker.last_error_code == MIHOMO_DURABLE_STATE_UNKNOWN
+
+
+def test_rollback_unknown_marker_persistence_failure_is_not_retryable(
+    db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    enqueue_mihomo_reconciliation(
+        db,
+        operation_id="op-r5-rollback-unknown",
+        operation_kind="RECONCILE",
+        snapshot_revision=1,
+    )
+    db.commit()
+    provider = _Provider()
+    provider.apply_error = MihomoRollbackUnknownError()
+    original_commit = db.commit
+    calls = 0
+
+    def fail_rollback_marker_commit() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("rollback unknown marker commit failed")
+        original_commit()
+
+    monkeypatch.setattr(db, "commit", fail_rollback_marker_commit)
+    with pytest.raises(reconciliation.MihomoCommitOutcomeUnknown):
+        _reconcile_with_fake_lock(
+            db,
+            provider,
+            _Verifier(ProjectionVerification(True, "readback-v1")),
+            monkeypatch,
+            durable_fallback=True,
+        )
+
+    source = db.get(Job, 1)
+    assert source is not None
+    assert source.status is JobStatus.RUNNING
+    assert source.last_error_code is None
+    release_blocker = db.scalar(
+        select(Job).where(
+            Job.job_type == MIHOMO_RECONCILE_BLOCKER_JOB_TYPE,
+            Job.dedupe_key == "MIHOMO_BLOCKER:LOCK_RELEASE:1",
+        )
+    )
+    assert release_blocker is not None
+    assert release_blocker.status is JobStatus.PENDING
+    assert release_blocker.last_error_code == MIHOMO_DURABLE_STATE_UNKNOWN
+
+
+def test_unknown_current_read_failure_becomes_typed_and_keeps_fallback(
+    db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job = enqueue_mihomo_reconciliation(
+        db, operation_id="op-r5-read-failure", operation_kind="RECONCILE", snapshot_revision=1
+    )
+    job.status = JobStatus.RUNNING
+    db.commit()
+    monkeypatch.setattr(
+        reconciliation,
+        "classify_finalization_outcome",
+        lambda *args, **kwargs: CommitOutcome.UNKNOWN,
+    )
+    original_scalar = cast(Callable[..., object], db.scalar)
+    failed = False
+
+    def fail_current_read(*args: object, **kwargs: object) -> object:
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise RuntimeError("current read failed")
+        return original_scalar(*args, **kwargs)
+
+    monkeypatch.setattr(db, "scalar", fail_current_read)
+
+    db.info["mihomo_projection_release_metadata"] = {
+        "source_job_id": job.id,
+        "operation_id": "op-r5-read-failure",
+        "snapshot_revision": 1,
+    }
+    with (
+        pytest.raises(reconciliation.MihomoCommitOutcomeUnknown),
+        _fake_lock_with_durable_fallback(db),
+    ):
+        _mark_unknown(
+            db,
+            job.id,
+            operation_id="op-r5-read-failure",
+            operation_kind="RECONCILE",
+            snapshot_revision=1,
+            candidate_fingerprint="projection-v1",
+            diagnostic=MIHOMO_FINALIZATION_UNKNOWN,
+        )
+
+    assert db.info.get(SESSION_INFO_DURABLE_STATE_UNKNOWN_KEY) is None
+    release_blocker = db.get(Job, 2)
+    assert release_blocker is not None
+    assert release_blocker.status is JobStatus.PENDING
+    assert release_blocker.last_error_code == MIHOMO_DURABLE_STATE_UNKNOWN
+
+
 def test_commit_before_durable_write_is_absent_and_retryable(
     db: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -851,9 +1101,18 @@ def _reconcile_with_fake_lock(
     provider: _Provider,
     verifier: _Verifier,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    durable_fallback: bool = False,
 ) -> MihomoReconciliationResult | None:
     db.info["mihomo_projection_lock_held"] = True
-    monkeypatch.setattr(reconciliation, "mihomo_projection_write", lambda db: nullcontext())
+    if durable_fallback:
+        monkeypatch.setattr(
+            reconciliation,
+            "mihomo_projection_write",
+            lambda db: _fake_lock_with_durable_fallback(db),
+        )
+    else:
+        monkeypatch.setattr(reconciliation, "mihomo_projection_write", lambda db: nullcontext())
     return reconcile_mihomo_job(
         provider,
         _Loader(),
@@ -861,6 +1120,31 @@ def _reconcile_with_fake_lock(
         cast(ProjectionVerifier, verifier),
         db_factory=lambda: db,
     )
+
+
+@contextmanager
+def _fake_lock_with_durable_fallback(db: Session) -> Generator[None, None, None]:
+    previous = bool(db.info.get("mihomo_projection_lock_held", False))
+    db.info["mihomo_projection_lock_held"] = True
+    try:
+        yield
+    finally:
+        metadata = db.info.get("mihomo_projection_release_metadata")
+        if isinstance(metadata, dict):
+            db.rollback()
+            blocker = ensure_mihomo_blocker(
+                db,
+                blocker_kind=MIHOMO_BLOCKER_KIND_LOCK_RELEASE,
+                source_job_id=metadata.get("source_job_id"),
+                operation_id=metadata.get("operation_id"),
+                snapshot_revision=metadata.get("snapshot_revision"),
+                reason_code=MIHOMO_LOCK_RELEASE_PENDING,
+            )
+            blocker.last_error_code = MIHOMO_DURABLE_STATE_UNKNOWN
+            db.commit()
+        db.info["mihomo_projection_lock_held"] = previous
+        db.info.pop("mihomo_projection_release_metadata", None)
+        db.info.pop(SESSION_INFO_DURABLE_STATE_UNKNOWN_KEY, None)
 
 
 def test_positive_verification_finalizes_with_secret_neutral_version(

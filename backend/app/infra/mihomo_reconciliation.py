@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -23,6 +24,7 @@ from backend.app.infra.mihomo_blocker import (
     validate_mihomo_operation_id,
 )
 from backend.app.infra.mihomo_projection_lock import (
+    SESSION_INFO_DURABLE_STATE_UNKNOWN_KEY,
     SESSION_INFO_RELEASE_METADATA_KEY,
     mihomo_projection_write,
     session_holds_mihomo_projection_lock,
@@ -382,12 +384,14 @@ def _persist_unknown_blocker(
         )
         db.commit()
     except Exception as exc:
-        db.rollback()
+        db.info[SESSION_INFO_DURABLE_STATE_UNKNOWN_KEY] = True
+        with suppress(Exception):
+            db.rollback()
         raise MihomoCommitOutcomeUnknown(diagnostic) from exc
     return MihomoReconciliationResult(job_id, applied, False, False, diagnostic)
 
 
-def _mark_unknown(
+def _mark_unknown_inner(
     db: Session,
     job_id: int,
     *,
@@ -499,6 +503,38 @@ def _mark_unknown(
     except Exception as exc:
         raise MihomoCommitOutcomeUnknown(diagnostic) from exc
     return MihomoReconciliationResult(job_id, applied, False, False, diagnostic)
+
+
+def _mark_unknown(
+    db: Session,
+    job_id: int,
+    *,
+    operation_id: str,
+    operation_kind: str,
+    snapshot_revision: int,
+    candidate_fingerprint: str,
+    diagnostic: str,
+    applied: bool = True,
+    persist_blocker: bool = False,
+) -> MihomoReconciliationResult:
+    try:
+        return _mark_unknown_inner(
+            db,
+            job_id,
+            operation_id=operation_id,
+            operation_kind=operation_kind,
+            snapshot_revision=snapshot_revision,
+            candidate_fingerprint=candidate_fingerprint,
+            diagnostic=diagnostic,
+            applied=applied,
+            persist_blocker=persist_blocker,
+        )
+    except MihomoCommitOutcomeUnknown:
+        db.info[SESSION_INFO_DURABLE_STATE_UNKNOWN_KEY] = True
+        raise
+    except Exception as exc:
+        db.info[SESSION_INFO_DURABLE_STATE_UNKNOWN_KEY] = True
+        raise MihomoCommitOutcomeUnknown(diagnostic) from exc
 
 
 def _reset_blocked_claim(db: Session, job: Job) -> None:

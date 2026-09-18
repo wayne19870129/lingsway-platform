@@ -15,11 +15,13 @@ import backend.app.models  # noqa: F401
 from backend.app.core.database import Base, build_engine
 from backend.app.infra import mihomo_projection_lock as lock_module
 from backend.app.infra.mihomo_blocker import (
+    MIHOMO_DURABLE_STATE_UNKNOWN,
     MIHOMO_LOCK_RELEASE_PENDING,
     MIHOMO_LOCK_RELEASE_UNKNOWN,
     MIHOMO_RECONCILE_BLOCKER_JOB_TYPE,
 )
 from backend.app.infra.mihomo_projection_lock import (
+    SESSION_INFO_DURABLE_STATE_UNKNOWN_KEY,
     SESSION_INFO_RELEASE_METADATA_KEY,
     MihomoProjectionLockError,
     _get_lock,
@@ -239,6 +241,33 @@ def test_mysql_release_uncertainty_keeps_global_blocker(
         assert blocker.status is not JobStatus.SUCCEEDED
         assert MIHOMO_LOCK_RELEASE_PENDING in blocker.payload_json
         assert blocker.last_error_code == MIHOMO_LOCK_RELEASE_UNKNOWN
+        db.info["mihomo_projection_lock_held"] = True
+        with pytest.raises(MihomoReconciliationBlocked, match="GLOBAL_MANUAL_BLOCKER"):
+            assert_no_unresolved_mihomo_mutation(db)
+
+
+def test_mysql_positive_release_does_not_resolve_durable_unknown_fallback(
+    mysql_engine: Engine,
+) -> None:
+    with Session(mysql_engine) as db:
+        db.info[SESSION_INFO_RELEASE_METADATA_KEY] = {
+            **_release_metadata(),
+            "source_job_id": 992,
+        }
+        db.info[SESSION_INFO_DURABLE_STATE_UNKNOWN_KEY] = True
+        with mihomo_projection_write(db):
+            assert session_holds_mihomo_projection_lock(db)
+
+    with Session(mysql_engine) as db:
+        blocker = db.scalar(
+            select(Job).where(
+                Job.job_type == MIHOMO_RECONCILE_BLOCKER_JOB_TYPE,
+                Job.dedupe_key == "MIHOMO_BLOCKER:LOCK_RELEASE:992",
+            )
+        )
+        assert blocker is not None
+        assert blocker.status is JobStatus.PENDING
+        assert blocker.last_error_code == MIHOMO_DURABLE_STATE_UNKNOWN
         db.info["mihomo_projection_lock_held"] = True
         with pytest.raises(MihomoReconciliationBlocked, match="GLOBAL_MANUAL_BLOCKER"):
             assert_no_unresolved_mihomo_mutation(db)
