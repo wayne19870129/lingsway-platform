@@ -45,13 +45,22 @@ from backend.app.providers.base import (
     CredentialDTO,
     DesiredForwarderState,
     EgressEndpointDTO,
+    ForwarderListenerDTO,
     HealthReport,
     TenantDTO,
 )
-from backend.app.providers.forwarder.mihomo import MihomoForwarderProvider, MihomoRuntimeError
+from backend.app.providers.forwarder.mihomo import (
+    ControllerSecretSnapshot,
+    MihomoForwarderProvider,
+    MihomoRuntimeError,
+)
 from backend.app.providers.registry import build_registry
 from backend.app.schemas.public import OrderCreate
-from ops.forwarder.render_mihomo_config import render_mihomo_document
+
+
+class FakeControllerSecretResolver:
+    def resolve(self, secret_ref: str) -> ControllerSecretSnapshot:
+        return ControllerSecretSnapshot(secret_ref, 1, "test-api-secret")
 
 
 @pytest.fixture
@@ -186,12 +195,17 @@ def test_gateway_route_binding_is_idempotent_and_active_unique(
         db.commit()
 
     assert first.id == second.id
-    assert db.scalar(
-        select(func.count()).select_from(GatewayRouteBinding).where(
-            GatewayRouteBinding.subscription_id == state.subscription_id,
-            GatewayRouteBinding.released_at.is_(None),
+    assert (
+        db.scalar(
+            select(func.count())
+            .select_from(GatewayRouteBinding)
+            .where(
+                GatewayRouteBinding.subscription_id == state.subscription_id,
+                GatewayRouteBinding.released_at.is_(None),
+            )
         )
-    ) == 1
+        == 1
+    )
 
     duplicate = GatewayRouteBinding(
         subscription_id=state.subscription_id,
@@ -370,10 +384,7 @@ def test_place_order_precheck_does_not_reserve_or_bind_the_endpoint(db: Session)
     assert persisted is not None
     assert persisted.status == "AVAILABLE"
     assert persisted.current_count == 0
-    assert (
-        db.scalar(select(func.count()).select_from(EgressBinding))
-        == 0
-    )
+    assert db.scalar(select(func.count()).select_from(EgressBinding)) == 0
 
 
 @dataclass
@@ -382,6 +393,10 @@ class FailingMihomoRuntime:
     events: list[str] = field(default_factory=list)
     fail_reload_count: int = 1
     health_values: list[bool] = field(default_factory=lambda: [True])
+    api_secret: str = "test-api-secret"
+
+    def controller_secret_matches(self, secret: str) -> bool:
+        return secret == self.api_secret
 
     def backup(self) -> Path:
         backup = self.path.with_suffix(".before-test")
@@ -447,14 +462,24 @@ def test_mihomo_render_failure_restores_exact_pre_operation_state(
     )
     db.commit()
     monkeypatch.setenv("MIHOMO_API_SECRET", "test-api-secret")
-    document = render_mihomo_document(db)
     original = b"rules:\n  - MATCH,OLD\n"
     config_path = tmp_path / "config.yaml"
     config_path.write_bytes(original)
     runtime = FailingMihomoRuntime(config_path)
-    provider = MihomoForwarderProvider(lambda: document, runtime)
-    candidate = provider.render(DesiredForwarderState({}))
+    provider = MihomoForwarderProvider(runtime)
+    template = provider.render(
+        DesiredForwarderState(
+            listener_specs=(ForwarderListenerDTO("listener", "socks", "127.0.0.1", 7891, "BLOCK"),),
+            rules=({"match": "MATCH", "target": "BLOCK"},),
+            deployment_constants={
+                "external-controller": "172.30.0.10:9090",
+                "api-secret-ref": "mihomo/api-secret",
+                "api-secret-revision": 1,
+            },
+        )
+    )
 
+    candidate = provider.finalize(template, FakeControllerSecretResolver())
     with pytest.raises(MihomoRuntimeError):
         provider.apply(candidate)
 
@@ -510,16 +535,24 @@ def test_mihomo_unhealthy_post_reload_restores_exact_pre_operation_state(
     )
     db.commit()
     monkeypatch.setenv("MIHOMO_API_SECRET", "test-api-secret")
-    document = render_mihomo_document(db)
     original = b"rules:\n  - MATCH,OLD\n"
     config_path = tmp_path / "config.yaml"
     config_path.write_bytes(original)
-    runtime = FailingMihomoRuntime(
-        config_path, fail_reload_count=0, health_values=[False, True]
+    runtime = FailingMihomoRuntime(config_path, fail_reload_count=0, health_values=[False, True])
+    provider = MihomoForwarderProvider(runtime)
+    template = provider.render(
+        DesiredForwarderState(
+            listener_specs=(ForwarderListenerDTO("listener", "socks", "127.0.0.1", 7891, "BLOCK"),),
+            rules=({"match": "MATCH", "target": "BLOCK"},),
+            deployment_constants={
+                "external-controller": "172.30.0.10:9090",
+                "api-secret-ref": "mihomo/api-secret",
+                "api-secret-revision": 1,
+            },
+        )
     )
-    provider = MihomoForwarderProvider(lambda: document, runtime)
-    candidate = provider.render(DesiredForwarderState({}))
 
+    candidate = provider.finalize(template, FakeControllerSecretResolver())
     with pytest.raises(MihomoRuntimeError, match="unhealthy"):
         provider.apply(candidate)
 

@@ -13,8 +13,10 @@ from pathlib import Path
 
 import pytest
 
-from backend.app.providers.base import CandidateConfig, HealthReport
+from backend.app.providers.base import DesiredForwarderState, ForwarderListenerDTO, HealthReport
 from backend.app.providers.forwarder.mihomo import (
+    ControllerSecretSnapshot,
+    MihomoCandidateConfig,
     MihomoForwarderProvider,
     MihomoRuntimeError,
 )
@@ -38,6 +40,12 @@ class Runtime:
     reload_calls: int = 0
     installed: bytes | None = None
     restored: bool = False
+    api_secret: str = "test-secret"
+    secret_match_calls: int = 0
+
+    def controller_secret_matches(self, secret: str) -> bool:
+        self.secret_match_calls += 1
+        return secret == self.api_secret
 
     def backup(self) -> Path:
         self.events.append("backup")
@@ -73,27 +81,58 @@ class Runtime:
         return HealthReport(value)
 
 
-def candidate() -> CandidateConfig:
-    return CandidateConfig({"rules": ["MATCH,DIRECT"]}, "v1")
+class Resolver:
+    def resolve(self, secret_ref: str) -> ControllerSecretSnapshot:
+        return ControllerSecretSnapshot(secret_ref, 1, "test-secret")
+
+
+def candidate(provider: MihomoForwarderProvider) -> MihomoCandidateConfig:
+    template = provider.render(
+        DesiredForwarderState(
+            listener_specs=(ForwarderListenerDTO("listener", "socks", "127.0.0.1", 7891, "BLOCK"),),
+            rules=({"match": "MATCH", "target": "BLOCK"},),
+            deployment_constants={
+                "external-controller": "172.30.0.10:9090",
+                "api-secret-ref": "mihomo/api-secret",
+                "api-secret-revision": 1,
+            },
+        )
+    )
+    return provider.finalize(template, Resolver())
 
 
 def test_successful_apply_verifies_health_after_reload() -> None:
     runtime = Runtime()
-    provider = MihomoForwarderProvider(lambda: b"rules:\n  - MATCH,DIRECT\n", runtime)
+    provider = MihomoForwarderProvider(runtime)
 
-    result = provider.apply(candidate())
+    result = provider.apply(candidate(provider))
 
     assert result.applied is True
-    assert result.version == "v1"
+    assert result.version
+    assert runtime.secret_match_calls == 1
     assert runtime.events == ["backup", "install", "reload:1", "health"]
+
+
+def test_controller_secret_mismatch_fails_before_backup() -> None:
+    runtime = Runtime(api_secret="configured-secret")
+    provider = MihomoForwarderProvider(runtime)
+    candidate_value = candidate(provider)
+
+    with pytest.raises(MihomoRuntimeError, match="ROTATION_UNSUPPORTED") as error:
+        provider.apply(candidate_value)
+
+    assert runtime.events == []
+    assert runtime.secret_match_calls == 1
+    assert "configured-secret" not in str(error.value)
+    assert "test-secret" not in str(error.value)
 
 
 def test_install_exception_triggers_rollback_and_fails_closed() -> None:
     runtime = Runtime(install_error=RuntimeError("disk full"))
-    provider = MihomoForwarderProvider(lambda: b"rules:\n  - MATCH,DIRECT\n", runtime)
+    provider = MihomoForwarderProvider(runtime)
 
     with pytest.raises(MihomoRuntimeError, match="configuration restored"):
-        provider.apply(candidate())
+        provider.apply(candidate(provider))
 
     assert runtime.events == ["backup", "install", "restore", "reload:1", "health"]
     assert runtime.restored is True
@@ -101,10 +140,10 @@ def test_install_exception_triggers_rollback_and_fails_closed() -> None:
 
 def test_reload_exception_triggers_rollback_and_fails_closed() -> None:
     runtime = Runtime(reload_error=RuntimeError("hot reload failed"))
-    provider = MihomoForwarderProvider(lambda: b"rules:\n  - MATCH,DIRECT\n", runtime)
+    provider = MihomoForwarderProvider(runtime)
 
     with pytest.raises(MihomoRuntimeError, match="configuration restored"):
-        provider.apply(candidate())
+        provider.apply(candidate(provider))
 
     assert runtime.events == ["backup", "install", "reload:1", "restore", "reload:2", "health"]
     assert runtime.restored is True
@@ -114,10 +153,10 @@ def test_unhealthy_post_reload_triggers_rollback_and_fails_closed() -> None:
     """A `reload()` that returns cleanly but leaves Mihomo unhealthy must
     not be reported as a successful apply."""
     runtime = Runtime(health_values=[False, True])
-    provider = MihomoForwarderProvider(lambda: b"rules:\n  - MATCH,DIRECT\n", runtime)
+    provider = MihomoForwarderProvider(runtime)
 
     with pytest.raises(MihomoRuntimeError, match="unhealthy"):
-        provider.apply(candidate())
+        provider.apply(candidate(provider))
 
     assert runtime.events == [
         "backup",
@@ -133,10 +172,10 @@ def test_unhealthy_post_reload_triggers_rollback_and_fails_closed() -> None:
 
 def test_rollback_restore_exception_fails_closed_without_claiming_recovery() -> None:
     runtime = Runtime(health_values=[False], restore_error=RuntimeError("disk unavailable"))
-    provider = MihomoForwarderProvider(lambda: b"rules:\n  - MATCH,DIRECT\n", runtime)
+    provider = MihomoForwarderProvider(runtime)
 
     with pytest.raises(MihomoRuntimeError, match="unknown"):
-        provider.apply(candidate())
+        provider.apply(candidate(provider))
 
     assert runtime.events == ["backup", "install", "reload:1", "health", "restore"]
     assert runtime.reload_calls == 1
@@ -148,10 +187,10 @@ def test_rollback_reload_exception_fails_closed_without_claiming_recovery() -> N
         health_values=[False],
         rollback_reload_error=RuntimeError("hot reload failed"),
     )
-    provider = MihomoForwarderProvider(lambda: b"rules:\n  - MATCH,DIRECT\n", runtime)
+    provider = MihomoForwarderProvider(runtime)
 
     with pytest.raises(MihomoRuntimeError, match="unknown"):
-        provider.apply(candidate())
+        provider.apply(candidate(provider))
 
     assert runtime.events == [
         "backup",
@@ -166,10 +205,10 @@ def test_rollback_reload_exception_fails_closed_without_claiming_recovery() -> N
 
 def test_rollback_health_exception_fails_closed_without_claiming_recovery() -> None:
     runtime = Runtime(health_values=[False, RuntimeError("health probe crashed")])
-    provider = MihomoForwarderProvider(lambda: b"rules:\n  - MATCH,DIRECT\n", runtime)
+    provider = MihomoForwarderProvider(runtime)
 
     with pytest.raises(MihomoRuntimeError, match="unknown"):
-        provider.apply(candidate())
+        provider.apply(candidate(provider))
 
     assert runtime.events == [
         "backup",
@@ -187,10 +226,10 @@ def test_rollback_reload_succeeds_but_still_unhealthy_fails_closed() -> None:
     confirmed-safe runtime: if the rollback's own health check still
     reports unhealthy, this must fail closed rather than claim recovery."""
     runtime = Runtime(health_values=[False, False])
-    provider = MihomoForwarderProvider(lambda: b"rules:\n  - MATCH,DIRECT\n", runtime)
+    provider = MihomoForwarderProvider(runtime)
 
     with pytest.raises(MihomoRuntimeError, match="unhealthy afterwards"):
-        provider.apply(candidate())
+        provider.apply(candidate(provider))
 
     assert runtime.events == [
         "backup",

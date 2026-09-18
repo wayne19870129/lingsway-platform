@@ -2810,3 +2810,55 @@ separately gated.
 本阶段仅更新架构文档：不修改 provider、registry、base contract、schema/migration、workflow、deploy，不执行真实 Mihomo install/reload/health，不使用真实 credentials，不做 VPS、Docker、deployment 或 production side effect。
 
 后续 S02/S03 实现必须先补齐：完整 section ownership、fresh snapshot revision/fingerprint、transport-cache freshness proof、唯一 named lock、exact A backup/verified restore、post-reload health + exact projection verification、durable pending/finalization/crash recovery，以及并发、stale snapshot/cache、各 runtime failure、rollback failure、downstream failure、second-commit ACK-loss、process-crash 和 writer-blocking 测试。缺任一项时，`FORWARDER_PROVIDER=mihomo` 必须保持 fail-closed/mock。
+
+## S04-A — Mihomo projection foundation
+
+S04-A is a separate projection-foundation task based on ADR-023. Its projection
+contract binds each immutable desired transport reference exactly to one
+materialization proof (record identity, provider code, source revision, cache
+identity, content hash, and freshness deadline), and rejects unowned or extra
+materializations. It consumes fresh immutable desired state and verified
+transport materialization metadata to produce one deterministic full Mihomo
+document. It does not activate Mihomo,
+wire `FORWARDER_PROVIDER=mihomo` into the production registry, deploy, or grant
+real-provider production authorization. Durable pending/finalization,
+single-writer locking, crash recovery, and production registry wiring remain
+later S04-B/S04-C scope.
+
+### S04-A ownership matrix
+
+S04-A keeps `BLOCK` as the provider-neutral logical safety policy. At the
+Mihomo projection boundary it is serialized as Mihomo's built-in `REJECT`
+outbound (`MATCH,REJECT` and listener target `REJECT`). `DIRECT` remains
+forbidden as the unmatched fallback. Mihomo built-in identities
+(`DIRECT`, `REJECT`, `REJECT-DROP`, `PASS`, `PASS-RULE`, `COMPATIBLE`) and the
+logical `BLOCK` identity are reserved and may not be shadowed by desired or
+materialized proxy/group names. The controller-secret contract remains that
+opaque ref plus non-sensitive revision are fingerprint identity inputs, while
+plaintext is never a fingerprint input and ref/revision never enter runtime
+YAML.
+
+| Mihomo section | Owner/source | Required validation | Secret handling |
+|---|---|---|---|
+| core constants | deployment constants | allowlisted values only | no plaintext secret |
+| dns | desired snapshot | canonical mapping/value ownership only; full Mihomo DNS field/type validation is later candidate-schema/runtime validation before production activation | no secret values |
+| controller | deployment constants | controller bind is deployment-owned and must be backend-net reachable; current canonical address is `172.30.0.10:9090`, with valid non-loopback/non-wildcard IP:port shape; no host port publication | operation input only; controller secret remains required |
+| controller secret | `DesiredForwarderState` opaque `api-secret-ref` + explicit revision; `ProjectionTemplate` binds both into identity; `ControllerSecretResolver.resolve(exact_ref)` returns `(ref, revision, plaintext)`; `finalize()` creates provenance-bound `MihomoCandidateConfig` | exact ref/revision match, non-blank plaintext, generic/template candidates rejected by apply | only final runtime `secret` contains plaintext; ref/revision stay out of YAML, repr, logs, and docs; opaque ref and non-sensitive revision are included in projection identity, while plaintext is excluded from fingerprints |
+| proxy-providers | explicitly unsupported in S04-A | omitted, never emitted as an empty placeholder | n/a |
+| proxies | verified transport materialization plus desired non-conflicting entries | identity, type, and cross-reference validation | materialized content is hash-verified |
+| proxy-groups | desired snapshot | every proxy reference must resolve | no credential-bearing repr |
+| listeners | immutable `listener_specs` snapshot values | name/type/address/port/target uniqueness and range checks; logical `BLOCK` renders as `REJECT` | no secret values |
+| rules | desired snapshot | canonical Mihomo serialization; provider-neutral final `MATCH,BLOCK` renders as runtime `MATCH,REJECT` | no secret values |
+
+The checked-in container topology makes loopback-only controller configuration
+invalid: backend-api and traffic-attribution reach Mihomo through the internal
+`mihomo:9090` service while Mihomo binds its backend-net address. S04-A does
+not change Docker networking or claim full DNS schema validation; both remain
+explicit later activation/runtime-validation gates.
+
+S04-A supports only an unchanged controller secret. If the finalized
+candidate secret matches the currently configured runtime API secret, the
+apply path may proceed. If it differs, apply fails closed before backup,
+install, or reload with no runtime mutation. Safe old-secret-to-new-secret
+transition, including rollback authentication, is later controlled
+S04-B/S04-C work and is not claimed here.

@@ -9,7 +9,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
-from typing import Protocol
+from types import MappingProxyType
+from typing import Protocol, cast
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,8 +224,64 @@ class DesiredRoutingState:
 
 
 @dataclass(frozen=True, slots=True)
+class ForwarderListenerDTO:
+    name: str
+    listener_type: str
+    listen: str
+    port: int
+    proxy: str
+
+
+@dataclass(frozen=True, slots=True)
 class DesiredForwarderState:
     listeners: Mapping[str, str] = field(default_factory=dict)
+    listener_specs: tuple[ForwarderListenerDTO, ...] = ()
+    # Provider-neutral full-projection inputs.  Mihomo-specific validation and
+    # composition live at the forwarder boundary, never in the domain.
+    proxies: tuple[Mapping[str, object], ...] = ()
+    proxy_groups: tuple[Mapping[str, object], ...] = ()
+    rules: tuple[Mapping[str, object], ...] = ()
+    dns: Mapping[str, object] = field(default_factory=dict)
+    policy: Mapping[str, object] = field(default_factory=dict)
+    transport_materializations: tuple[object, ...] = ()
+    transport_references: tuple[object, ...] = ()
+    deployment_constants: Mapping[str, object] = field(default_factory=dict)
+    snapshot_revision: int = 1
+    snapshot_identity: str = "default"
+
+    def __post_init__(self) -> None:
+        if self.snapshot_revision <= 0 or not self.snapshot_identity.strip():
+            raise ValueError("desired snapshot identity is invalid")
+
+        def freeze(value: object) -> object:
+            if isinstance(value, Mapping):
+                return MappingProxyType({str(key): freeze(item) for key, item in value.items()})
+            if isinstance(value, (list, tuple)):
+                return tuple(freeze(item) for item in value)
+            if isinstance(value, (str, int, float, bool, type(None))):
+                return value
+            raise TypeError("desired snapshot contains unsupported value")
+
+        object.__setattr__(self, "listeners", freeze(self.listeners))
+        if not all(isinstance(item, ForwarderListenerDTO) for item in self.listener_specs):
+            raise TypeError("desired listener specs must use ForwarderListenerDTO")
+        object.__setattr__(self, "listener_specs", tuple(self.listener_specs))
+        object.__setattr__(self, "proxies", freeze(self.proxies))
+        object.__setattr__(self, "proxy_groups", freeze(self.proxy_groups))
+        object.__setattr__(self, "rules", freeze(self.rules))
+        object.__setattr__(self, "dns", freeze(self.dns))
+        object.__setattr__(self, "policy", freeze(self.policy))
+        object.__setattr__(self, "deployment_constants", freeze(self.deployment_constants))
+
+    def __repr__(self) -> str:
+        return (
+            "DesiredForwarderState("
+            f"snapshot_revision={self.snapshot_revision!r}, "
+            f"snapshot_identity={self.snapshot_identity!r}, "
+            f"listener_count={len(self.listener_specs)}, proxy_count={len(self.proxies)}, "
+            f"proxy_group_count={len(self.proxy_groups)}, rule_count={len(self.rules)}, "
+            f"content=<redacted>)"
+        )
 
 
 class CandidateConfig:
@@ -258,6 +315,48 @@ class CandidateConfig:
             and self.content == other.content
             and self.version == other.version
         )
+
+
+class ProjectionTemplate(CandidateConfig):
+    """Secret-free, non-installable projection awaiting operation finalization."""
+
+    __slots__ = ("_controller_secret_ref", "_controller_secret_revision")
+    _controller_secret_ref: str
+    _controller_secret_revision: int
+
+    def __init__(
+        self,
+        content: Mapping[str, object],
+        version: str,
+        controller_secret_ref: str,
+        controller_secret_revision: int,
+    ) -> None:
+        super().__init__(cast(Mapping[str, object], _freeze_content(content)), version)
+        object.__setattr__(self, "_controller_secret_ref", controller_secret_ref)
+        object.__setattr__(self, "_controller_secret_revision", controller_secret_revision)
+
+    @property
+    def controller_secret_ref(self) -> str:
+        return self._controller_secret_ref
+
+    @property
+    def controller_secret_revision(self) -> int:
+        return self._controller_secret_revision
+
+    def __repr__(self) -> str:
+        return (
+            "ProjectionTemplate("
+            f"version={self.version!r}, controller_secret_ref=<redacted>, "
+            f"controller_secret_revision={self.controller_secret_revision!r}, content=<redacted>)"
+        )
+
+
+def _freeze_content(value: object) -> object:
+    if isinstance(value, Mapping):
+        return MappingProxyType({str(key): _freeze_content(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_content(item) for item in value)
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -350,9 +449,7 @@ class EgressProvider(Protocol):
 
     def capacity(self) -> CapacityDTO: ...
 
-    def create_tenant(
-        self, label: str, quota_gb: Decimal, thread_limit: int
-    ) -> TenantDTO: ...
+    def create_tenant(self, label: str, quota_gb: Decimal, thread_limit: int) -> TenantDTO: ...
 
     def update_tenant_quota(self, tenant_id: str, quota_gb: Decimal) -> TenantDTO: ...
 
@@ -360,9 +457,7 @@ class EgressProvider(Protocol):
 
     def get_credentials(self, tenant_id: str, endpoint_id: str) -> CredentialDTO: ...
 
-    def replace_endpoint(
-        self, endpoint_id: str, dry_run: bool = True
-    ) -> ReplacementDTO: ...
+    def replace_endpoint(self, endpoint_id: str, dry_run: bool = True) -> ReplacementDTO: ...
 
 
 class AccountingCreateEffect(Enum):
