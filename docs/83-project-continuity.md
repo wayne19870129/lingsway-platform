@@ -42,7 +42,9 @@ activation, production deployment, and real-provider production authorization
 remain independent gates. Mihomo has an accepted full-config and activation
 boundary in ADR-023, but implementation, durable activation/recovery, and
 production readiness remain separate work. Transport subscription cache
-materialization is restricted input, not Mihomo activation.
+materialization is restricted input, not Mihomo activation — and per ADR-025
+§3a it is only usable once anchored by a committed DB receipt; the cache file
+is never authority for its own contents.
 
 ## 5. Current phase and S03 boundary
 
@@ -70,7 +72,8 @@ materialization is restricted input, not Mihomo activation.
   Mihomo, wire `FORWARDER_PROVIDER=mihomo` into production, deploy, or authorize
   real-provider production use.
 - **S04-B:** ACTIVE.
-- **S04-B1:** ACTIVE on `task/s04-b1-mihomo-durable-reconciliation`. It adds only
+- **S04-B1:** COMPLETE / merged from `task/s04-b1-mihomo-durable-reconciliation`.
+  Merge commit: `c494ade7d40419afd1a812c8b5ddefb154b1c14c`. It adds only
   the durable Job-backed Mihomo intent, global named writer lock, retry and
   stale-running recovery, commit-outcome certainty, unresolved-intent guard,
   durable global manual blockers for ambiguous finalization and lock-release
@@ -86,6 +89,47 @@ materialization is restricted input, not Mihomo activation.
   only; full
   Mihomo DNS field/type validation remains a later candidate-schema/runtime
   validation gate before production activation.
+
+- **S04-B2-A:** ACTIVE on `task/s04-b2-mihomo-runtime-reconciliation`, PR #128,
+  architecture/documentation-only. It delivers **ADR-025**
+  (`ADR-025-mihomo-projection-generation-authority.md`) and the S-series
+  implementation TASK (`TASK-S04-mihomo-activation.md`). No Python, no ORM,
+  no migration.
+- **S04-B2-B:** **NOT STARTED.** Two gates, both required: ADR-025's status
+  line reads `Accepted` (PR #128 merged by the User), **and**
+  `TASK-S04-mihomo-activation.md` is merged. `TASK-T16` is explicitly **not**
+  the execution vehicle — its allowed-file list does not authorize
+  `backend/app/models/`, `backend/app/infra/`, or
+  `infrastructure/alembic/versions/`.
+- **S04-C:** **NOT STARTED.** `FORWARDER_PROVIDER=mihomo` remains NOT
+  selectable; no deployment authorization exists.
+
+### Two durable blockers S04-B2-B must close (do not re-derive)
+
+1. **Generation-revision blocker.** There is no durable globally monotonic
+   revision for one complete Mihomo desired projection.
+   `DesiredForwarderState.snapshot_revision` defaults to `1` and is
+   caller-supplied; `TransportVersion` and `EgressVersion` are per-`route_group`
+   domain-local; `Secret.revision` is per-secret; `updated_at` is not globally
+   monotonic. The revision must not be fabricated from timestamps, hashes,
+   process counters, cache mtime, runtime state, or combined domain versions.
+   Accepted contract: append-only DB-allocated `mihomo_projection_generations`
+   (ADR-025 §2, §8.1).
+
+2. **Durable materialization-receipt blocker.** The subscription cache file has
+   **no DB anchor**. `SubscriptionTransportProvider.sync_nodes()` writes it
+   atomically (`write`→`flush`→`fsync`→`os.replace`), and
+   `refresh_provider_inventory()` then commits endpoint inventory, capacity,
+   and status — but nothing committed carries `content_hash`, `cache_identity`,
+   `source_revision`, or `freshness_deadline`. `TransportMaterialization`
+   (which holds exactly that proof tuple) exists only as an in-memory dataclass
+   in `providers/forwarder/mihomo_projection.py`. Consequence: a loader that
+   hashed whatever file is on disk would let a modified/torn/out-of-band cache
+   authenticate itself. Accepted contract: a receipt produced **only** by a
+   successful sync, committed in the same transaction as that sync's inventory,
+   after the atomic file write; new file + old receipt ⇒ hash mismatch ⇒
+   **fail closed**, never auto-trusted and never re-minted from the file
+   (ADR-025 §3a, §8.2).
 
 ## 6. Current blockers and carry-over
 
