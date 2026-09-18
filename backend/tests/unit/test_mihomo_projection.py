@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import cast
 
 import pytest
 
 from backend.app.providers.base import DesiredForwarderState
-from backend.app.providers.forwarder.mihomo import MihomoForwarderProvider
+from backend.app.providers.forwarder.mihomo import MihomoForwarderProvider, MihomoRuntime
 from backend.app.providers.forwarder.mihomo_projection import (
     MihomoProjectionError,
     TransportMaterialization,
@@ -113,7 +114,8 @@ def test_provider_render_uses_desired_snapshot_not_external_renderer() -> None:
     def forbidden_renderer() -> bytes:
         raise AssertionError("external renderer must not be called")
 
-    provider = MihomoForwarderProvider(forbidden_renderer, runtime=object())
+    provider = MihomoForwarderProvider(forbidden_renderer, runtime=cast(MihomoRuntime, object()))
     candidate = provider.render(snapshot())
-    assert candidate.content["listeners"][0]["name"] == "listener-a"
+    listeners = cast(list[dict[str, object]], candidate.content["listeners"])
+    assert listeners[0]["name"] == "listener-a"
     assert candidate.version == compose_mihomo_document(snapshot())[1]
