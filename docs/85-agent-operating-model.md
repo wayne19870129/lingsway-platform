@@ -244,9 +244,10 @@ Claude 的产出形态是：ADR、TASK 文件、`docs/81-reviews/REVIEW-*.md`、
 
 ### 代码健康度
 
-`ruff`（含 `ops/` 与 `infrastructure/`）、`mypy --strict`、596 个
-unit+guard 测试全绿；前端 `tsc` / `eslint` / `next build` 全绿。23 个 Alembic migration 单根单头无分叉。`domain/` 层
-零外部依赖。**代码质量是好的。**
+`ruff`（含 `ops/` 与 `infrastructure/`）、`mypy --strict`（128 文件）、
+596 个 unit+guard 测试全绿；前端 `tsc` / `eslint` / `next build` 全绿。
+23 个 Alembic migration 单根单头无分叉。`domain/` 层零外部依赖。
+**代码质量是好的。**
 
 ### provider 接线矩阵
 
@@ -257,49 +258,59 @@ unit+guard 测试全绿；前端 `tsc` / `eslint` / `next build` 全绿。23 个
 | transport（subscription） | ✅ 已接通 |
 | egress（Webshare） | ❌ 被挡住 |
 | forwarder（Mihomo） | ❌ 被挡住（S04 闸门） |
-| payment / notify / email / captcha / storage | ❌ 只有 mock/noop，真实实现尚未编写 |
+| payment/notify/email/captcha/storage | ❌ 只有 mock/noop |
 
-### 建议的下一步顺序
+### S04 当前位置
+
+- **S04-B2-A：已合并**（PR #128）。产出 **ADR-025**（projection generation
+  authority + durable transport materialization receipt）与
+  `TASK-S04-mihomo-activation.md`。
+- **S04-B2-B：未开始**，两道闸门都已满足（ADR-025 已随 PR 合并、TASK-S04
+  已合并）——**这是现在可以派给 Codex 的最大一块活**。
+- **S04-C：未开始**，必须等 B2-B 合并后单独一个 PR。
+
+### 下一步顺序（派活就按这个顺序）
 
 **第 1 位：`ops/backup/` 备份恢复工具。**
+通往生产的**硬闸门**。`deploy/lib/70_verify.sh` 的 `check_13_backup` 在脚本
+缺失时直接判失败，部署跑到验收必红。不是"能不能延后"，是"不做就上不了线"。
+同时它还卡着 `AGENTS.md` 的生产 alembic 授权。要求见 `docs/30-backup-restore.md`。
+**这项还没有 TASK 文件**（触及 `ops/`、`deploy/`、加密与备份 → 触发门槛），
+派活前先让 Claude 或你自己写一份。
 
-这是当前通往生产的**硬闸门**。`deploy/lib/70_verify.sh` 的
-`check_13_backup` 在脚本缺失时直接判失败，所以部署跑到验收阶段必红——
-现在不是"能不能延后"的问题，是"不做就上不了线"。同时它还卡着
-`AGENTS.md` 的生产 alembic 授权。要求见 `docs/30-backup-restore.md`。
-
-**第 2 位：S04-B2 / S04-C（Mihomo 接线与放行）。**
-
-TASK 已写好：`docs/82-tasks/TASK-S04-mihomo-activation.md`。
-**必须拆成两个 PR**，B2 结束时要有测试证明 `FORWARDER_PROVIDER=mihomo`
-仍然被拒绝——防止"接线"顺手变成"激活"。
+**第 2 位：S04-B2-B。**
+TASK 已就绪：`docs/82-tasks/TASK-S04-mihomo-activation.md`，里面有逐文件的
+允许路径、两张表的 planned schema、以及 receipt 的 producer/commit/crash 契约。
+**必须与 S04-C 分成两个 PR**，B2-B 结束时要有测试证明
+`FORWARDER_PROVIDER=mihomo` 仍被拒绝。
 
 **第 3 位：客户端配置指南**（`frontend/app/(docs)/guides/*` 现在只有空目录）。
-低风险、无后端依赖，可以和 1、2 并行。这是"订阅能生成"和"客户能自己用起来"
-之间唯一的缺口。
+低风险、无后端依赖，可与 1、2 并行。是"订阅能生成"和"客户能自己用"之间
+唯一的缺口。
 
-**Webshare 不要急着接线。** 它的 `capacity()` 和 `get_tenant_usage()` 是
-fail-closed 抛错的（API 契约未实测确认单位），开通第 1 步就会失败。
-前置条件是补 `docs/70-external-facts.md` 的实测证据，不是改代码。
+**Webshare 不要急着接线**：`capacity()` 和 `get_tenant_usage()` 是 fail-closed
+抛错的（API 契约未实测确认单位），开通第 1 步就会失败。前置是补
+`docs/70-external-facts.md` 的实测证据，不是改代码。
 
-**TASK-T13（分流）保持阻塞。** 它按 ADR-012 就该等外部实测证据，不要因为
-别的活准备好了就把它提上来。
+**TASK-T13（分流）保持阻塞**，按 ADR-012 等外部实测证据。
 
 ### 还开着的问题（continuity §8 有完整清单）
 
-- `ops/**` 有 ruff 了，但**没有 mypy**（脚本未加类型标注）。
+- `ops/**` 有 ruff 了但**没有 mypy**（脚本未加类型标注）。
 - **套餐价格声明了但还没生效。** 目录已定（`backend/app/catalog.py`：
   50GB/¥30、100GB/¥50、200GB/¥80、500GB/¥120，30 天周期，CNY），但
   `plans` 表由仓库之外的手段填充，仓库里没有任何代码创建 `Plan` 行。
   上线前必须人工核对库里现存的四行——**特别是 `currency`，如果是 `USD`，
-  客户会看到 "30 USD" 而不是 ¥30，并且这个错误会经 `Order.currency`
-  带到订单上。** 见 `TASK-S06-plan-catalogue.md` 文末。
-- 加购（ADDON）是否要卖、卖多少钱 —— `addon_*_price` 三个配置是死的，
-  ADDON 订单走 `addon_bytes` 而不是 `Plan` 行。**需要 User 拍板。**
+  客户会看到 "30 USD" 而不是 ¥30，且经 `Order.currency` 带到订单上。**
+- 加购（ADDON）是否要卖、卖多少钱 —— `addon_*_price` 是死配置。**需 User 拍板。**
 - 前端组件一行一个组件写（单行 1000+ 字符），不可 diff 不可审查。
 - `ops/status.py`、`frontend/lib/api.ts` 真正的类型化客户端——都还不存在。
 
----
+### 编号防撞（2026-09-18 踩过）
+
+两个并行分支同一天各自认领了 ADR-025 **和** `TASK-S04-mihomo-activation.md`，
+其中只有一个被 git 判为冲突，另一个差点静默合入。**认领新的 ADR / TASK 编号
+时，要对着当前 `main` 加上所有 open PR 一起查，不能只看 `main`。**
 
 ## 6. 三条别忘的底线
 
