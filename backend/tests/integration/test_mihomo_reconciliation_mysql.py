@@ -15,6 +15,11 @@ from sqlalchemy.orm import Session
 
 import backend.app.models  # noqa: F401
 from backend.app.core.database import Base, build_engine
+from backend.app.infra.mihomo_blocker import (
+    MIHOMO_BLOCKER_KIND_LOCK_RELEASE,
+    MIHOMO_LOCK_RELEASE_PENDING,
+    ensure_mihomo_blocker,
+)
 from backend.app.infra.mihomo_reconciliation import (
     CommitOutcome,
     MihomoReconciliationResult,
@@ -63,6 +68,14 @@ def test_mysql_enqueue_commit_and_classifier(mysql_engine: Engine) -> None:
         }
         job.payload_json = json.dumps(payload)
         job.status = JobStatus.SUCCEEDED
+        ensure_mihomo_blocker(
+            db,
+            blocker_kind=MIHOMO_BLOCKER_KIND_LOCK_RELEASE,
+            source_job_id=job.id,
+            operation_id="mysql-r1",
+            snapshot_revision=1,
+            reason_code=MIHOMO_LOCK_RELEASE_PENDING,
+        )
         db.commit()
         assert classify_finalization_outcome(
             db,

@@ -25,12 +25,34 @@ class MihomoBlockerError(RuntimeError):
     """A durable blocker could not be created or matched exactly."""
 
 
+def validate_mihomo_operation_id(value: object) -> str:
+    """Validate the one operation-id grammar shared by reconciliation and blockers."""
+    if not isinstance(value, str) or _SAFE_IDENTIFIER.fullmatch(value) is None:
+        raise ValueError("operation_id must use the canonical safe alphabet")
+    return value
+
+
 def _safe_optional_identifier(value: object) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str) or _SAFE_IDENTIFIER.fullmatch(value) is None:
         raise MihomoBlockerError("MIHOMO_BLOCKER_IDENTIFIER_INVALID")
     return value
+
+
+def mihomo_blocker_dedupe_key(blocker_kind: str, source_job_id: int | None) -> str:
+    kind = _safe_optional_identifier(blocker_kind)
+    if kind is None:
+        raise MihomoBlockerError("MIHOMO_BLOCKER_KIND_INVALID")
+    if source_job_id is not None and (
+        isinstance(source_job_id, bool) or not isinstance(source_job_id, int) or source_job_id <= 0
+    ):
+        raise MihomoBlockerError("MIHOMO_BLOCKER_SOURCE_INVALID")
+    source_identity = str(source_job_id) if source_job_id is not None else "none"
+    dedupe_key = f"{_BLOCKER_DEDUPE_PREFIX}{kind}:{source_identity}"
+    if len(dedupe_key) > 160:
+        raise MihomoBlockerError("MIHOMO_BLOCKER_DEDUPE_KEY_INVALID")
+    return dedupe_key
 
 
 def _safe_reason(value: object) -> str:
@@ -53,26 +75,26 @@ def ensure_mihomo_blocker(
     if kind is None:
         raise MihomoBlockerError("MIHOMO_BLOCKER_KIND_INVALID")
     reason = _safe_reason(reason_code)
-    operation = _safe_optional_identifier(operation_id)
-    if source_job_id is not None and (
-        isinstance(source_job_id, bool) or not isinstance(source_job_id, int) or source_job_id <= 0
-    ):
-        raise MihomoBlockerError("MIHOMO_BLOCKER_SOURCE_INVALID")
+    if operation_id is None:
+        operation = None
+    else:
+        try:
+            operation = validate_mihomo_operation_id(operation_id)
+        except ValueError as exc:
+            raise MihomoBlockerError("MIHOMO_BLOCKER_OPERATION_ID_INVALID") from exc
     if snapshot_revision is not None and (
         isinstance(snapshot_revision, bool)
         or not isinstance(snapshot_revision, int)
         or snapshot_revision <= 0
     ):
         raise MihomoBlockerError("MIHOMO_BLOCKER_REVISION_INVALID")
-    source_identity = str(source_job_id) if source_job_id is not None else "none"
-    dedupe_key = f"{_BLOCKER_DEDUPE_PREFIX}{kind}:{source_identity}"
-    if len(dedupe_key) > 160:
-        raise MihomoBlockerError("MIHOMO_BLOCKER_DEDUPE_KEY_INVALID")
+    dedupe_key = mihomo_blocker_dedupe_key(kind, source_job_id)
     payload = {
         "blocker_kind": kind,
         "source_job_id": source_job_id,
         "operation_id": operation,
         "snapshot_revision": snapshot_revision,
+        # reason_code is immutable blocker origin; last_error_code tracks later outcomes.
         "reason_code": reason,
     }
     existing = db.scalar(select(Job).where(Job.dedupe_key == dedupe_key).with_for_update())

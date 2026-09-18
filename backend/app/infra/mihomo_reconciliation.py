@@ -15,8 +15,12 @@ from sqlalchemy.orm import Session
 from backend.app.core.database import SessionLocal
 from backend.app.infra.mihomo_blocker import (
     MIHOMO_BLOCKER_KIND_FINALIZATION,
+    MIHOMO_BLOCKER_KIND_LOCK_RELEASE,
+    MIHOMO_LOCK_RELEASE_PENDING,
     MIHOMO_RECONCILE_BLOCKER_JOB_TYPE,
     ensure_mihomo_blocker,
+    mihomo_blocker_dedupe_key,
+    validate_mihomo_operation_id,
 )
 from backend.app.infra.mihomo_projection_lock import (
     SESSION_INFO_RELEASE_METADATA_KEY,
@@ -112,15 +116,9 @@ class MihomoReconciliationResult:
 
 
 def _validate_operation_id(value: object) -> str:
-    if (
-        not isinstance(value, str)
-        or not value
-        or value != value.strip()
-        or len(value) > _MAX_OPERATION_ID_LENGTH
-        or any(ord(char) < 32 for char in value)
-    ):
+    if isinstance(value, str) and len(value) > _MAX_OPERATION_ID_LENGTH:
         raise ValueError("operation_id must be a non-empty canonical string")
-    return value
+    return validate_mihomo_operation_id(value)
 
 
 def _validate_operation_kind(value: object) -> str:
@@ -232,6 +230,32 @@ def _engine(db: Session) -> Engine:
     return engine
 
 
+def _has_exact_unresolved_release_blocker(
+    db: Session, *, job_id: int, operation_id: str, snapshot_revision: int
+) -> bool:
+    blocker = db.scalar(
+        select(Job).where(
+            Job.job_type == MIHOMO_RECONCILE_BLOCKER_JOB_TYPE,
+            Job.dedupe_key == mihomo_blocker_dedupe_key(
+                MIHOMO_BLOCKER_KIND_LOCK_RELEASE, job_id
+            ),
+        )
+    )
+    if blocker is None or blocker.status is JobStatus.SUCCEEDED:
+        return False
+    try:
+        payload = json.loads(blocker.payload_json or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    return bool(payload == {
+        "blocker_kind": MIHOMO_BLOCKER_KIND_LOCK_RELEASE,
+        "source_job_id": job_id,
+        "operation_id": operation_id,
+        "snapshot_revision": snapshot_revision,
+        "reason_code": MIHOMO_LOCK_RELEASE_PENDING,
+    })
+
+
 def classify_finalization_outcome(
     db: Session,
     *,
@@ -264,6 +288,12 @@ def classify_finalization_outcome(
                     and evidence.get("snapshot_revision") == snapshot_revision
                     and evidence.get("candidate_fingerprint") == candidate_fingerprint
                     and _valid_evidence_version(evidence.get("verification"))
+                    and _has_exact_unresolved_release_blocker(
+                        observer,
+                        job_id=job_id,
+                        operation_id=operation_id,
+                        snapshot_revision=snapshot_revision,
+                    )
                 ):
                     return CommitOutcome.LANDED
                 return CommitOutcome.UNKNOWN
@@ -430,6 +460,12 @@ def _mark_unknown(
         and evidence.get("snapshot_revision") == snapshot_revision
         and evidence.get("candidate_fingerprint") == candidate_fingerprint
         and _valid_evidence_version(evidence.get("verification"))
+        and _has_exact_unresolved_release_blocker(
+            db,
+            job_id=job_id,
+            operation_id=operation_id,
+            snapshot_revision=snapshot_revision,
+        )
     ):
         return _landed_result(job_id, applied=applied)
     if (
@@ -582,6 +618,15 @@ def reconcile_mihomo_job(
             job.payload_json = json.dumps(payload, sort_keys=True)
             job.status, job.locked_at, job.last_error_code = JobStatus.SUCCEEDED, None, None
             try:
+                # Finalization success and release-pending are one durable boundary.
+                ensure_mihomo_blocker(
+                    db,
+                    blocker_kind=MIHOMO_BLOCKER_KIND_LOCK_RELEASE,
+                    source_job_id=job.id,
+                    operation_id=operation_id,
+                    snapshot_revision=expected,
+                    reason_code=MIHOMO_LOCK_RELEASE_PENDING,
+                )
                 db.commit()
             except Exception as commit_error:
                 db.rollback()

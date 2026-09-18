@@ -76,8 +76,10 @@ materialization is restricted input, not Mihomo activation.
   durable global manual blockers for ambiguous finalization and lock-release
   outcomes, injectable reconciliation orchestration, and crash/concurrency
   semantics. An unresolved blocker stops every later Mihomo writer, and a
-  release-uncertain blocker is retained until controlled recovery. It remains
-  fail-closed and is not automatically repaired.
+  release-uncertain blocker is retained until controlled recovery. Finalization
+  success and the release-pending blocker share one durable boundary; clean
+  release requires confirmed `RELEASE_LOCK == 1` and blocker resolution. It
+  remains fail-closed and is not automatically repaired.
   It does not claim S04-B2 or S04-C complete, and does not wire production
   lifespan, real snapshot loading, real secret resolution, runtime readback, or
   Mihomo activation. S04-A guarantees canonical mapping/value ownership for DNS

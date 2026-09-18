@@ -2,18 +2,23 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterator
+from contextlib import suppress
 from threading import Event, Thread
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 import backend.app.models  # noqa: F401
 from backend.app.core.database import Base, build_engine
 from backend.app.infra import mihomo_projection_lock as lock_module
-from backend.app.infra.mihomo_blocker import MIHOMO_RECONCILE_BLOCKER_JOB_TYPE
+from backend.app.infra.mihomo_blocker import (
+    MIHOMO_LOCK_RELEASE_PENDING,
+    MIHOMO_LOCK_RELEASE_UNKNOWN,
+    MIHOMO_RECONCILE_BLOCKER_JOB_TYPE,
+)
 from backend.app.infra.mihomo_projection_lock import (
     SESSION_INFO_RELEASE_METADATA_KEY,
     MihomoProjectionLockError,
@@ -122,6 +127,47 @@ def test_mysql_named_lock_blocks_second_contender_until_release(mysql_engine: En
     assert not errors
 
 
+def test_mysql_owned_release_returns_one(mysql_engine: Engine) -> None:
+    with mysql_engine.connect() as raw:
+        connection = raw.execution_options(isolation_level="AUTOCOMMIT")
+        name = mihomo_projection_lock_name(connection)
+        _get_lock(connection, name, 1)
+        try:
+            result = connection.execute(
+                text("SELECT RELEASE_LOCK(:name)"), {"name": name}
+            ).scalar()
+            assert result == 1
+        finally:
+            with suppress(Exception):
+                _release_lock(connection, name)
+
+
+def test_mysql_non_owner_release_returns_zero(mysql_engine: Engine) -> None:
+    with mysql_engine.connect() as owner_raw, mysql_engine.connect() as observer_raw:
+        owner = owner_raw.execution_options(isolation_level="AUTOCOMMIT")
+        observer = observer_raw.execution_options(isolation_level="AUTOCOMMIT")
+        name = mihomo_projection_lock_name(owner)
+        _get_lock(owner, name, 1)
+        try:
+            result = observer.execute(
+                text("SELECT RELEASE_LOCK(:name)"), {"name": name}
+            ).scalar()
+            assert result == 0
+        finally:
+            with suppress(Exception):
+                _release_lock(owner, name)
+
+
+def test_mysql_nonexistent_release_returns_null(mysql_engine: Engine) -> None:
+    with mysql_engine.connect() as raw:
+        connection = raw.execution_options(isolation_level="AUTOCOMMIT")
+        name = f"{mihomo_projection_lock_name(connection)}:missing"
+        result = connection.execute(
+            text("SELECT RELEASE_LOCK(:name)"), {"name": name}
+        ).scalar()
+        assert result is None
+
+
 def _release_metadata() -> dict[str, object]:
     return {
         "source_job_id": 991,
@@ -135,9 +181,11 @@ def test_mysql_release_resolves_pending_blocker_after_positive_release(
 ) -> None:
     original_release = lock_module._release_lock
     observed_pending = False
+    observed_lock_marker = False
 
     def observe_then_release(connection: object, name: str) -> None:
-        nonlocal observed_pending
+        nonlocal observed_lock_marker, observed_pending
+        observed_lock_marker = session_holds_mihomo_projection_lock(db)
         with Session(mysql_engine) as observer:
             blocker = observer.scalar(
                 select(Job).where(Job.job_type == MIHOMO_RECONCILE_BLOCKER_JOB_TYPE)
@@ -156,8 +204,10 @@ def test_mysql_release_resolves_pending_blocker_after_positive_release(
             select(Job).where(Job.job_type == MIHOMO_RECONCILE_BLOCKER_JOB_TYPE)
         )
         assert observed_pending is True
+        assert observed_lock_marker is True
         assert blocker is not None
         assert blocker.status is JobStatus.SUCCEEDED
+        assert MIHOMO_LOCK_RELEASE_PENDING in blocker.payload_json
 
     with Session(mysql_engine) as db, mihomo_projection_write(db):
         db.info["mihomo_projection_lock_held"] = True
@@ -187,6 +237,8 @@ def test_mysql_release_uncertainty_keeps_global_blocker(
         )
         assert blocker is not None
         assert blocker.status is not JobStatus.SUCCEEDED
+        assert MIHOMO_LOCK_RELEASE_PENDING in blocker.payload_json
+        assert blocker.last_error_code == MIHOMO_LOCK_RELEASE_UNKNOWN
         db.info["mihomo_projection_lock_held"] = True
         with pytest.raises(MihomoReconciliationBlocked, match="GLOBAL_MANUAL_BLOCKER"):
             assert_no_unresolved_mihomo_mutation(db)
@@ -221,6 +273,35 @@ def test_mysql_release_success_but_blocker_clear_commit_failure_keeps_blocker(
         assert blocker.status is not JobStatus.SUCCEEDED
 
 
+def test_mysql_release_success_but_blocker_clear_ack_loss_is_observable(
+    mysql_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with Session(mysql_engine, expire_on_commit=False) as db:
+        original_commit = db.commit
+        commit_calls = 0
+
+        def lose_cleanup_ack() -> None:
+            nonlocal commit_calls
+            commit_calls += 1
+            original_commit()
+            if commit_calls == 2:
+                raise RuntimeError("blocker cleanup acknowledgement lost")
+
+        monkeypatch.setattr(db, "commit", lose_cleanup_ack)
+        db.info[SESSION_INFO_RELEASE_METADATA_KEY] = _release_metadata()
+        with pytest.raises(
+            MihomoProjectionLockError, match="cleanup was not confirmed"
+        ), mihomo_projection_write(db):
+            pass
+
+    with Session(mysql_engine) as db:
+        blocker = db.scalar(
+            select(Job).where(Job.job_type == MIHOMO_RECONCILE_BLOCKER_JOB_TYPE)
+        )
+        assert blocker is not None
+        assert blocker.status is JobStatus.SUCCEEDED
+
+
 def test_lock_name_fails_closed_without_database() -> None:
     from sqlalchemy import create_engine
 
@@ -242,9 +323,17 @@ def test_get_lock_exception_invalidates_connection() -> None:
     assert connection.invalidated
 
 
-def test_release_failure_invalidates_connection() -> None:
-    connection = _Connection(value=0)
+@pytest.mark.parametrize("value", [0, None])
+def test_release_nonpositive_invalidates_connection(value: object) -> None:
+    connection = _Connection(value=value)
     with pytest.raises(MihomoProjectionLockError):
+        _release_lock(connection, "lingsway:test:mihomo-full-config")  # type: ignore[arg-type]
+    assert connection.invalidated
+
+
+def test_release_exception_invalidates_connection() -> None:
+    connection = _Connection(error=RuntimeError("release failed"))
+    with pytest.raises(RuntimeError):
         _release_lock(connection, "lingsway:test:mihomo-full-config")  # type: ignore[arg-type]
     assert connection.invalidated
 

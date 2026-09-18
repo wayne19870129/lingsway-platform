@@ -98,7 +98,6 @@ def mihomo_projection_write(
         try:
             yield
         finally:
-            session.info[SESSION_INFO_LOCK_HELD_KEY] = previous
             metadata = session.info.get(SESSION_INFO_RELEASE_METADATA_KEY)
             if isinstance(metadata, dict):
                 try:
@@ -142,6 +141,7 @@ def mihomo_projection_write(
                         "Mihomo release blocker cleanup was not confirmed"
                     ) from exc
     finally:
+        session.info[SESSION_INFO_LOCK_HELD_KEY] = previous
         session.info.pop(SESSION_INFO_RELEASE_METADATA_KEY, None)
         connection.close()
 

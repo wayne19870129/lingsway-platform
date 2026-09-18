@@ -15,7 +15,10 @@ import backend.app.models  # noqa: F401
 from backend.app.infra import mihomo_reconciliation as reconciliation
 from backend.app.infra.mihomo_blocker import (
     MIHOMO_BLOCKER_KIND_FINALIZATION,
+    MIHOMO_BLOCKER_KIND_LOCK_RELEASE,
+    MIHOMO_LOCK_RELEASE_PENDING,
     MIHOMO_RECONCILE_BLOCKER_JOB_TYPE,
+    MihomoBlockerError,
     ensure_mihomo_blocker,
 )
 from backend.app.infra.mihomo_reconciliation import (
@@ -111,6 +114,32 @@ def test_operation_id_is_bounded_by_job_dedupe_key(db: Session) -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "operation_id",
+    ["abc", "op-123", "op_123", "op.123", "op:123", "x" * 143],
+)
+def test_operation_id_accepts_only_shared_safe_grammar(
+    db: Session, operation_id: str
+) -> None:
+    job = enqueue_mihomo_reconciliation(
+        db, operation_id=operation_id, operation_kind="RECONCILE", snapshot_revision=1
+    )
+    assert job.dedupe_key == f"MIHOMO_RECONCILE:{operation_id}"
+
+
+@pytest.mark.parametrize(
+    "operation_id",
+    [" op", "op ", "op/123", r"op\123", "op 123", "中文", "op\x01", "x" * 144],
+)
+def test_operation_id_rejects_values_not_persistable_in_blockers(
+    db: Session, operation_id: str
+) -> None:
+    with pytest.raises(ValueError):
+        enqueue_mihomo_reconciliation(
+            db, operation_id=operation_id, operation_kind="RECONCILE", snapshot_revision=1
+        )
+
+
 def test_blocker_is_identifier_only_idempotent_and_global(db: Session) -> None:
     blocker = ensure_mihomo_blocker(
         db,
@@ -138,6 +167,15 @@ def test_blocker_is_identifier_only_idempotent_and_global(db: Session) -> None:
     db.info["mihomo_projection_lock_held"] = True
     with pytest.raises(MihomoReconciliationBlocked, match="GLOBAL_MANUAL_BLOCKER"):
         assert_no_unresolved_mihomo_mutation(db)
+    with pytest.raises(MihomoBlockerError):
+        ensure_mihomo_blocker(
+            db,
+            blocker_kind=MIHOMO_BLOCKER_KIND_FINALIZATION,
+            source_job_id=78,
+            operation_id="op/123",
+            snapshot_revision=1,
+            reason_code=MIHOMO_FINALIZATION_UNKNOWN,
+        )
     with pytest.raises(ValueError):
         enqueue_mihomo_reconciliation(
             db, operation_id="op-1", operation_kind="ARBITRARY", snapshot_revision=1
@@ -251,6 +289,23 @@ def test_classifier_requires_exact_job_and_evidence(db: Session) -> None:
     }
     job.payload_json = json.dumps(payload)
     job.status = JobStatus.SUCCEEDED
+    db.commit()
+    assert classify_finalization_outcome(
+        db,
+        job_id=job.id,
+        operation_id="op-2",
+        operation_kind="RECONCILE",
+        snapshot_revision=4,
+        candidate_fingerprint="v4",
+    ) is CommitOutcome.UNKNOWN
+    ensure_mihomo_blocker(
+        db,
+        blocker_kind=MIHOMO_BLOCKER_KIND_LOCK_RELEASE,
+        source_job_id=job.id,
+        operation_id="op-2",
+        snapshot_revision=4,
+        reason_code=MIHOMO_LOCK_RELEASE_PENDING,
+    )
     db.commit()
     assert classify_finalization_outcome(
         db,
@@ -398,6 +453,14 @@ def test_exact_landed_and_exact_running_need_no_duplicate_blocker(db: Session) -
     }
     job.status = JobStatus.SUCCEEDED
     job.payload_json = json.dumps(payload, sort_keys=True)
+    ensure_mihomo_blocker(
+        db,
+        blocker_kind=MIHOMO_BLOCKER_KIND_LOCK_RELEASE,
+        source_job_id=job.id,
+        operation_id="op-exact",
+        snapshot_revision=1,
+        reason_code=MIHOMO_LOCK_RELEASE_PENDING,
+    )
     db.commit()
     landed = _mark_unknown(
         db,
@@ -410,17 +473,21 @@ def test_exact_landed_and_exact_running_need_no_duplicate_blocker(db: Session) -
         applied=False,
     )
     assert landed.finalized is True
-    assert db.scalar(select(Job).where(Job.job_type == MIHOMO_RECONCILE_BLOCKER_JOB_TYPE)) is None
-
-    job.status = JobStatus.RUNNING
-    job.payload_json = json.dumps(
-        {"operation_id": "op-exact", "operation_kind": "RECONCILE", "snapshot_revision": 1}
+    release_blocker = db.scalar(
+        select(Job).where(Job.job_type == MIHOMO_RECONCILE_BLOCKER_JOB_TYPE)
     )
+    assert release_blocker is not None
+    assert release_blocker.status is JobStatus.PENDING
+
+    running_job = enqueue_mihomo_reconciliation(
+        db, operation_id="op-exact-running", operation_kind="RECONCILE", snapshot_revision=1
+    )
+    running_job.status = JobStatus.RUNNING
     db.commit()
     running = _mark_unknown(
         db,
-        job.id,
-        operation_id="op-exact",
+        running_job.id,
+        operation_id="op-exact-running",
         operation_kind="RECONCILE",
         snapshot_revision=1,
         candidate_fingerprint="projection-v1",
@@ -428,7 +495,15 @@ def test_exact_landed_and_exact_running_need_no_duplicate_blocker(db: Session) -
         applied=False,
     )
     assert running.finalized is False
-    assert db.scalar(select(Job).where(Job.job_type == MIHOMO_RECONCILE_BLOCKER_JOB_TYPE)) is None
+    assert (
+        db.scalar(
+            select(Job).where(
+                Job.job_type == MIHOMO_RECONCILE_BLOCKER_JOB_TYPE,
+                Job.dedupe_key == f"MIHOMO_BLOCKER:FINALIZATION:{running_job.id}",
+            )
+        )
+        is None
+    )
 
 
 def test_ack_loss_after_durable_commit_is_landed_without_downgrade(
@@ -463,6 +538,14 @@ def test_ack_loss_after_durable_commit_is_landed_without_downgrade(
     assert job is not None
     assert job.status is JobStatus.SUCCEEDED
     assert job.last_error_code is None
+    release_blocker = db.scalar(
+        select(Job).where(
+            Job.job_type == MIHOMO_RECONCILE_BLOCKER_JOB_TYPE,
+            Job.dedupe_key == "MIHOMO_BLOCKER:LOCK_RELEASE:1",
+        )
+    )
+    assert release_blocker is not None
+    assert release_blocker.status is JobStatus.PENDING
 
 
 def test_commit_before_durable_write_is_absent_and_retryable(
@@ -498,6 +581,15 @@ def test_commit_before_durable_write_is_absent_and_retryable(
     job = db.get(Job, 1)
     assert job is not None
     assert job.status is JobStatus.FAILED
+    assert (
+        db.scalar(
+            select(Job).where(
+                Job.job_type == MIHOMO_RECONCILE_BLOCKER_JOB_TYPE,
+                Job.dedupe_key == "MIHOMO_BLOCKER:LOCK_RELEASE:1",
+            )
+        )
+        is None
+    )
 
 
 def test_observer_unavailable_after_ack_loss_preserves_exact_landed_row(
@@ -791,6 +883,60 @@ def test_positive_verification_finalizes_with_secret_neutral_version(
     assert job is not None
     assert "never-store" not in job.payload_json
     assert "projection-v1" in job.payload_json
+
+
+def test_finalization_boundary_survives_crash_before_release_and_blocks_new_worker(
+    db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    enqueue_mihomo_reconciliation(
+        db, operation_id="op-crash-before-release", operation_kind="RECONCILE", snapshot_revision=1
+    )
+    db.commit()
+    provider = _Provider()
+    result = _reconcile_with_fake_lock(
+        db,
+        provider,
+        _Verifier(ProjectionVerification(True, "readback-v1")),
+        monkeypatch,
+    )
+
+    assert result is not None
+    assert result.finalized is True
+    source = db.get(Job, 1)
+    assert source is not None
+    assert source.status is JobStatus.SUCCEEDED
+    release_blocker = db.scalar(
+        select(Job).where(
+            Job.job_type == MIHOMO_RECONCILE_BLOCKER_JOB_TYPE,
+            Job.dedupe_key == "MIHOMO_BLOCKER:LOCK_RELEASE:1",
+        )
+    )
+    assert release_blocker is not None
+    assert release_blocker.status is JobStatus.PENDING
+
+    observer = Session(bind=db.get_bind(), expire_on_commit=False)
+    try:
+        newer = enqueue_mihomo_reconciliation(
+            observer,
+            operation_id="op-crash-before-release-newer",
+            operation_kind="RECONCILE",
+            snapshot_revision=1,
+        )
+        observer.commit()
+        newer_provider = _Provider()
+        newer_result = _reconcile_with_fake_lock(
+            observer,
+            newer_provider,
+            _Verifier(ProjectionVerification(True, "readback-v1")),
+            monkeypatch,
+        )
+        assert newer_result is None
+        assert newer_provider.apply_count == 0
+        newer_row = observer.get(Job, newer.id)
+        assert newer_row is not None
+        assert newer_row.status is JobStatus.PENDING
+    finally:
+        observer.close()
 
 
 def test_nonpositive_apply_result_persists_runtime_blocker_and_blocks_newer(
