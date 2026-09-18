@@ -11,6 +11,12 @@ state, reviews, and checks. Do not rely on an older chat or SHA snapshot.
 
 ## 2. Roles and workflow
 
+> The concrete three-way operating model — ChatGPT directs, Codex/LUNA
+> implements, Claude Code audits periodically — is written out in
+> [`85-agent-operating-model.md`](85-agent-operating-model.md), including
+> when to call Claude Code in for a whole-repository review. That file is a
+> working procedure and never overrides `AGENTS.md`.
+
 - User owns acceptance, manual merge, and production approval.
 - The task-assigned execution agent is the sole writer for its task and branch;
   agents do not modify another active workstream concurrently.
