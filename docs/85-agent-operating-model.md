@@ -89,15 +89,39 @@ S02→S04-B1 连续 8 个 PR 一个 TASK 文件都没有，规则空转。**现�
 参考范例：`TASK-S05-compensation-failure-contract.md`（已完成，含实际交付
 与回归证据）、`TASK-S04-mihomo-activation.md`（未开始，含阶段拆分）。
 
-### 2.3 给 Codex 的指令里必须包含
+### 2.3 给 Codex 的指令模板（直接复制，替换尖括号）
 
-- 指向 TASK 文件本身，而不是把要求复述一遍（复述会漂移）。
-- 提醒它先读 `AGENTS.md` 和相关 ADR。
-- 明确本次**不做**什么。
-- 提醒："断言与实现不一致时，先判断哪一边错了并说明理由，
-  **不得把失败的测试改成通过**。"
-- 提醒："结束时给出：改了哪些文件、跑了哪些检查、哪些没验证成功、为什么。
-  不接受'应该没问题'。"
+要点：**指向 TASK 文件，不要把要求复述一遍**——复述必然漂移，两份要求
+一旦不一致，Codex 会按你复述的那份做。
+
+```text
+任务：<一句话说清这次要交付什么>
+
+依据文件（先读，不要跳过）：
+1. AGENTS.md —— 铁律、写权限、凭据边界、禁止/允许自主执行两张表
+2. CLAUDE.md —— PR 流程与验证要求
+3. docs/82-tasks/<TASK-文件名>.md —— 本次任务的目标/约束/允许修改的文件/验收标准
+4. <相关的 ADR，例如 docs/80-decisions/ADR-023-....md>
+
+硬性要求：
+- 只改 TASK 文件「允许修改的文件」一节列出的路径，未列出的一律不动。
+- 本次明确不做：<逐条列出，越具体越好>
+- 断言与实现不一致时，先判断哪一边是错的并说明理由，
+  不得把失败的测试改成通过，不得删除或跳过测试。
+- 推送前必须本地跑通，不要用 CI 当第一次验证：
+      python -m ruff check backend ops infrastructure scripts
+      python -m mypy backend/app backend/tests
+      python -m pytest backend/tests/unit backend/tests/guards
+      （动了前端再加：cd frontend && npx tsc --noEmit && npx eslint . --max-warnings=0 && npm run build）
+- 分支名：task/<主题>。不得推 main，不得 force push，不得自行 merge PR。
+
+结束时必须给出：
+- 改了哪些文件（逐个列）
+- 跑了哪些检查，各自的实际输出
+- 哪些没验证成功、为什么
+- 与 TASK 约束有无偏差，有的话说明理由
+不接受"应该没问题"这类结案。
+```
 
 ---
 
@@ -143,13 +167,28 @@ Claude 不参与日常逐个 PR 的实现。**在下列时机叫它做一次全�
 | 你和 Codex 出现架构分歧，或同一问题反复返工 | 第三方判断 |
 | 感觉"文档说的和代码做的对不上了" | 记忆文件梳理 |
 
-**叫 Claude 时给它这三句话就够：**
+**叫 Claude 的指令模板（直接复制）：**
 
-> 对 lingsway-platform 做一次整体架构审阅。先读 `CLAUDE.md`、`AGENTS.md`、
-> `docs/83-project-continuity.md`，再核对实际代码。
-> 重点：(1) 已完成部分的架构与细节；(2) 在做和待做部分有无问题；
-> (3) 记忆文件（各 `.md`）有没有过期或自相矛盾，该改的直接改。
-> 分支用 `claude/<本次主题>`。
+```text
+对 lingsway-platform 做一次整体架构审阅。
+
+先读 CLAUDE.md、AGENTS.md、docs/83-project-continuity.md，再核对实际代码——
+文档说什么不算数，以代码为准，两者不一致时以代码为事实、把文档改对。
+
+重点：
+1. 已完成部分的架构与细节有没有问题
+2. 在做和待做部分（见 continuity §5）有没有问题
+3. 记忆文件（各 .md）有没有过期、自相矛盾、或两份拷贝互相打架，
+   该改的直接改
+
+要求：
+- 实际跑 lint / mypy / 测试，不要只靠读代码下结论
+- 发现 bug 要先复现再下判断，并说明修复前的实际表现
+- 动 backend/app/domain/ 或 providers/base.py 的架构决策前先写 ADR（铁律 5）；
+  修复"实现与既有 ADR 不一致"的 bug 则引用原 ADR 即可
+- 触发 AGENTS.md 门槛的工作要先写 docs/82-tasks/TASK-*.md
+- 分支用 claude/<本次主题>，不要建 PR 除非我说要
+```
 
 Claude 的产出形态是：ADR、TASK 文件、`docs/81-reviews/REVIEW-*.md`、
 以及直接修正过期的记忆文件。**它不合并 PR，也不替 User 做决定。**
