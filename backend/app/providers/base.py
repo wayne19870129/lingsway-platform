@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
+from types import MappingProxyType
 from typing import Protocol
 
 
@@ -233,7 +234,31 @@ class DesiredForwarderState:
     dns: Mapping[str, object] = field(default_factory=dict)
     policy: Mapping[str, object] = field(default_factory=dict)
     transport_materializations: tuple[object, ...] = ()
+    transport_references: tuple[object, ...] = ()
     deployment_constants: Mapping[str, object] = field(default_factory=dict)
+    snapshot_revision: int = 1
+    snapshot_identity: str = "default"
+
+    def __post_init__(self) -> None:
+        if self.snapshot_revision <= 0 or not self.snapshot_identity.strip():
+            raise ValueError("desired snapshot identity is invalid")
+
+        def freeze(value: object) -> object:
+            if isinstance(value, Mapping):
+                return MappingProxyType({str(key): freeze(item) for key, item in value.items()})
+            if isinstance(value, (list, tuple)):
+                return tuple(freeze(item) for item in value)
+            if isinstance(value, (str, int, float, bool, type(None))):
+                return value
+            raise TypeError("desired snapshot contains unsupported value")
+
+        object.__setattr__(self, "listeners", freeze(self.listeners))
+        object.__setattr__(self, "proxies", freeze(self.proxies))
+        object.__setattr__(self, "proxy_groups", freeze(self.proxy_groups))
+        object.__setattr__(self, "rules", freeze(self.rules))
+        object.__setattr__(self, "dns", freeze(self.dns))
+        object.__setattr__(self, "policy", freeze(self.policy))
+        object.__setattr__(self, "deployment_constants", freeze(self.deployment_constants))
 
 
 class CandidateConfig:

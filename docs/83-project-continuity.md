@@ -62,8 +62,9 @@ materialization is restricted input, not Mihomo activation.
   is implemented, but this does not authorize Mihomo activation or production
   deployment.
 - **S04-A:** ACTIVE on the projection-foundation branch. It establishes the
-  ADR-023 immutable desired snapshot, deterministic full-document composer,
-  and transport materialization identity/freshness proof. It does not activate
+  ADR-023 immutable/versioned desired snapshot, deterministic full-document
+  composer, and exact transport reference/materialization identity and
+  freshness proof. It does not activate
   Mihomo, wire `FORWARDER_PROVIDER=mihomo` into production, deploy, or authorize
   real-provider production use. Durable pending/finalization, single-writer
   locking, crash recovery, and production registry wiring remain later S04-B/C

@@ -51,7 +51,6 @@ from backend.app.providers.base import (
 from backend.app.providers.forwarder.mihomo import MihomoForwarderProvider, MihomoRuntimeError
 from backend.app.providers.registry import build_registry
 from backend.app.schemas.public import OrderCreate
-from ops.forwarder.render_mihomo_config import render_mihomo_document
 
 
 @pytest.fixture
@@ -447,12 +446,11 @@ def test_mihomo_render_failure_restores_exact_pre_operation_state(
     )
     db.commit()
     monkeypatch.setenv("MIHOMO_API_SECRET", "test-api-secret")
-    document = render_mihomo_document(db)
     original = b"rules:\n  - MATCH,OLD\n"
     config_path = tmp_path / "config.yaml"
     config_path.write_bytes(original)
     runtime = FailingMihomoRuntime(config_path)
-    provider = MihomoForwarderProvider(lambda: document, runtime)
+    provider = MihomoForwarderProvider(runtime)
     candidate = provider.render(DesiredForwarderState({}))
 
     with pytest.raises(MihomoRuntimeError):
@@ -510,14 +508,13 @@ def test_mihomo_unhealthy_post_reload_restores_exact_pre_operation_state(
     )
     db.commit()
     monkeypatch.setenv("MIHOMO_API_SECRET", "test-api-secret")
-    document = render_mihomo_document(db)
     original = b"rules:\n  - MATCH,OLD\n"
     config_path = tmp_path / "config.yaml"
     config_path.write_bytes(original)
     runtime = FailingMihomoRuntime(
         config_path, fail_reload_count=0, health_values=[False, True]
     )
-    provider = MihomoForwarderProvider(lambda: document, runtime)
+    provider = MihomoForwarderProvider(runtime)
     candidate = provider.render(DesiredForwarderState({}))
 
     with pytest.raises(MihomoRuntimeError, match="unhealthy"):

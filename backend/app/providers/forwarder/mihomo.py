@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -110,14 +110,10 @@ class LocalMihomoRuntime:
         return HealthReport(healthy, {"mihomo_api": str(healthy)})
 
 
-RenderDocument = Callable[[], bytes]
-
-
 class MihomoForwarderProvider(ForwarderProvider):
     """Render from DB state and restore the exact pre-operation file on failure."""
 
-    def __init__(self, render_document: RenderDocument, runtime: MihomoRuntime) -> None:
-        self._render_document = render_document
+    def __init__(self, runtime: MihomoRuntime) -> None:
         self._runtime = runtime
 
     def render(self, desired: DesiredForwarderState) -> CandidateConfig:

@@ -79,7 +79,7 @@ def candidate() -> CandidateConfig:
 
 def test_successful_apply_verifies_health_after_reload() -> None:
     runtime = Runtime()
-    provider = MihomoForwarderProvider(lambda: b"rules:\n  - MATCH,DIRECT\n", runtime)
+    provider = MihomoForwarderProvider(runtime)
 
     result = provider.apply(candidate())
 
@@ -90,7 +90,7 @@ def test_successful_apply_verifies_health_after_reload() -> None:
 
 def test_install_exception_triggers_rollback_and_fails_closed() -> None:
     runtime = Runtime(install_error=RuntimeError("disk full"))
-    provider = MihomoForwarderProvider(lambda: b"rules:\n  - MATCH,DIRECT\n", runtime)
+    provider = MihomoForwarderProvider(runtime)
 
     with pytest.raises(MihomoRuntimeError, match="configuration restored"):
         provider.apply(candidate())
@@ -101,7 +101,7 @@ def test_install_exception_triggers_rollback_and_fails_closed() -> None:
 
 def test_reload_exception_triggers_rollback_and_fails_closed() -> None:
     runtime = Runtime(reload_error=RuntimeError("hot reload failed"))
-    provider = MihomoForwarderProvider(lambda: b"rules:\n  - MATCH,DIRECT\n", runtime)
+    provider = MihomoForwarderProvider(runtime)
 
     with pytest.raises(MihomoRuntimeError, match="configuration restored"):
         provider.apply(candidate())
@@ -114,7 +114,7 @@ def test_unhealthy_post_reload_triggers_rollback_and_fails_closed() -> None:
     """A `reload()` that returns cleanly but leaves Mihomo unhealthy must
     not be reported as a successful apply."""
     runtime = Runtime(health_values=[False, True])
-    provider = MihomoForwarderProvider(lambda: b"rules:\n  - MATCH,DIRECT\n", runtime)
+    provider = MihomoForwarderProvider(runtime)
 
     with pytest.raises(MihomoRuntimeError, match="unhealthy"):
         provider.apply(candidate())
@@ -133,7 +133,7 @@ def test_unhealthy_post_reload_triggers_rollback_and_fails_closed() -> None:
 
 def test_rollback_restore_exception_fails_closed_without_claiming_recovery() -> None:
     runtime = Runtime(health_values=[False], restore_error=RuntimeError("disk unavailable"))
-    provider = MihomoForwarderProvider(lambda: b"rules:\n  - MATCH,DIRECT\n", runtime)
+    provider = MihomoForwarderProvider(runtime)
 
     with pytest.raises(MihomoRuntimeError, match="unknown"):
         provider.apply(candidate())
@@ -148,7 +148,7 @@ def test_rollback_reload_exception_fails_closed_without_claiming_recovery() -> N
         health_values=[False],
         rollback_reload_error=RuntimeError("hot reload failed"),
     )
-    provider = MihomoForwarderProvider(lambda: b"rules:\n  - MATCH,DIRECT\n", runtime)
+    provider = MihomoForwarderProvider(runtime)
 
     with pytest.raises(MihomoRuntimeError, match="unknown"):
         provider.apply(candidate())
@@ -166,7 +166,7 @@ def test_rollback_reload_exception_fails_closed_without_claiming_recovery() -> N
 
 def test_rollback_health_exception_fails_closed_without_claiming_recovery() -> None:
     runtime = Runtime(health_values=[False, RuntimeError("health probe crashed")])
-    provider = MihomoForwarderProvider(lambda: b"rules:\n  - MATCH,DIRECT\n", runtime)
+    provider = MihomoForwarderProvider(runtime)
 
     with pytest.raises(MihomoRuntimeError, match="unknown"):
         provider.apply(candidate())
@@ -187,7 +187,7 @@ def test_rollback_reload_succeeds_but_still_unhealthy_fails_closed() -> None:
     confirmed-safe runtime: if the rollback's own health check still
     reports unhealthy, this must fail closed rather than claim recovery."""
     runtime = Runtime(health_values=[False, False])
-    provider = MihomoForwarderProvider(lambda: b"rules:\n  - MATCH,DIRECT\n", runtime)
+    provider = MihomoForwarderProvider(runtime)
 
     with pytest.raises(MihomoRuntimeError, match="unhealthy afterwards"):
         provider.apply(candidate())

@@ -2813,9 +2813,13 @@ separately gated.
 
 ## S04-A — Mihomo projection foundation
 
-S04-A is a separate projection-foundation task based on ADR-023. It consumes
-fresh immutable desired state and verified transport materialization metadata to
-produce one deterministic full Mihomo document. It does not activate Mihomo,
+S04-A is a separate projection-foundation task based on ADR-023. Its projection
+contract binds each immutable desired transport reference exactly to one
+materialization proof (record identity, provider code, source revision, cache
+identity, content hash, and freshness deadline), and rejects unowned or extra
+materializations. It consumes fresh immutable desired state and verified
+transport materialization metadata to produce one deterministic full Mihomo
+document. It does not activate Mihomo,
 wire `FORWARDER_PROVIDER=mihomo` into the production registry, deploy, or grant
 real-provider production authorization. Durable pending/finalization,
 single-writer locking, crash recovery, and production registry wiring remain
