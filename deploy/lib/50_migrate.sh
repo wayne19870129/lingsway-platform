@@ -31,9 +31,9 @@ main() {
   grep -Fxq backend-api <<< "$services" || die 'migration refused: backend-api service is absent'
   local marker="${PRE_MIGRATION_BACKUP_MARKER:-/run/lingsway/pre-migration-backup.ok}"
   if [[ ! -f "$marker" ]]; then
-    [[ -n "${PRE_MIGRATION_BACKUP_COMMAND:-}" ]] || \
-      die 'migration refused: PRE_MIGRATION_BACKUP_COMMAND or a valid marker is required'
-    bash -c "$PRE_MIGRATION_BACKUP_COMMAND"
+    local backup_script="${BACKUP_SCRIPT:-$DEPLOY_ROOT/ops/backup/backup.sh}"
+    [[ -x "$backup_script" ]] || die 'migration refused: encrypted backup script is missing or not executable'
+    "$backup_script"
     install --directory "$(dirname "$marker")"
     touch "$marker"
   fi

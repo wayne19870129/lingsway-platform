@@ -20,16 +20,23 @@ main() {
   fi
   [[ "$(id -u)" -eq 0 ]] || die '80_schedule.sh must run as root on the target host'
   require_cmd install
+  require_cmd runuser
   require_cmd systemctl
-  local cron_path service_path timer_path tmp
+  local cron_path wrapper_path installer service_path timer_path tmp
   cron_path="${BACKUP_CRON_PATH:-/etc/cron.d/lingsway-backup}"
+  wrapper_path="${BACKUP_WRAPPER_PATH:-/usr/local/sbin/lingsway-backup}"
+  installer="${BACKUP_INSTALL_CRON_SCRIPT:-$DEPLOY_ROOT/ops/backup/install-cron.sh}"
   service_path="${BINLOG_GUARD_SERVICE_PATH:-/etc/systemd/system/lingsway-binlog-guard.service}"
   timer_path="${BINLOG_GUARD_TIMER_PATH:-/etc/systemd/system/lingsway-binlog-guard.timer}"
+  [[ -x "$installer" ]] || die 'backup cron installer is missing or not executable'
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
-  printf '%s\n' \
-    "17 3 * * * deploy ${BACKUP_SCRIPT:-$DEPLOY_ROOT/ops/backup/backup.sh} >>/var/log/lingsway-backup.log 2>&1" \
-    > "$tmp/backup.cron"
+  BACKUP_CRON_PATH="$cron_path" \
+    BACKUP_WRAPPER_PATH="$wrapper_path" \
+    BACKUP_SCRIPT="${BACKUP_SCRIPT:-$DEPLOY_ROOT/ops/backup/backup.sh}" \
+    BACKUP_CONF_FILE="${BACKUP_CONF_FILE:-/etc/lingsway/backup.conf}" \
+    BACKUP_APP_ENV_FILE="${BACKUP_APP_ENV_FILE:-$DEPLOY_ROOT/.env}" \
+    "$installer"
   printf '%s\n' \
     '[Unit]' \
     'Description=Lingsway binlog guard' \

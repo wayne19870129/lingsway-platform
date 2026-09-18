@@ -267,12 +267,13 @@ later session does not have to rediscover it.
    coverage stops at `backend/`; `ops/**` has no type checking. That is a
    larger change (the ops scripts are not annotated) and is not scheduled.
 
-3. **`ops/backup/` is empty**, so `AGENTS.md`'s "`alembic upgrade` 前提：先成功跑
-   一次加密备份" precondition is unsatisfiable, `Makefile`'s `backup`/`restore`
-   targets point at non-existent scripts, and `deploy/lib/80_schedule.sh`
-   installs a cron for a script that does not exist. `deploy/lib/70_verify.sh`
-   `check_13_backup` does fail closed on this, so a real deploy cannot silently
-   pass — but it also cannot pass at all until this lands.
+3. ~~**`ops/backup/` is empty**。~~ **TASK-S07 实现于 2026-09-18。**
+   `backup.sh` 现在生成唯一命名的 GPG 加密 MySQL 备份，保存 SHA-256 证据并
+   上传既有 R2；`--verify` 只读核对本地和 R2 证据；`restore.sh` 要求明确的
+   空目标数据库；`install-cron.sh` 通过 root-owned wrapper 解决 deploy 用户
+   与 root:root 0600 backup 配置的权限冲突。`check_13_backup` 已接入真实
+   验证并保持 fail-closed。本任务不执行真实生产备份、恢复、migration 或
+   production deployment workflow。
 
 4. ~~**Plan-tier configuration is inconsistent.**~~ **MOSTLY FIXED 2026-09-18**
    by `TASK-S06-plan-catalogue.md`. The product owner settled the catalogue:
@@ -323,7 +324,7 @@ Known divergences (do not treat these as missing work without checking intent):
 |---|---|
 | `backend/app/core/rate_limit.py` | Does not exist; rate limiting lives inside `providers/egress/webshare.py` |
 | `workers/usage_sync.py`, `workers/baseline.py` | Renamed to `accounting_sync.py`, `transport_sync.py`, `drift_check.py` |
-| `ops/backup/{backup,restore,install-cron}.sh`, `ops/status.py` | None exist |
+| `ops/backup/{backup,restore,install-cron}.sh` | Implemented by TASK-S07; `ops/status.py` remains absent |
 | `egress/manual`, `payment/manual`, `notify/telegram`, `email/{resend,smtp}`, `captcha/turnstile`, `storage/{r2,s3,local}` | None exist; only mock/noop |
 | `providers/base.py` Protocol signatures | Materially evolved (e.g. `GatewayProvider.render()` now requires a `CredentialResolver`; `AccountUserDTO.routing_principal` added per ADR-016) |
 | `(docs)/guides/{windows,macos,ios,android}` | Route directories exist but contain only `.gitkeep` |

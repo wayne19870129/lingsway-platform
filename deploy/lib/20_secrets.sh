@@ -46,6 +46,10 @@ main() {
   require_name JWT_SECRET "$app_env"
   require_name DATABASE_URL "$app_env"
   require_name BACKUP_GPG_RECIPIENT "$backup_conf"
+  require_name R2_ENDPOINT_URL "$backup_conf"
+  require_name R2_ACCESS_KEY_ID "$backup_conf"
+  require_name R2_SECRET_ACCESS_KEY "$backup_conf"
+  require_name R2_BUCKET "$backup_conf"
   log 'secret files passed ownership, mode, and required-name checks'
 }
 
