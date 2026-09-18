@@ -106,6 +106,16 @@ main() {
     return 0
   fi
   [[ "$(id -u)" -eq 0 ]] || die '10_system.sh must run as root on the target host'
+  require_cmd apt-get
+  local backup_packages=()
+  command -v gpg >/dev/null 2>&1 || backup_packages+=(gnupg)
+  command -v mysqldump >/dev/null 2>&1 || backup_packages+=(default-mysql-client)
+  command -v aws >/dev/null 2>&1 || backup_packages+=(awscli)
+  command -v runuser >/dev/null 2>&1 || backup_packages+=(util-linux)
+  if ((${#backup_packages[@]} > 0)); then
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install --yes "${backup_packages[@]}"
+  fi
   # Stage-two finding (2026-09-02): a clean Debian 12 host did not have the
   # docker group. Install the required local packages here so bootstrap really
   # works from a blank host; do not silently assume Docker was preinstalled.

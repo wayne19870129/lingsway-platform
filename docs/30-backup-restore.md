@@ -1,40 +1,62 @@
 # Backup and restore
 
-> **状态：能力本身尚不存在。** 本文件此前只有一句"Backup, restore, and
-> PowerShell GPG instructions are delivered in T6/T7"。这不是"文档欠撰写"，
-> 而是**工具本身没有写**：`ops/backup/` 目录下只有一个 `.gitkeep`。
+## 交付状态
 
-## 这个缺口的实际影响
+TASK-S07 已补齐 `ops/backup/backup.sh`、`restore.sh` 和 `install-cron.sh`，
+并将部署验收硬闸门接到真实的本地备份和 R2 完整性证据。备份能力仍然是
+生产部署的前置条件，不是可以忽略的 dry-run 标记。
 
-`ops/backup/{backup.sh,restore.sh,install-cron.sh}` 全部缺失，直接导致四处
-已经存在的引用指向不存在的文件：
+## 备份流程
 
-| 引用位置 | 后果 |
-|---|---|
-| `AGENTS.md`「允许自主执行」→「执行 alembic upgrade（前提：先成功跑一次加密备份）」 | **该前提当前无法满足**，因此这条授权在实践中不成立 |
-| `Makefile` 的 `backup` / `restore` 目标 | 调用即失败 |
-| `deploy/lib/80_schedule.sh` | 会安装一条指向不存在脚本的 cron，安装时不报错 |
-| `.github/workflows/deploy-migration.yml` | dry-run 里只 echo，真实执行时无脚本可调 |
-| ADR-007 | 其"加密备份 + binlog 文件"一致性论证依赖 `ops/backup/backup.sh` |
+`backup.sh` 从 `/etc/lingsway/backup.conf` 读取 `BACKUP_GPG_RECIPIENT` 和
+既有 R2 配置，使用 `mysqldump --single-transaction --routines --events
+--triggers --hex-blob` 生成临时明文，随后用 GPG 加密。明文只位于受限临时
+目录，退出时清理。最终本地目录只留下唯一命名的：
 
-**但部署不会因此静默通过**：`deploy/lib/70_verify.sh` 的 `check_13_backup`
-在脚本缺失时返回失败（fail-closed），所以 `bootstrap.sh` 跑到验收阶段一定
-会红。换句话说，**这是当前通往生产的硬闸门，不是一个可以延后的文档任务。**
+- `*.sql.gpg` 加密备份；
+- `*.sql.gpg.sha256`，内容同时记录 SHA-256 和对应文件名。
 
-## 补齐时必须满足的约束
+两个产物都会上传到同一 R2 前缀。脚本不会自动 retention cleanup，也不会
+覆盖或删除 `/var/backups/lingsway` 中已有的备份。任何 dump、GPG 或 R2 失败
+都会返回失败，不会打印凭据或把状态伪装成成功。
 
-- 备份必须加密（GPG，收件人来自 `/etc/lingsway/backup.conf` 的
-  `BACKUP_GPG_RECIPIENT`），上传 R2，并做 SHA-256 校验——三项都是
-  `ARCHITECTURE.md` §8 验收清单第 13 项的组成部分。
-- `backup.sh` 必须支持 `--verify`（`70_verify.sh` 已经在这样调用它）。
-- 删除或覆盖 `/var/backups/lingsway` 下的备份属于
-  `AGENTS.md`「禁止自主执行」，任何脚本都不得内置自动清理旧备份的行为而不经
-  人工确认。
-- 恢复演练（`ARCHITECTURE.md` §9 的 P5）是独立验收项：在临时机器上用加密备份
-  完整还原并验证订阅可用。当前恢复能力是"理论上可以"，不是"验证过可以"。
+## 只读验证
 
-## 优先级
+`backup.sh --verify` 选择指定的 `BACKUP_ARCHIVE` 或本地最新加密备份，先核对
+本地 `.sha256`，再用 R2 head 检查加密对象和校验证据，并读取远端校验证据
+与本地值比较。这个路径不生成 dump、不调用 GPG 加密、不覆盖本地文件，也不
+上传对象。R2 ETag 不被当作 SHA-256。
 
-`docs/84-implementation-roadmap-2026-09.md` §5 把备份/恢复工具列为**第 1 优先
-级**，并建议它落在任何"引入真实外部系统写副作用"的接线之前（即 Webshare /
-Mihomo 的注册表放行之前）。2026-09-18 审计复核，该排序仍然成立。
+## 恢复流程
+
+恢复必须明确指定加密归档、目标数据库，并携带
+`--confirm-empty-target`。脚本先核对本地 SHA-256，再查询目标数据库的表数；
+目标不是空库或校验不匹配时立即失败。只有校验和空目标检查均通过后才解密
+并导入。脚本不包含自动清空现有数据库的逻辑。
+
+示例：
+
+```sh
+ops/backup/restore.sh \
+  --archive /var/backups/lingsway/mysql-...sql.gpg \
+  --target-database lingsway_restore \
+  --confirm-empty-target
+```
+
+## cron 与 secret 权限
+
+`install-cron.sh` 安装 root-owned、仅 root 可写的 wrapper 和 `/etc/cron.d`
+条目。wrapper 以 root 读取 `root:root 0600` 的 `/etc/lingsway/backup.conf`，
+再通过 `runuser --preserve-environment` 以 `deploy` 身份运行备份脚本；不通过
+放宽配置文件权限解决读取冲突。应用 `.env` 只用于传递数据库连接参数，备份
+配置随后重新加载，以保证 GPG/R2 值来自受保护文件。
+
+## 部署验收
+
+`deploy/lib/70_verify.sh::check_13_backup` 要求 cron、wrapper（或明确的备份
+脚本）和可执行的 `backup.sh` 同时存在，并直接运行真实 `--verify`。任一缺失、
+本地校验不匹配、R2 对象缺失或远端校验证据不匹配都会 fail-closed；不能用
+任意环境变量命令替代验证。
+
+本任务不执行真实生产备份、真实生产恢复、真实生产 migration，也不启用真实
+production deployment workflow。恢复演练仍应在人工批准的临时环境中单独完成。

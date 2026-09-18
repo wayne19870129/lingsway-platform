@@ -214,15 +214,16 @@ check_12_listener_ips() {
 
 check_13_backup() {
   local cron_path="${BACKUP_CRON_PATH:-/etc/cron.d/lingsway-backup}"
+  local backup_script="${BACKUP_SCRIPT:-$DEPLOY_ROOT/ops/backup/backup.sh}"
+  local wrapper="${BACKUP_WRAPPER_PATH:-/usr/local/sbin/lingsway-backup}"
   [[ -s "$cron_path" ]] || return 1
-  grep -Eq '(^|[[:space:]])(backup\.sh|BACKUP_SCRIPT)' "$cron_path" || return 1
-  if [[ -n "${BACKUP_VERIFY_COMMAND:-}" ]]; then
-    bash -c "$BACKUP_VERIFY_COMMAND"
-  elif [[ -x "${BACKUP_SCRIPT:-$DEPLOY_ROOT/ops/backup/backup.sh}" ]]; then
-    "${BACKUP_SCRIPT:-$DEPLOY_ROOT/ops/backup/backup.sh}" --verify
+  [[ -x "$backup_script" ]] || return 1
+  if [[ -x "$wrapper" ]]; then
+    grep -Fq "$wrapper" "$cron_path" || return 1
   else
-    return 1
+    grep -Fq "$backup_script" "$cron_path" || return 1
   fi
+  "$backup_script" --verify
 }
 
 check_14_telegram() {
