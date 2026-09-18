@@ -117,11 +117,11 @@ def test_scheduler_resolves_each_enabled_record_and_isolates_failure(
         return SecretSnapshot("https://provider.invalid/private", 1)
 
     monkeypatch.setattr(scheduler, "reveal_secret_snapshot_for_purpose", load_secret)
-    monkeypatch.setattr(
-        scheduler,
-        "refresh_provider_inventory",
-        lambda _db, record, provider: (events.append(f"sync-{record.code}"), provider.sync_nodes()),
-    )
+    def refresh(_db: object, record: TransportProviderRecord, provider: FakeProvider) -> None:
+        events.append(f"sync-{record.code}")
+        provider.sync_nodes()
+
+    monkeypatch.setattr(scheduler, "refresh_provider_inventory", refresh)
     registry = type("Registry", (), {"transport_resolver": resolver, "transport": None})()
 
     assert scheduler.sync_transport_capacity_and_inventory(
@@ -136,6 +136,8 @@ def test_scheduler_resolves_each_enabled_record_and_isolates_failure(
     assert provider_b.sync_calls == 1
     assert events.index("secret-close") < events.index("sync-A")
     assert events.index("secret-close") < events.index("sync-B")
-    assert db_session.get(TransportProviderRecord, record_a.id).status is ProviderStatus.DEGRADED
-    assert db_session.get(TransportProviderRecord, record_b.id).status is ProviderStatus.HEALTHY
+    refreshed_a = db_session.get(TransportProviderRecord, record_a.id)
+    refreshed_b = db_session.get(TransportProviderRecord, record_b.id)
+    assert refreshed_a is not None and refreshed_a.status is ProviderStatus.DEGRADED
+    assert refreshed_b is not None and refreshed_b.status is ProviderStatus.HEALTHY
     assert db_session.scalars(select(AuditLog)).all()
