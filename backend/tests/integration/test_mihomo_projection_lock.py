@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterator
+from threading import Event, Thread
 from types import SimpleNamespace
 
 import pytest
@@ -67,6 +68,46 @@ def test_database_scoped_name_and_commit_span(mysql_engine: Engine) -> None:
             db.commit()
             assert session_holds_mihomo_projection_lock(db)
         assert not session_holds_mihomo_projection_lock(db)
+
+
+def test_mysql_named_lock_blocks_second_contender_until_release(mysql_engine: Engine) -> None:
+    owner_ready = Event()
+    release_owner = Event()
+    contender_entered = Event()
+    errors: list[BaseException] = []
+
+    def owner() -> None:
+        try:
+            with Session(mysql_engine) as db, mihomo_projection_write(
+                db, timeout_seconds=3
+            ):
+                owner_ready.set()
+                release_owner.wait(5)
+        except BaseException as exc:
+            errors.append(exc)
+            owner_ready.set()
+
+    def contender() -> None:
+        try:
+            with Session(mysql_engine) as db, mihomo_projection_write(
+                db, timeout_seconds=3
+            ):
+                contender_entered.set()
+        except BaseException as exc:
+            errors.append(exc)
+
+    owner_thread = Thread(target=owner)
+    contender_thread = Thread(target=contender)
+    owner_thread.start()
+    assert owner_ready.wait(5)
+    contender_thread.start()
+    assert not contender_entered.wait(0.25)
+    release_owner.set()
+    owner_thread.join(5)
+    contender_thread.join(5)
+
+    assert contender_entered.is_set()
+    assert not errors
 
 
 def test_lock_name_fails_closed_without_database() -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -18,13 +19,24 @@ from backend.app.infra.mihomo_projection_lock import (
 )
 from backend.app.models import Job, JobStatus
 from backend.app.providers.base import DesiredForwarderState
-from backend.app.providers.forwarder.mihomo import ControllerSecretResolver
+from backend.app.providers.forwarder.mihomo import (
+    ControllerSecretResolver,
+    MihomoApplyError,
+    MihomoRollbackUnknownError,
+    MihomoRollbackVerifiedError,
+)
+from backend.app.providers.forwarder.mihomo_projection import MihomoProjectionError
 
 MIHOMO_RECONCILE_JOB_TYPE = "MIHOMO_RECONCILE"
 MIHOMO_OPERATION_KINDS = frozenset(
     {"FULL_PROJECTION", "RECONCILE", "CREATE", "UPDATE", "DELETE"}
 )
 MIHOMO_FINALIZATION_UNKNOWN = "MIHOMO_FINALIZATION_COMMIT_OUTCOME_UNKNOWN"
+MIHOMO_RUNTIME_UNKNOWN = "MIHOMO_RUNTIME_PROJECTION_UNKNOWN"
+MIHOMO_ROLLBACK_UNKNOWN = "MIHOMO_ROLLBACK_OUTCOME_UNKNOWN"
+MIHOMO_UNKNOWN_DIAGNOSTICS = frozenset(
+    {MIHOMO_FINALIZATION_UNKNOWN, MIHOMO_RUNTIME_UNKNOWN, MIHOMO_ROLLBACK_UNKNOWN}
+)
 _RETRY_LIMIT = 5
 _STALE_AFTER = timedelta(minutes=15)
 
@@ -103,6 +115,12 @@ def _validate_revision(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError("snapshot_revision must be a positive integer")
     return value
+
+
+def _valid_evidence_version(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}", value
+    ) is not None
 
 
 def _payload(job: Job) -> dict[str, object]:
@@ -191,7 +209,7 @@ def classify_finalization_outcome(
     operation_id: str,
     snapshot_revision: int,
     candidate_fingerprint: str,
-    operation_kind: str | None = None,
+    operation_kind: str,
 ) -> CommitOutcome:
     """Classify using a fresh independent observer; ambiguity is never ABSENT."""
     try:
@@ -203,10 +221,7 @@ def classify_finalization_outcome(
             if (
                 payload.get("operation_id") != operation_id
                 or payload.get("snapshot_revision") != snapshot_revision
-                or (
-                    operation_kind is not None
-                    and payload.get("operation_kind") != operation_kind
-                )
+                or payload.get("operation_kind") != operation_kind
             ):
                 return CommitOutcome.UNKNOWN
             evidence = payload.get("finalization_evidence")
@@ -218,16 +233,15 @@ def classify_finalization_outcome(
                     and evidence.get("operation_kind") == payload.get("operation_kind")
                     and evidence.get("snapshot_revision") == snapshot_revision
                     and evidence.get("candidate_fingerprint") == candidate_fingerprint
-                    and isinstance(evidence.get("verification"), str)
-                    and bool(evidence["verification"])
+                    and _valid_evidence_version(evidence.get("verification"))
                 ):
                     return CommitOutcome.LANDED
                 return CommitOutcome.UNKNOWN
-            if evidence is None and job.status in {
-                JobStatus.PENDING,
-                JobStatus.RUNNING,
-                JobStatus.FAILED,
-            }:
+            if (
+                job.status is JobStatus.RUNNING
+                and evidence is None
+                and job.last_error_code not in MIHOMO_UNKNOWN_DIAGNOSTICS
+            ):
                 return CommitOutcome.ABSENT
             return CommitOutcome.UNKNOWN
     except Exception:
@@ -246,7 +260,7 @@ def _claim(db: Session, now: datetime) -> Job | None:
                 & (Job.locked_at < stale)
                 & or_(
                     Job.last_error_code.is_(None),
-                    Job.last_error_code != MIHOMO_FINALIZATION_UNKNOWN,
+                    ~Job.last_error_code.in_(MIHOMO_UNKNOWN_DIAGNOSTICS),
                 ),
             ),
             Job.available_at <= now,
@@ -273,7 +287,9 @@ def _failure(
     exhausted = job.attempts >= job.max_attempts
     code = (
         str(error)
-        if isinstance(error, MihomoReconciliationError)
+        if isinstance(
+            error, (MihomoReconciliationError, MihomoApplyError, MihomoProjectionError)
+        )
         else "MIHOMO_RECONCILIATION_RUNTIME_FAILURE"
     )
     job.status, job.locked_at, job.last_error_code = JobStatus.FAILED, None, code[:80]
@@ -282,23 +298,85 @@ def _failure(
     return MihomoReconciliationResult(job_id, False, False, not exhausted, code[:80])
 
 
+def _landed_result(job_id: int, *, applied: bool) -> MihomoReconciliationResult:
+    return MihomoReconciliationResult(job_id, applied, True, False)
+
+
 def _mark_unknown(
-    db: Session, job_id: int, *, applied: bool = True
+    db: Session,
+    job_id: int,
+    *,
+    operation_id: str,
+    operation_kind: str,
+    snapshot_revision: int,
+    candidate_fingerprint: str,
+    diagnostic: str,
+    applied: bool = True,
 ) -> MihomoReconciliationResult:
+    """Persist uncertainty only after a fresh exact read proves it is safe.
+
+    A failed acknowledgement can race with the durable commit.  The
+    independent observer is therefore authoritative: a later exact SUCCEEDED
+    row is LANDED, an exact RUNNING/no-evidence row may receive the manual
+    marker, and every other state is preserved without guessed mutation.
+    """
+    outcome = classify_finalization_outcome(
+        db,
+        job_id=job_id,
+        operation_id=operation_id,
+        operation_kind=operation_kind,
+        snapshot_revision=snapshot_revision,
+        candidate_fingerprint=candidate_fingerprint,
+    )
+    if outcome is CommitOutcome.LANDED:
+        return _landed_result(job_id, applied=applied)
+
     db.rollback()
-    job = db.get(Job, job_id)
-    if job is None:
-        raise MihomoReconciliationError("MIHOMO_RECONCILIATION_JOB_MISSING")
-    job.status = JobStatus.RUNNING
-    job.locked_at = datetime.now(UTC)
-    job.last_error_code = MIHOMO_FINALIZATION_UNKNOWN
+    current = db.scalar(
+        select(Job)
+        .where(Job.id == job_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if current is None:
+        return MihomoReconciliationResult(job_id, applied, False, False, diagnostic)
+    try:
+        current_payload = _payload(current)
+    except MihomoReconciliationError:
+        return MihomoReconciliationResult(job_id, applied, False, False, diagnostic)
+    exact_identity = (
+        current.job_type == MIHOMO_RECONCILE_JOB_TYPE
+        and current_payload.get("operation_id") == operation_id
+        and current_payload.get("operation_kind") == operation_kind
+        and current_payload.get("snapshot_revision") == snapshot_revision
+    )
+    evidence = current_payload.get("finalization_evidence")
+    if (
+        current.status is JobStatus.SUCCEEDED
+        and exact_identity
+        and isinstance(evidence, dict)
+        and evidence.get("operation_id") == operation_id
+        and evidence.get("operation_kind") == operation_kind
+        and evidence.get("snapshot_revision") == snapshot_revision
+        and evidence.get("candidate_fingerprint") == candidate_fingerprint
+        and _valid_evidence_version(evidence.get("verification"))
+    ):
+        return _landed_result(job_id, applied=applied)
+    if (
+        current.status is not JobStatus.RUNNING
+        or not exact_identity
+        or evidence is not None
+        or current.last_error_code in MIHOMO_UNKNOWN_DIAGNOSTICS
+    ):
+        return MihomoReconciliationResult(job_id, applied, False, False, diagnostic)
+    current.status = JobStatus.RUNNING
+    current.locked_at = datetime.now(UTC)
+    current.last_error_code = diagnostic
     try:
         db.commit()
     except Exception as exc:
-        raise MihomoCommitOutcomeUnknown(MIHOMO_FINALIZATION_UNKNOWN) from exc
-    return MihomoReconciliationResult(
-        job_id, applied, False, False, MIHOMO_FINALIZATION_UNKNOWN
-    )
+        raise MihomoCommitOutcomeUnknown(diagnostic) from exc
+    return MihomoReconciliationResult(job_id, applied, False, False, diagnostic)
 
 
 def _reset_blocked_claim(db: Session, job: Job) -> None:
@@ -339,7 +417,20 @@ def reconcile_mihomo_job(
             template = provider.render(desired)
             candidate = provider.finalize(template, resolver)
             fingerprint = candidate.version
-            apply_result = provider.apply(candidate)
+            try:
+                apply_result = provider.apply(candidate)
+            except MihomoRollbackUnknownError:
+                return _mark_unknown(
+                    db,
+                    job.id,
+                    operation_id=operation_id,
+                    operation_kind=operation_kind,
+                    snapshot_revision=expected,
+                    candidate_fingerprint=fingerprint,
+                    diagnostic=MIHOMO_ROLLBACK_UNKNOWN,
+                )
+            except (MihomoRollbackVerifiedError, MihomoApplyError) as exc:
+                return _failure(db, job.id, exc, datetime.now(UTC))
             if getattr(apply_result, "applied", False) is not True:
                 raise MihomoReconciliationError("MIHOMO_APPLY_NOT_CONFIRMED")
             try:
@@ -347,14 +438,29 @@ def reconcile_mihomo_job(
                     candidate, operation_id=operation_id, snapshot_revision=expected
                 )
             except Exception:
-                return _mark_unknown(db, job.id)
+                return _mark_unknown(
+                    db,
+                    job.id,
+                    operation_id=operation_id,
+                    operation_kind=operation_kind,
+                    snapshot_revision=expected,
+                    candidate_fingerprint=fingerprint,
+                    diagnostic=MIHOMO_RUNTIME_UNKNOWN,
+                )
             if (
                 not isinstance(verification, ProjectionVerification)
                 or not verification.verified
-                or not isinstance(verification.evidence_version, str)
-                or not verification.evidence_version
+                or not _valid_evidence_version(verification.evidence_version)
             ):
-                return _mark_unknown(db, job.id)
+                return _mark_unknown(
+                    db,
+                    job.id,
+                    operation_id=operation_id,
+                    operation_kind=operation_kind,
+                    snapshot_revision=expected,
+                    candidate_fingerprint=fingerprint,
+                    diagnostic=MIHOMO_RUNTIME_UNKNOWN,
+                )
             payload["finalization_evidence"] = {
                 "operation_id": operation_id,
                 "operation_kind": operation_kind,
@@ -380,7 +486,15 @@ def reconcile_mihomo_job(
                     return MihomoReconciliationResult(job.id, True, True, False)
                 if outcome is CommitOutcome.ABSENT:
                     return _failure(db, job.id, commit_error, datetime.now(UTC))
-                return _mark_unknown(db, job.id)
+                return _mark_unknown(
+                    db,
+                    job.id,
+                    operation_id=operation_id,
+                    operation_kind=operation_kind,
+                    snapshot_revision=expected,
+                    candidate_fingerprint=fingerprint,
+                    diagnostic=MIHOMO_FINALIZATION_UNKNOWN,
+                )
             return MihomoReconciliationResult(job.id, True, True, False)
         except MihomoCommitOutcomeUnknown:
             raise

@@ -33,6 +33,24 @@ class MihomoRuntimeError(RuntimeError):
     """Raised when Mihomo installation or reload fails."""
 
 
+class MihomoApplyError(MihomoRuntimeError):
+    """Activation failed before a successful finalization."""
+
+
+class MihomoRollbackVerifiedError(MihomoApplyError):
+    """Activation failed, but exact A restore and health were verified."""
+
+    def __init__(self) -> None:
+        super().__init__("MIHOMO_ROLLBACK_VERIFIED")
+
+
+class MihomoRollbackUnknownError(MihomoApplyError):
+    """Activation failed and rollback certainty was not proven."""
+
+    def __init__(self) -> None:
+        super().__init__("MIHOMO_ROLLBACK_OUTCOME_UNKNOWN")
+
+
 @dataclass(frozen=True, slots=True, repr=False)
 class ControllerSecretSnapshot:
     ref: str
@@ -267,7 +285,9 @@ class MihomoForwarderProvider(ForwarderProvider):
 
         return ApplyResult(True, candidate.version)
 
-    def _rollback(self, backup: Path, *, failure_summary: str, cause: Exception | None) -> NoReturn:
+    def _rollback(
+        self, backup: Path, *, failure_summary: str, cause: Exception | None
+    ) -> NoReturn:
         """Restore the previous config and re-verify health; always raises.
 
         A restored file plus a reload command that returns cleanly is not
@@ -280,15 +300,10 @@ class MihomoForwarderProvider(ForwarderProvider):
             self._runtime.reload()
             rollback_report = self._runtime.health()
         except Exception as rollback_exc:
-            raise MihomoRuntimeError(
-                f"{failure_summary} and rollback failed; configuration state is unknown"
-            ) from rollback_exc
+            raise MihomoRollbackUnknownError() from rollback_exc
         if not rollback_report.healthy:
-            raise MihomoRuntimeError(
-                f"{failure_summary}; rollback restored the previous config "
-                "but the runtime is unhealthy afterwards"
-            ) from cause
-        raise MihomoRuntimeError(f"{failure_summary}; configuration restored") from cause
+            raise MihomoRollbackUnknownError() from cause
+        raise MihomoRollbackVerifiedError() from cause
 
     def health(self) -> HealthReport:
         return self._runtime.health()
