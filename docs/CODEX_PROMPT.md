@@ -1,7 +1,29 @@
-交给 Codex 的执行提示词 — Lingsway Platform 仓库搭建
-> 使用方式:把本文件和 `REPO_ARCHITECTURE.md` 一起交给 Codex。
-> `REPO_ARCHITECTURE.md` 是架构依据,本文件是执行指令与增量补充。
-> **一次只执行一个任务(T0~T8),完成后停下汇报,等我确认再进入下一个。**
+# 交给 Codex 的执行提示词 — Lingsway Platform 仓库搭建（历史归档，勿作为现行规则）
+
+> ## ⚠️ 本文件是 **2026 年建库期（T0~T8）的一次性提示词**，不是现行流程
+>
+> 它记录的是"当初打算怎么建这个仓库"，保留是为了审计留痕。**任何新会话
+> 都不应该按本文件行动。** 现行规则以这三处为准：
+>
+> | 要找什么 | 去哪里 |
+> |---|---|
+> | 现行 Agent 规则、铁律、写权限、凭据边界 | 根目录 [`AGENTS.md`](../AGENTS.md) |
+> | 日常操作流程、PR / 审查流程 | 根目录 [`CLAUDE.md`](../CLAUDE.md) |
+> | 当前进度、角色分工、未完成工作 | [`83-project-continuity.md`](83-project-continuity.md) |
+>
+> 已知本文件与现状不符之处（2026-09-18 审计确认）：
+>
+> - **A1 里那份 `AGENTS.md` 内容已被替换**（见下方 A1 一节）：现行
+>   `AGENTS.md` 有 **8 条铁律**（本文件只列了 6 条，缺少「Alembic 历史
+>   revision 不得改写」与「main 分支自我约束 / 不得自行 merge」），
+>   且执行者早已从 Codex 统一为 **Claude Code**。
+> - `REPO_ARCHITECTURE.md` 已收敛成指向根目录 `ARCHITECTURE.md` 的指针。
+> - 任务编号已从 T 系列（T0~T25）切换到 **S 系列**（S02 / S03 / S04…），
+>   本文件的 T0~T8 序列早已全部走完或被取代。
+> - 本文件第 8 行写死的生产 VPS IP 与「本轮不改动生产」的时间性约束，
+>   属于当时的一次性上下文，不构成现行授权或现行禁令——现行边界见
+>   `AGENTS.md`「禁止自主执行 / 允许自主执行」两表。
+
 ---
 0. 全局约束(任何任务都必须遵守)
 禁止提交任何真实凭据。 仓库里只允许 `.env.example` 和 `*.example.conf`。第一个 commit 之前必须先有 `.gitignore` 和 `.gitleaks.toml`。
@@ -12,41 +34,25 @@
 提交信息用英文,格式 `type(scope): summary`。
 ---
 A. 相对 REPO_ARCHITECTURE.md 的增量(必须一并实现)
-A1. 新增根文件 `AGENTS.md`
-内容如下,原样落地:
-```markdown
-# Agent 协作规则
+A1. 新增根文件 `AGENTS.md` —— **已完成，且内容已被后续演进取代**
 
-## 铁律(任何 Agent 不得违反,违反即回滚)
-1. 配置渲染一律从数据库全量生成,禁止增量拼接
-2. 未匹配用户流量一律 BLOCK,禁止 DIRECT 兜底
-3. 外部系统写操作走白名单,不提供 force / override / bypass 开关
-4. 账务用户开通失败时 disable,永不 DELETE(保留用量历史)
-5. 修改 backend/app/domain/ 或 backend/app/providers/base.py 之前,
-   必须先在 docs/80-decisions/ 提交 ADR
-6. 任何会重载 Xray 的改动,必须经过九步安全重载,不得直连重启
+此处原本逐字嵌入了一份 `AGENTS.md` 的初版全文。该副本已于 2026-09-18
+的仓库审计中移除，因为它与现行 `AGENTS.md` **实质冲突**，而一个只读到
+本文件的会话无从分辨哪一份才算数：
 
-## 模块写权限(同一时间一个模块只有一个 Agent 可写)
-backend/app/providers/**   → Codex
-backend/app/domain/**      → Codex
-backend/app/api/**         → Codex
-frontend/**                → Codex
-ops/**                     → Codex
-infrastructure/**          → Codex
-deploy/**                  → Codex
-docs/80-decisions/**       → Claude 主导,Codex 可补充
-docs/81-reviews/**         → Claude 独占
-docs/82-tasks/**           → Claude 独占
-ARCHITECTURE.md            → Claude 独占
-AGENTS.md                  → 需人工确认才可修改
+| 项目 | 本文件旧副本（已失效） | 现行 [`AGENTS.md`](../AGENTS.md) |
+|---|---|---|
+| 铁律条数 | 6 条 | **8 条**（新增 Alembic 历史不得改写、main 分支自我约束/不得自行 merge） |
+| 铁律 5 措辞 | "必须先提交 ADR" | 补充了"首个实现视为已覆盖，引用对应 ADR 即可" |
+| 代码模块写权限 | → Codex | → **Claude Code**（唯一执行者） |
+| `docs/80-decisions/**` | "Claude 主导，Codex 可补充" | **Claude Code 独占** |
+| 流程 | "Claude 不直接向 main 提交，只产出 TASK/REVIEW/ADR" | Claude Code 同时负责实现与文档产出，**不是两个角色分工** |
+| 审查者 | 未定义 | **ChatGPT Work** 按 head SHA 做独立审查 |
 
-## 流程
-- Claude 不直接向 main 提交,只产出 TASK / REVIEW / ADR
-- Codex 从 docs/82-tasks/TASK-xxx.md 领任务,建 branch,提 PR
-- Codex 读 docs/81-reviews/REVIEW-xxx.md 后自行判断:
-  合理的采纳,不合理的在 PR 里写明拒绝理由,不得盲从
-- 冲突时以 ADR > AGENTS.md > REVIEW 为优先级
-```
+**唯一正本是根目录 [`AGENTS.md`](../AGENTS.md)。** 该文件按其自身的
+「禁止自主执行」清单，修改需要人工确认，不得由 Agent 自行改写——也正因如此，
+任何地方都不应该再存在它的第二份可编辑副本。
+
 A2. 新增 `.github/CODEOWNERS`
 按 A1 的写权限表映射。
 A3. CI/CD 改为风险分级(替换 v1 §11 的单一 `make deploy`)
