@@ -16,6 +16,7 @@ import pytest
 from backend.app.providers.base import DesiredForwarderState, ForwarderListenerDTO, HealthReport
 from backend.app.providers.forwarder.mihomo import (
     ControllerSecretSnapshot,
+    MihomoCandidateConfig,
     MihomoForwarderProvider,
     MihomoRuntimeError,
 )
@@ -79,7 +80,7 @@ class Resolver:
         return ControllerSecretSnapshot(secret_ref, 1, "test-secret")
 
 
-def candidate(provider: MihomoForwarderProvider):
+def candidate(provider: MihomoForwarderProvider) -> MihomoCandidateConfig:
     template = provider.render(
         DesiredForwarderState(
             listener_specs=(ForwarderListenerDTO("listener", "socks", "127.0.0.1", 7890, "BLOCK"),),

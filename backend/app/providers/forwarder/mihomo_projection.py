@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -139,24 +140,38 @@ def _validate_sections(desired: DesiredForwarderState) -> None:
             raise MihomoProjectionError("MIHOMO_LISTENER_DUPLICATE")
         listener_names.add(name)
         listener_bindings.add((address, port))
+    proxy_names: list[str] = []
     for proxy in desired.proxies:
         proxy = _mapping(proxy, "MIHOMO_PROXY_INVALID")
-        if not isinstance(proxy.get("name"), str) or not isinstance(proxy.get("type"), str):
+        name_obj = proxy.get("name")
+        type_obj = proxy.get("type")
+        if not isinstance(name_obj, str) or not isinstance(type_obj, str):
             raise MihomoProjectionError("MIHOMO_PROXY_INVALID")
-    names = [proxy["name"] for proxy in desired.proxies]
-    if len(names) != len(set(names)):
+        name = name_obj.strip()
+        if not name or _unsafe_component(name):
+            raise MihomoProjectionError("MIHOMO_PROXY_INVALID")
+        proxy_names.append(name)
+    if len(proxy_names) != len(set(proxy_names)):
         raise MihomoProjectionError("MIHOMO_DUPLICATE_PROXY_IDENTITY")
+    group_names: list[str] = []
     for group in desired.proxy_groups:
         group = _mapping(group, "MIHOMO_PROXY_GROUP_INVALID")
-        if not isinstance(group.get("name"), str) or not isinstance(group.get("type"), str):
+        name_obj = group.get("name")
+        type_obj = group.get("type")
+        if not isinstance(name_obj, str) or not isinstance(type_obj, str):
             raise MihomoProjectionError("MIHOMO_PROXY_GROUP_INVALID")
+        name = name_obj.strip()
+        if not name or _unsafe_component(name):
+            raise MihomoProjectionError("MIHOMO_PROXY_GROUP_INVALID")
+        group_names.append(name)
         refs = group.get("proxies")
-        if not isinstance(refs, tuple) or any(ref not in names for ref in refs):
+        if not isinstance(refs, tuple) or any(ref not in proxy_names for ref in refs):
             raise MihomoProjectionError("MIHOMO_PROXY_GROUP_REFERENCE_INVALID")
-    group_names = {
-        group.get("name") for group in desired.proxy_groups if isinstance(group.get("name"), str)
-    }
-    allowed_targets = set(names) | group_names | {"BLOCK"}
+    if len(group_names) != len(set(group_names)):
+        raise MihomoProjectionError("MIHOMO_DUPLICATE_PROXY_GROUP_IDENTITY")
+    if set(proxy_names).intersection(group_names):
+        raise MihomoProjectionError("MIHOMO_PROXY_GROUP_IDENTITY_COLLISION")
+    allowed_targets = set(proxy_names) | set(group_names) | {"BLOCK"}
     for listener in desired.listener_specs:
         if listener.proxy not in allowed_targets:
             raise MihomoProjectionError("MIHOMO_LISTENER_TARGET_INVALID")
@@ -168,10 +183,12 @@ def _validate_sections(desired: DesiredForwarderState) -> None:
         target = rule.get("target")
         if not isinstance(match, str) or not isinstance(target, str):
             raise MihomoProjectionError("MIHOMO_RULE_INVALID")
+        target = _validate_rule_component(target, "MIHOMO_RULE_TARGET_INVALID")
         if match.upper() != "MATCH":
             value = rule.get("value")
             if match.upper() not in supported_rules or not isinstance(value, str) or not value:
                 raise MihomoProjectionError("MIHOMO_RULE_TYPE_UNSUPPORTED")
+            _canonical_rule_value(match.upper(), value)
         elif rule.get("value") not in (None, ""):
             raise MihomoProjectionError("MIHOMO_MATCH_VALUE_INVALID")
         if match.upper() == "MATCH":
@@ -202,6 +219,53 @@ def _validate_sections(desired: DesiredForwarderState) -> None:
     }
     if any(key not in allowed for key in desired.deployment_constants):
         raise MihomoProjectionError("MIHOMO_DEPLOYMENT_CONSTANT_UNSUPPORTED")
+
+
+def _unsafe_component(value: str) -> bool:
+    return any(char == "," or ord(char) < 32 for char in value)
+
+
+def _validate_rule_component(value: str, error_code: str) -> str:
+    if not value.strip() or _unsafe_component(value):
+        raise MihomoProjectionError(error_code)
+    return value.strip()
+
+
+def _canonical_domain(value: str) -> str:
+    value = _validate_rule_component(value, "MIHOMO_RULE_VALUE_INVALID").lower()
+    if value.startswith(".") or value.endswith(".") or ".." in value or " " in value:
+        raise MihomoProjectionError("MIHOMO_RULE_VALUE_INVALID")
+    if len(value) > 253:
+        raise MihomoProjectionError("MIHOMO_RULE_VALUE_INVALID")
+    labels = value.split(".")
+    for label in labels:
+        if not 1 <= len(label) <= 63 or label[0] == "-" or label[-1] == "-":
+            raise MihomoProjectionError("MIHOMO_RULE_VALUE_INVALID")
+        if any(not (char.isalnum() or char == "-") for char in label):
+            raise MihomoProjectionError("MIHOMO_RULE_VALUE_INVALID")
+    return value
+
+
+def _canonical_rule_value(kind: str, value: str) -> str:
+    if kind in {"DOMAIN", "DOMAIN-SUFFIX"}:
+        return _canonical_domain(value)
+    if kind == "IP-CIDR":
+        value = _validate_rule_component(value, "MIHOMO_RULE_VALUE_INVALID")
+        try:
+            return str(ipaddress.ip_network(value, strict=False))
+        except ValueError as exc:
+            raise MihomoProjectionError("MIHOMO_RULE_VALUE_INVALID") from exc
+    raise MihomoProjectionError("MIHOMO_RULE_TYPE_UNSUPPORTED")
+
+
+def _controller_identity(desired: DesiredForwarderState) -> tuple[str, int]:
+    ref = desired.deployment_constants.get("api-secret-ref")
+    revision = desired.deployment_constants.get("api-secret-revision")
+    if not isinstance(ref, str) or not ref.strip() or _unsafe_component(ref):
+        raise MihomoProjectionError("MIHOMO_CONTROLLER_SECRET_REF_INVALID")
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision <= 0:
+        raise MihomoProjectionError("MIHOMO_CONTROLLER_SECRET_REVISION_INVALID")
+    return ref.strip(), revision
 
 
 def compose_mihomo_document(desired: DesiredForwarderState) -> tuple[dict[str, object], str]:
@@ -261,6 +325,7 @@ def compose_mihomo_document(desired: DesiredForwarderState) -> tuple[dict[str, o
         snapshot_identity=desired.snapshot_identity,
     )
     _validate_sections(effective_desired)
+    controller_secret_ref, controller_secret_revision = _controller_identity(desired)
     constants = {
         "ipv6": False,
         "unified-delay": True,
@@ -284,7 +349,7 @@ def compose_mihomo_document(desired: DesiredForwarderState) -> tuple[dict[str, o
         value = rule.get("value")
         if not isinstance(value, str) or not value:
             raise MihomoProjectionError("MIHOMO_RULE_INVALID")
-        return f"{match.upper()},{value},{target}"
+        return f"{match.upper()},{_canonical_rule_value(match.upper(), value)},{target}"
 
     raw_document: dict[str, object] = {
         **constants,
@@ -317,10 +382,8 @@ def compose_mihomo_document(desired: DesiredForwarderState) -> tuple[dict[str, o
         {
             "snapshot_revision": desired.snapshot_revision,
             "snapshot_identity": desired.snapshot_identity,
-            "controller_secret_ref": desired.deployment_constants.get("api-secret-ref"),
-            "controller_secret_revision": desired.deployment_constants.get(
-                "api-secret-revision", 1
-            ),
+            "controller_secret_ref": controller_secret_ref,
+            "controller_secret_revision": controller_secret_revision,
             "document": document,
             "transport_proofs": [
                 {
