@@ -8,6 +8,13 @@
 5. 修改 backend/app/domain/ 或 backend/app/providers/base.py 之前,
    必须先在 docs/80-decisions/ 提交或引用对应 ADR;新建这两个模块的
    首个实现视为已由本条覆盖,引用对应 ADR 即可。
+   **本条约束的是"改变架构决策",不是"碰这两个目录"。** 以下两类改动
+   只需在 PR 里引用已有 ADR,不需要新 ADR:
+   (a) 修复实现与某条已接受 ADR 不一致的 bug——把代码改回 ADR 已经裁定
+       的行为，本身不构成新决策;
+   (b) 纯测试补充、类型标注、注释与文档字符串改动。
+   两类都仍需在 PR 描述里写明依据哪条 ADR，以及为什么不构成新决策。
+   判断不了属不属于这两类时，按需要新 ADR 处理。
 6. 任何会重载 Xray 的改动,必须经过九步安全重载,不得直连重启
 7. Alembic 历史 revision 一律不得改写。schema 与代码不一致时,只能新增
    reconciliation migration 补救,且新增迁移必须幂等
@@ -49,10 +56,23 @@ AGENTS.md                  → 需人工确认才可修改
 ## 流程
 - Claude Code 从 `docs/82-tasks/TASK-xxx.md`(如任务已有 TASK 文件)或
   User 的直接需求出发,实现代码、跑测试/lint/build、建 branch、提 PR。
-  User 直接在对话里提出的需求,如果不是可以立刻完成的小改动,应该先
-  同步成 GitHub Issue 或 `docs/82-tasks/TASK-*.md`,再据此实现——聊天记录
-  本身不构成「GitHub Issue / TASK」这一节要求的"记录",跳过这一步直接
-  实现,等同于让需求和验收标准处于未记录状态。
+  User 直接在对话里提出的需求,需要落成 GitHub Issue 或
+  `docs/82-tasks/TASK-*.md` 的**门槛如下**(2026-09-18 修订):
+
+  **必须先有 Issue 或 TASK 文件**——满足任意一条即触发:
+  - 需要跨多个 PR 才能交付的工作线(例如 S04 这种分 A/B/C 阶段的);
+  - 触及 `backend/app/domain/`、`backend/app/providers/base.py`、
+    `infrastructure/alembic/versions/`、`deploy/`,或任何会产生真实外部
+    写副作用的接线;
+  - 涉及认证/授权/支付/凭据处理。
+
+  **不需要**:单 PR 能完成且不属于上述范围的 bug 修复、重构、测试补充、
+  文档改动——PR 描述本身就是足够的记录载体。
+
+  这条门槛是 2026-09-18 审计后收紧措辞的结果:原文要求"不是小改动就要先
+  开 Issue/TASK",实践中 S02→S04-B1 共 8 个已合并 PR 一个 TASK 文件都没有,
+  规则等于空转。与其保留一条没人执行的严规,不如定一条能真正被执行的门槛。
+  触发门槛却跳过这一步,等同于让需求和验收标准处于未记录状态。
 - Claude Code 独占撰写 TASK(`docs/82-tasks/`)、REVIEW(`docs/81-reviews/`)
   与 ADR(`docs/80-decisions/`),这些文档产出和上面的代码实现是同一个
   执行者做的两类工作,不是两个角色分工。
@@ -150,7 +170,12 @@ Claude Code 而放宽或删除任何一条;引入新执行者时必须重新逐�
 
 - 读写代码、跑测试、建分支、提 PR
 - 重建 backend-api / frontend 容器
-- 执行 alembic upgrade(前提:先成功跑一次加密备份)
+- 执行 alembic upgrade,按目标库分级(2026-09-18 修订,见下方说明):
+  - **本机 / 测试库 / CI**:零审批,无备份前提。
+  - **生产库**:前提是先成功跑一次加密备份并校验通过。
+    `ops/backup/backup.sh` **目前尚未实现**,因此该前提当前无法以脚本方式
+    满足——在它落地之前,生产库的 alembic upgrade 一律归入「禁止自主执行」,
+    需要人工确认并由人工完成备份。备份工具落地后本条自动恢复为零审批。
 - 触发加密备份并上传 R2
 - 只读查询 Webshare / Marzban / Mihomo / 数据库
 - 渲染并热加载 Mihomo 配置

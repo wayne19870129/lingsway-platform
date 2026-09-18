@@ -1,7 +1,7 @@
 # ADR-025: 补偿动作自身失败时的所有权契约
 
-- 状态: 提议中（Proposed）
-- 日期: 2026-09-18
+- 状态: 已接受
+- 日期: 2026-09-18（同日实现并合并，见 `TASK-S05-compensation-failure-contract.md`）
 - 决策范围: `backend/app/domain/provisioning.py` 的 `APPLY_FORWARDER`(步骤 5)、
   `APPLY_GATEWAY`(步骤 7) 以及 `fail_apply_gateway_lock_acquisition()` 三处
   补偿路径。不改变 ADR-017 的相位切分、ADR-018 的
@@ -88,8 +88,20 @@ except Exception as exc:
    并在 `PENDING_MANUAL_BUSINESS_MESSAGES` 中为两者各配一条固定、安全、
    可持久化的业务文案。
 
-4. **`_failed()` 与 `rollback_database()` 永远要执行到。** 无论补偿结果
-   如何，DB 回滚与 run 终态写入都不得被补偿异常绕过。
+4. **补偿异常不得让控制流"掉出去"。** 补偿失败时必须走到一个明确的终态
+   （`PENDING_MANUAL`），不得让补偿异常替代原始异常向上穿透、把
+   `rollback_database()` / `_failed()` 整段跳过，从而把 run 永久留在
+   `RUNNING`。
+
+   **注意：`PENDING_MANUAL` 分支刻意不调用 `rollback_database()`，也不写
+   run 终态**——这是沿用 `CREATE_TENANT`、`ACCOUNTING_CREATE_AMBIGUOUS`、
+   `ACCOUNTING_COMPENSATION_FAILED` 三条既有路径已经确立的约定：
+
+   - `FAILED` = 已完全补偿 → 回滚 DB，本方法内写终态；
+   - `PENDING_MANUAL` = 外部副作用未被撤销 → **保留**部分 DB 状态供人工
+     核查（否则会丢掉 `EgressBinding.credential_secret_ref` 这类记录，而
+     外部租户/账户仍然存在，变成无法追溯的孤儿），终态由调用方在自己的
+     业务提交之后才写（ADR-017）。
 
 5. **`fail_apply_gateway_lock_acquisition()` 返回 `ProvisionOutcome` 而非
    `None`**，使锁获取失败路径能表达 `PENDING_MANUAL`，与步骤 7 的失败
@@ -113,13 +125,25 @@ except Exception as exc:
   `PENDING_MANUAL` 可以进一步细分为"确定已恢复→FAILED"与"不确定→
   PENDING_MANUAL"，届时重新评估。
 
-## 验证要求
+## 验证要求（已全部落地）
 
-实现本 ADR 的 PR 必须新增覆盖以下四种情形的单元测试（当前一个都没有）：
+`backend/tests/unit/test_domain.py` 新增 8 条用例；其中 4 条在修复前的
+代码上确认失败、修复后通过（回归证据，非事后补测）：
 
-1. 步骤 5 失败 + 补偿 apply 成功 → `FAILED`，抛出**原始**异常，DB 已回滚。
-2. 步骤 5 失败 + 补偿 apply 也失败 → `PENDING_MANUAL`
-   (`FORWARDER_COMPENSATION_FAILED`)，DB 已回滚，run 终态已写。
-3. 步骤 7 失败 + `disable_user()` 成功 → `FAILED`，行为与现状一致。
-4. 步骤 7 失败 + `disable_user()` 也失败 → `PENDING_MANUAL`
-   (`GATEWAY_COMPENSATION_FAILED`)，且订单**不得**被标记成普通 `FAILED`。
+| 用例 | 断言 |
+|---|---|
+| `test_step_5_failure_with_successful_restore_stays_failed` | 回归守卫：补偿成功时行为不变——抛**原始**异常、DB 已回滚、run `FAILED` |
+| `test_step_5_failure_with_failing_restore_is_pending_manual` ⚠️ | `PENDING_MANUAL` / `FORWARDER_COMPENSATION_FAILED`；诊断里同时出现原始与补偿的异常**类型名**、且不含 provider 原文；DB **未**回滚；run 仍 `RUNNING`（终态归调用方） |
+| `test_step_7_failure_with_successful_disable_stays_failed` | 回归守卫；并断言 `delete_calls == []`（铁律 4） |
+| `test_step_7_failure_with_failing_disable_is_pending_manual` ⚠️ | `PENDING_MANUAL` / `GATEWAY_COMPENSATION_FAILED` |
+| `test_provision_never_marks_a_pending_manual_phase_b_run_succeeded` ⚠️ | `provision()` 组合方法不得把 phase-B 的 `PENDING_MANUAL` 标成 `SUCCEEDED` |
+| `test_lock_acquisition_compensation_failure_is_pending_manual` ⚠️ | 锁获取失败路径与 `APPLY_GATEWAY` 语义一致 |
+| `test_lock_acquisition_compensation_success_returns_none_and_marks_failed` | 补偿成功时返回 `None` 并写 `FAILED` |
+| `test_every_pending_manual_reason_has_a_business_message` | 每个 `PendingManualReason` 都有固定业务文案——缺一条就会在最需要人工介入的时刻 `KeyError` |
+
+⚠️ = 已验证在修复前的代码上失败。
+
+调用方侧的关键断言（`services.py`）：`provision_apply_gateway()` 返回
+`PENDING_MANUAL` 时**绝不能**走到 `activate_paid_purchase()`——否则会激活
+一个路由从未下发的订阅。该分支现在复用统一的 `_mark_pending_manual()`
+帮助函数，与其余三条 `PENDING_MANUAL` 路径共用同一套持久化顺序。

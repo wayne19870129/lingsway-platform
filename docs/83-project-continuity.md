@@ -84,13 +84,22 @@ contradiction:
   workstream, started after TASK-T16 Phase 2C. Its boundaries are recorded in
   section 5 below and in ADR-023/ADR-024.
 
-**Known process gap (open):** no S-series work has a `docs/82-tasks/TASK-*.md`
-file, although `AGENTS.md`「协作角色与职责」names GitHub Issue or `TASK-*.md` as
-the *sole* record carrier for requirements and acceptance criteria. Eight merged
-PRs (#120–#127) carry S02→S04-B1 with their 目标/约束/验收标准 existing only in PR
-bodies and in this section's prose. See `TASK-S04-mihomo-activation.md` for the
-first S-series TASK file closing this gap forward; the already-merged S02/S03
-scope is not retro-filed.
+**Process gap, and what was done about it:** S02→S04-B1 (eight merged PRs,
+#120–#127) were delivered with **no** Issue or TASK file at all, though
+`AGENTS.md` named those as the sole record carrier. Two things changed on
+2026-09-18:
+
+- Forward coverage: `TASK-S04-mihomo-activation.md` and
+  `TASK-S05-compensation-failure-contract.md` are the first S-series TASK
+  files. Already-merged S02/S03 scope is **not** retro-filed — writing
+  acceptance criteria after delivery proves nothing.
+- The rule itself was made enforceable rather than aspirational.
+  `AGENTS.md`'s requirement used to be "anything that isn't a small change
+  needs an Issue/TASK first", which nobody followed for eight PRs. It now
+  lists explicit triggers (multi-PR workstreams; `domain/`,
+  `providers/base.py`, migrations, `deploy/`, real external write side
+  effects; auth/payment/credentials) and explicitly exempts single-PR bug
+  fixes, refactors, tests, and docs.
 
 **ADR numbering:** ADR-010 does not exist and is not referenced anywhere. The
 sequence runs 001–009, 011–024. This is a numbering hole, not a missing document
@@ -172,23 +181,26 @@ These were found by a repository-wide audit, reproduced against the current
 working tree, and are **not** fixed by any merged PR. Each is recorded here so a
 later session does not have to rediscover it.
 
-1. **Compensation-failure paths in `domain/provisioning.py` mask the original
-   error and skip terminal bookkeeping.** When a compensating action itself
-   raises — the `APPLY_FORWARDER` restore-previous-config re-apply, the
-   `APPLY_GATEWAY` `disable_user()`, or the same call in
-   `fail_apply_gateway_lock_acquisition()` — the compensation exception replaces
-   the real failure and `state.rollback_database()` / `_failed()` never run. The
-   `CREATE_ACCOUNTING_USER` step already handles exactly this case correctly
-   (failed disable → `PENDING_MANUAL`, per ADR-018); steps 5 and 7 do not.
-   Reproduced; no test covers it. Owning document: **ADR-025** + `TASK-S05-compensation-failure-contract.md`.
+1. ~~**Compensation-failure paths in `domain/provisioning.py` mask the original
+   error and skip terminal bookkeeping.**~~ **FIXED 2026-09-18** by ADR-025 +
+   `TASK-S05-compensation-failure-contract.md`. When a compensating action
+   itself raised — the `APPLY_FORWARDER` restore, the `APPLY_GATEWAY`
+   `disable_user()`, or the same call in
+   `fail_apply_gateway_lock_acquisition()` — the compensation exception replaced
+   the real failure, `state.rollback_database()` / `_failed()` never ran, and
+   the run stayed at `RUNNING` forever with an uncompensated external side
+   effect reported as a clean `FAILED`. All three now end `PENDING_MANUAL` with
+   a typed reason. 8 new tests; 4 of them verified failing against the pre-fix
+   code.
 
-2. **`ops/**` and `infrastructure/**` Python is never linted or type-checked.**
-   `make lint` runs `ruff check backend` and `mypy backend/app backend/tests`
-   only. `ops/gateway/safe_reload.py` (the nine-step Xray reload),
-   `ops/reconciliation/gateway_principals.py`, and
-   `ops/forwarder/collect_mihomo_usage.py` are production-critical and sit
-   outside every static gate. Audited state: no `F`/`B`/`SIM` findings today, so
-   this is an **unguarded surface**, not a present bug.
+2. ~~**`ops/**` and `infrastructure/**` Python is never linted.**~~
+   **FIXED 2026-09-18.** `make lint` now runs
+   `ruff check backend ops infrastructure scripts`.
+   `infrastructure/alembic/versions/` is excluded via `pyproject.toml`'s
+   `extend-exclude`, because 铁律 7 freezes existing revisions — linting them
+   can only ever produce findings that must not be fixed. **Still open:** `mypy`
+   coverage stops at `backend/`; `ops/**` has no type checking. That is a
+   larger change (the ops scripts are not annotated) and is not scheduled.
 
 3. **`ops/backup/` is empty**, so `AGENTS.md`'s "`alembic upgrade` 前提：先成功跑
    一次加密备份" precondition is unsatisfiable, `Makefile`'s `backup`/`restore`

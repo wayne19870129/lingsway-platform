@@ -12,7 +12,6 @@ import tempfile
 import time
 from pathlib import Path
 
-
 STATUS = Path(os.environ.get("PROBE_STATUS_PATH", "/status/status.json"))
 INTERVAL = int(os.environ.get("PROBE_INTERVAL_SECONDS", "300"))
 EXPECTED_IP = os.environ["PROBE_EXPECTED_EGRESS_IP"]

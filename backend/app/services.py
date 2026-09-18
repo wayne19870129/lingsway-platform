@@ -107,6 +107,32 @@ def provision(
     ).provisioning.provision(request)
 
 
+def _mark_pending_manual(
+    command: BillingCommand,
+    order_state: OrderWorkflowState,
+    provisioning: ProvisioningService,
+    outcome: ProvisionOutcome,
+) -> ProvisionOutcome:
+    """Persist a ``PENDING_MANUAL`` provisioning outcome.
+
+    One place for the ordering every ``PENDING_MANUAL`` path must follow
+    (ADR-017 run-persistence-ordering revision): commit the business state
+    first, then record the run's terminal status via the best-effort
+    ``mark_run_pending_manual()``. The business-facing message always comes
+    from ``outcome.reason``'s fixed, safe mapping (ADR-018 Major 2) -- never
+    from ``pending_manual_error``'s free-text provider diagnostic.
+    """
+    business_message = (
+        PENDING_MANUAL_BUSINESS_MESSAGES[outcome.reason]
+        if outcome.reason is not None
+        else "provisioning requires manual review"
+    )
+    with order_state.transaction():
+        order_state.mark_provision_pending(command, business_message)
+    provisioning.mark_run_pending_manual(outcome.run_id, outcome.pending_manual_error)
+    return outcome
+
+
 def _handle_pre_gateway_failure(
     command: BillingCommand,
     order_state: OrderWorkflowState,
@@ -362,22 +388,17 @@ def confirm_payment_and_provision(
         # ADR-018 added two more: an ambiguous accounting create, and a
         # failed disable compensation) and never derived from
         # prepared.pending_manual_error's free-text provider diagnostic.
-        business_message = (
-            PENDING_MANUAL_BUSINESS_MESSAGES[prepared.reason]
-            if prepared.reason is not None
-            else "provisioning requires manual review"
-        )
-        with order_state.transaction():
-            order_state.mark_provision_pending(command, business_message)
         # ADR-017 run-persistence-ordering revision: the run's terminal
         # PENDING_MANUAL status is only ever recorded here, after the
-        # business commit above has actually completed -- never inside
+        # business commit has actually completed -- never inside
         # provision_prepare() itself. mark_run_pending_manual() is
         # best-effort (never raises), so a Job-write hiccup at this point
         # cannot turn this already-committed, legitimate manual-review
-        # business state into anything else.
-        provisioning.mark_run_pending_manual(prepared.run_id, prepared.pending_manual_error)
-        return prepared
+        # business state into anything else. ADR-025 added
+        # FORWARDER_COMPENSATION_FAILED as a fourth phase-A source; it
+        # needs no special handling here because the reason -> message
+        # lookup below is generic.
+        return _mark_pending_manual(command, order_state, provisioning, prepared)
 
     # Real SQLAlchemy paid provisioning follows ADR-022 Direction B. Test
     # doubles retain the legacy composition below so the domain contract stays
@@ -420,6 +441,20 @@ def confirm_payment_and_provision(
                 state.rollback_database()
                 raise
 
+            if outcome.status is ProvisionStatus.PENDING_MANUAL:
+                # ADR-025: APPLY_GATEWAY failed *and* its compensation
+                # (disable_user) also failed, so the accounting user may
+                # still be enabled and the gateway was never applied. This
+                # must never reach activate_paid_purchase() -- activating
+                # here would sell a subscription whose routing does not
+                # exist. Same persistence ordering as every other
+                # PENDING_MANUAL (ADR-017): commit the business state
+                # first, then record the run's terminal status. Both stay
+                # inside the lock, as the rollback branch above does.
+                return _mark_pending_manual(
+                    command, order_state, provisioning, outcome
+                )
+
             with order_state.transaction():
                 activate_paid_purchase(command, order_state)
             # ADR-017 run-persistence-ordering revision: the run's terminal
@@ -448,7 +483,14 @@ def confirm_payment_and_provision(
         # reader can never observe accounting/forwarder state that's about
         # to be discarded alongside a run already reported FAILED.
         state.rollback_database()
-        provisioning.fail_apply_gateway_lock_acquisition(prepared, request, lock_exc)
+        pending = provisioning.fail_apply_gateway_lock_acquisition(prepared, request, lock_exc)
+        if pending is not None:
+            # ADR-025: disabling the phase-A accounting user itself failed,
+            # so it may still be enabled. Reporting this as a plain
+            # fail_paid_purchase() would claim a compensation that did not
+            # happen -- record manual review instead, exactly as the
+            # APPLY_GATEWAY compensation-failure branch does.
+            return _mark_pending_manual(command, order_state, provisioning, pending)
         with order_state.transaction():
             fail_paid_purchase(command, type(lock_exc).__name__, order_state)
         raise

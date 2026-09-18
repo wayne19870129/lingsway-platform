@@ -27,7 +27,7 @@ test-unit:
 lint: lint-python lint-frontend
 
 lint-python:
-	$(PYTHON) -m ruff check backend
+	$(PYTHON) -m ruff check backend ops infrastructure scripts
 	$(PYTHON) -m mypy backend/app backend/tests
 
 lint-frontend:

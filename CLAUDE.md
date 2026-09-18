@@ -103,6 +103,12 @@ Before writing any code for a task:
    exist first (`AGENTS.md` rule 5) — for this repo, ADR authoring is
    Claude's lane per the module write-boundary table; do not proceed
    without one.
+   `AGENTS.md` rule 5 was narrowed on 2026-09-18: it constrains **changing
+   an architecture decision**, not merely touching those two directories.
+   A bug fix that restores conformance to an already-accepted ADR, and
+   pure test/typing/comment changes, only need that existing ADR cited in
+   the PR — no new ADR. When it is not obvious which side a change falls
+   on, treat it as needing a new ADR.
 3. Read the relevant `docs/82-tasks/TASK-*.md` file, if the task has one.
    If it doesn't and the change is non-trivial, consider whether one
    should be written first (Claude's exclusive lane per `AGENTS.md`).
@@ -143,7 +149,9 @@ Before writing any code for a task:
   would otherwise read low, and prefer the more conservative
   implementation when two options are otherwise equivalent.
 - Before pushing, run what's relevant to the change:
-  - Backend: `ruff check backend/`, `mypy backend/app backend/tests`,
+  - Backend: `ruff check backend ops infrastructure scripts`
+    (frozen Alembic revisions are excluded in `pyproject.toml` per
+    `AGENTS.md` rule 7), `mypy backend/app backend/tests`,
     `pytest backend/tests/unit backend/tests/guards` (and
     `backend/tests/integration` when `TEST_DATABASE_URL` is available —
     CI runs these against a real MySQL 8.4 service either way).
