@@ -149,6 +149,30 @@ incompatible identity/configuration remains fail-closed drift. A changed code
 is therefore never allowed to redirect an old provider instance to a new
 record identity.
 
+Secret-value rotation is a separate drift dimension. The current secret store
+allows the ciphertext/value for one `secret_ref` to change without changing the
+reference, while a subscription provider retains its URL for its whole
+instance lifetime. Therefore S03-B must re-resolve the purpose-bound secret at
+the start of every explicit sync operation and obtain a non-secret revision
+marker from the secret-store row (for example an approved version or update
+revision; never a plaintext value, ciphertext, hash, or other reversible
+derivative). An unchanged revision may reuse the existing provider. A changed
+revision is incompatible runtime drift: the resolver fails closed for that
+record and requires a controlled process restart before the new secret can be
+used. S03-B must not silently continue with the old provider and must not
+invent hot replacement. If the store cannot provide a safe non-secret revision
+marker, the resolver must fail closed rather than compare or persist secret
+material.
+
+Secret resolution is completed in its own short DB transaction/lock scope.
+`SELECT ... FOR UPDATE` may protect the purpose-bound read, but the transaction
+and row lock must be released before `sync_nodes()` begins its external HTTP
+request. The plaintext URL exists only in the narrow operation-scoped provider
+construction/sync lifetime and is never placed in the descriptor, logs, reprs,
+exceptions, docs, commits, or PR text. A secret update racing with resolution
+is handled by the next sync/revision check; no DB lock is held across network
+I/O.
+
 ### 7. Scheduler contract and failure isolation
 
 For each enabled subscription record, the scheduler must resolve the concrete

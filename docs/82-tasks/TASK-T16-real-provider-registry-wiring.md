@@ -86,19 +86,30 @@ S03-A 已将 Subscription transport registry wiring 前的多 provider blocker
 
 S03-B 只能按以下合同实施：
 
-1. 保留多个同时启用的 `TransportProviderRecord`；以每条 record 的稳定
-   `code` 做确定性、唯一、精确匹配。unknown、duplicate、unsupported 或
-   ambiguous mapping 必须 fail closed，禁止 mutable current-provider、静默
-   mock fallback 或跨 record fallback。
+1. 保留多个同时启用的 `TransportProviderRecord`。scheduler 读取每条 enabled
+   record，并转换为 ADR-024 定义的 immutable provider-neutral
+   `TransportProviderDescriptor`，至少包含 `record_id`、`code`、`kind`、
+   `secret_ref` 与经校验的 implementation identifier（如需要）。不得把
+   SQLAlchemy ORM record 或 Session 传入 generic provider contract。
 2. 在 `ProviderRegistry` 的进程生命周期边界持有 registry-owned resolver/
-   factory 及每条 record 的 concrete provider instance。scheduler 必须按
-   record code 解析后调用 `refresh_provider_inventory(db, record, provider)`；
-   每条失败独立降级，不能阻塞同批其他 record。
+   factory。resolver 接收完整 descriptor，以 descriptor 全部 identity 做
+   exact validation；`code` 只是 identity 的一个组成部分，不是 code-only
+   lookup contract。必须拒绝 unknown、duplicate、unsupported、ambiguous
+   mapping、cached-provider identity mismatch、静默 mock fallback 与跨
+   record fallback。解析后调用
+   `refresh_provider_inventory(db, record, provider)`；每条失败独立降级，
+   不能阻塞同批其他 record。
 3. `TransportProviderRecord.secret_ref` 是订阅 URL/token 的唯一 opaque secret
    handle。不得增加 plaintext URL 配置通路；`.env.example` 中的
    `PROVIDER_A_SUBSCRIPTION_URL` / `PROVIDER_B_SUBSCRIPTION_URL` 仅为 legacy
    名称，不得作为 runtime fallback。secret value 不得进入 repr、日志、异常、
    文档、commit 或 PR。
+   每次显式 sync 必须在 operation boundary 重新解析 secret，并使用非敏感
+   secret revision marker 检测同一 `secret_ref` 下的 value rotation。revision
+   未变可复用原 provider；revision 变化必须 fail closed 并要求 controlled
+   process restart，不得静默继续使用旧 URL，也不得自行发明 hot replacement。
+   purpose-bound SELECT/锁的短事务必须在外部 subscription HTTP fetch 前提交并
+   释放，禁止跨网络请求持有 DB lock。
 4. 每个 provider 必须绑定 record identity、provider code 与独立 cache identity/
    path；Provider A 不得覆盖或读取 Provider B cache。ProviderRegistry 继续
    负责所有 factory-created client 的 deterministic close，construction 保持
