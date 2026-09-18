@@ -11,11 +11,22 @@ state, reviews, and checks. Do not rely on an older chat or SHA snapshot.
 
 ## 2. Roles and workflow
 
-> The concrete three-way operating model — ChatGPT directs, Codex/LUNA
-> implements, Claude Code audits periodically — is written out in
-> [`85-agent-operating-model.md`](85-agent-operating-model.md), including
-> when to call Claude Code in for a whole-repository review. That file is a
-> working procedure and never overrides `AGENTS.md`.
+> The operating model — ChatGPT directs, Codex/LUNA implements, Claude Code
+> writes the rules and audits on a schedule, a GitHub workflow merges — is
+> written out in two standing instruction files, both subordinate to
+> `AGENTS.md`:
+>
+> - [`85-agent-operating-model.md`](85-agent-operating-model.md) — ChatGPT's,
+>   including §5's dispatch queue and §6's loop breakers.
+> - [`86-codex-operating-instructions.md`](86-codex-operating-instructions.md)
+>   — Codex's. Written after two number collisions and one out-of-scope
+>   dispatch showed that rules living only in documents the executor never
+>   reads do not bind it.
+>
+> Merge policy itself is **ADR-029**: business PRs merge automatically on a
+> `PASS` review plus green checks on the same head SHA, gated by the
+> `.github/automerge-enabled` circuit breaker; governance and audit PRs stay
+> human-merged.
 
 - User owns acceptance, manual merge, and production approval.
 - The task-assigned execution agent is the sole writer for its task and branch;
@@ -118,6 +129,16 @@ named one as the sole record carrier. Three things changed on 2026-09-18:
 **ADR numbering:** ADR-010 does not exist and is not referenced anywhere. The
 sequence runs 001–009, 011–026. This is a numbering hole, not a missing document
 — do not go looking for it.
+
+**Second collision, this one reached `main` (2026-09-18):** PR #132 added
+`TASK-S07-backup-restore.md` while `main` already carried
+`TASK-S07-order-queue-billing.md`. Different filenames, so git raised no
+conflict and it merged silently — `main` genuinely had two S07 files until the
+backup one was renamed to `TASK-S09-backup-restore.md`. This is the same
+failure as the ADR-025 case below, and it happened **after** the lesson was
+written down, because the rule lived in a document the executing agent never
+read. It is now in `docs/86-codex-operating-instructions.md` §2.2, which is
+Codex's standing project instruction.
 
 **Resolved collision (2026-09-18):** two unmerged branches independently
 claimed ADR-025. PR #128 kept it (`ADR-025-mihomo-projection-generation-authority.md`,
