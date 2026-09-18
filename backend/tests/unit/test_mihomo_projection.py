@@ -100,7 +100,7 @@ def test_transport_reference_must_match_materialization_exactly() -> None:
 def test_snapshot_defensively_freezes_nested_input() -> None:
     listeners = {"listener": "127.0.0.1:1"}
     proxy = {"name": "p", "type": "ss"}
-    state = DesiredForwarderState(listeners=listeners, proxies=[proxy])
+    state = DesiredForwarderState(listeners=listeners, proxies=(proxy,))
     listeners["other"] = "127.0.0.1:2"
     proxy["server"] = "secret-sentinel"
     assert "other" not in state.listeners
