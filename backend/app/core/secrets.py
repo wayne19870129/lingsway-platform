@@ -43,10 +43,16 @@ def decrypt_secret(ciphertext: str) -> str:
 
 
 def put_secret(db: Session, secret_ref: str, plaintext: str, purpose: str) -> Secret:
-    existing = db.scalar(
-        select(Secret).where(Secret.secret_ref == secret_ref).with_for_update()
-    )
+    existing = db.scalar(select(Secret).where(Secret.secret_ref == secret_ref))
     if existing is not None:
+        existing = db.scalar(
+            select(Secret)
+            .where(Secret.secret_ref == secret_ref)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if existing is None:
+            raise SecretStoreError("Secret disappeared during update")
         if decrypt_secret(existing.ciphertext) == plaintext and existing.purpose == purpose:
             return existing
         existing.ciphertext = encrypt_secret(plaintext)
@@ -54,6 +60,30 @@ def put_secret(db: Session, secret_ref: str, plaintext: str, purpose: str) -> Se
         existing.revision += 1
         db.flush()
         return existing
+
+    if db.get_bind().dialect.name == "mysql":
+        values = {
+            "secret_ref": secret_ref,
+            "ciphertext": encrypt_secret(plaintext),
+            "purpose": purpose,
+            "revision": 1,
+        }
+        db.execute(insert(Secret).values(values).prefix_with("IGNORE"))
+        winner = db.scalar(
+            select(Secret)
+            .where(Secret.secret_ref == secret_ref)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if winner is None:
+            raise SecretStoreError("Secret insert did not produce a readable row")
+        if decrypt_secret(winner.ciphertext) == plaintext and winner.purpose == purpose:
+            return winner
+        winner.ciphertext = encrypt_secret(plaintext)
+        winner.purpose = purpose
+        winner.revision += 1
+        db.flush()
+        return winner
 
     secret = Secret(
         secret_ref=secret_ref,

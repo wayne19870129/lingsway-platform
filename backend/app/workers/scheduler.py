@@ -26,7 +26,7 @@ from backend.app.models import (
     TransportProviderRecord,
     UsagePeriod,
 )
-from backend.app.providers.base import AccountingProvider
+from backend.app.providers.base import AccountingProvider, TransportProvider
 from backend.app.providers.registry import ProviderRegistry, build_registry
 from backend.app.providers.transport.resolver import (
     TransportProviderDescriptor,
@@ -77,6 +77,7 @@ def sync_transport_capacity_and_inventory(
     settings = get_settings()
     for record in records:
         try:
+            provider: TransportProvider
             if settings.transport_provider_mode == "subscription":
                 if registry.transport_resolver is None:
                     raise RuntimeError("Subscription transport resolver is unavailable")
@@ -165,7 +166,9 @@ def run_batch(
     settings = get_settings()
     runtime_gateway = None if settings.gateway_provider == "xray_file" else registry.gateway
     with db_factory() as db:
-        transport_records = sync_transport_capacity_and_inventory(db, registry)
+        transport_records = sync_transport_capacity_and_inventory(
+            db, registry, secret_session_factory=db_factory
+        )
         reconciled = run_pending_reconcile(
             db, registry.accounting, settings.accounting_sync_batch_size
         )

@@ -52,3 +52,18 @@ def test_resolver_validates_descriptor_at_trust_boundary(
 
     with pytest.raises(TransportResolutionError, match=error):
         resolver.resolve(descriptor, lambda _ref, _purpose: SecretSnapshot("unused", 1))
+
+
+def test_resolver_rejects_resolution_after_shutdown(tmp_path: Path) -> None:
+    resolver = SubscriptionTransportResolver(tmp_path)
+    def loader(_ref: str, _purpose: str) -> SecretSnapshot:
+        return SecretSnapshot("https://provider.invalid/private", 1)
+
+    descriptor = TransportProviderDescriptor(1, "A", "SUBSCRIPTION", "ref")
+    resolver.resolve(descriptor, loader)
+    resolver.close()
+
+    with pytest.raises(TransportResolutionError, match="SHUTDOWN"):
+        resolver.resolve(
+            TransportProviderDescriptor(2, "B", "SUBSCRIPTION", "ref-b"), loader
+        )

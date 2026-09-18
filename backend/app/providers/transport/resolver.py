@@ -39,6 +39,7 @@ class SubscriptionTransportResolver:
         self._codes: dict[str, int] = {}
         self._cache_paths: dict[Path, int] = {}
         self._closed_provider_ids: set[int] = set()
+        self._shutdown_started = False
         self._closed = False
 
     @staticmethod
@@ -67,6 +68,8 @@ class SubscriptionTransportResolver:
         descriptor: TransportProviderDescriptor,
         secret_loader: Callable[[str, str], SecretSnapshot],
     ) -> SubscriptionTransportProvider:
+        if self._shutdown_started:
+            raise TransportResolutionError("TRANSPORT_RESOLVER_SHUTDOWN")
         self._validate(descriptor)
         existing = self._providers.get(descriptor.record_id)
         if existing is not None:
@@ -101,6 +104,7 @@ class SubscriptionTransportResolver:
     def close(self) -> None:
         if self._closed:
             return
+        self._shutdown_started = True
         errors: list[Exception] = []
         for provider_id, provider_data in self._providers.items():
             if provider_id in self._closed_provider_ids:

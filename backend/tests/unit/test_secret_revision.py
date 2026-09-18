@@ -8,14 +8,13 @@ from backend.app.core.secrets import (
     reveal_secret_for_purpose,
     reveal_secret_snapshot_for_purpose,
 )
-from backend.app.models.ops import Secret
 
 
 def test_secret_revision_changes_only_when_value_or_purpose_changes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     engine = create_engine("sqlite+pysqlite://")
-    Base.metadata.create_all(engine, tables=[Secret.__table__])
+    Base.metadata.create_all(engine, tables=[Base.metadata.tables["secrets"]])
     monkeypatch.setenv(
         "SECRET_ENCRYPTION_KEY", "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA="
     )
