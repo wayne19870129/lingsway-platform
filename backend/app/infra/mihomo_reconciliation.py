@@ -13,7 +13,13 @@ from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import Session
 
 from backend.app.core.database import SessionLocal
+from backend.app.infra.mihomo_blocker import (
+    MIHOMO_BLOCKER_KIND_FINALIZATION,
+    MIHOMO_RECONCILE_BLOCKER_JOB_TYPE,
+    ensure_mihomo_blocker,
+)
 from backend.app.infra.mihomo_projection_lock import (
+    SESSION_INFO_RELEASE_METADATA_KEY,
     mihomo_projection_write,
     session_holds_mihomo_projection_lock,
 )
@@ -37,11 +43,17 @@ MIHOMO_ROLLBACK_UNKNOWN = "MIHOMO_ROLLBACK_OUTCOME_UNKNOWN"
 MIHOMO_UNKNOWN_DIAGNOSTICS = frozenset(
     {MIHOMO_FINALIZATION_UNKNOWN, MIHOMO_RUNTIME_UNKNOWN, MIHOMO_ROLLBACK_UNKNOWN}
 )
+_OPERATION_ID_PREFIX = "MIHOMO_RECONCILE:"
+_MAX_OPERATION_ID_LENGTH = 160 - len(_OPERATION_ID_PREFIX)
 _RETRY_LIMIT = 5
 _STALE_AFTER = timedelta(minutes=15)
 
 
 class MihomoReconciliationError(RuntimeError):
+    pass
+
+
+class MihomoPayloadError(MihomoReconciliationError):
     pass
 
 
@@ -100,7 +112,13 @@ class MihomoReconciliationResult:
 
 
 def _validate_operation_id(value: object) -> str:
-    if not isinstance(value, str) or not value or value != value.strip():
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or len(value) > _MAX_OPERATION_ID_LENGTH
+        or any(ord(char) < 32 for char in value)
+    ):
         raise ValueError("operation_id must be a non-empty canonical string")
     return value
 
@@ -127,9 +145,9 @@ def _payload(job: Job) -> dict[str, object]:
     try:
         value = json.loads(job.payload_json or "{}")
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise MihomoReconciliationError("MIHOMO_RECONCILIATION_PAYLOAD_INVALID") from exc
+        raise MihomoPayloadError("MIHOMO_RECONCILIATION_PAYLOAD_INVALID") from exc
     if not isinstance(value, dict):
-        raise MihomoReconciliationError("MIHOMO_RECONCILIATION_PAYLOAD_INVALID")
+        raise MihomoPayloadError("MIHOMO_RECONCILIATION_PAYLOAD_INVALID")
     return value
 
 
@@ -139,7 +157,7 @@ def enqueue_mihomo_reconciliation(
     operation_id = _validate_operation_id(operation_id)
     operation_kind = _validate_operation_kind(operation_kind)
     revision = _validate_revision(snapshot_revision)
-    key = f"MIHOMO_RECONCILE:{operation_id}"
+    key = f"{_OPERATION_ID_PREFIX}{operation_id}"
     existing = db.scalar(select(Job).where(Job.dedupe_key == key).with_for_update())
     if existing is not None:
         try:
@@ -181,6 +199,18 @@ def assert_no_unresolved_mihomo_mutation(
 ) -> None:
     if not session_holds_mihomo_projection_lock(db):
         raise MihomoReconciliationBlocked("MIHOMO_PROJECTION_LOCK_REQUIRED")
+    blocker = db.scalar(
+        select(Job)
+        .where(
+            Job.job_type == MIHOMO_RECONCILE_BLOCKER_JOB_TYPE,
+            Job.status != JobStatus.SUCCEEDED,
+        )
+        .order_by(Job.id)
+        .limit(1)
+        .with_for_update()
+    )
+    if blocker is not None:
+        raise MihomoReconciliationBlocked("MIHOMO_GLOBAL_MANUAL_BLOCKER")
     filters = [
         Job.job_type == MIHOMO_RECONCILE_JOB_TYPE,
         Job.status != JobStatus.SUCCEEDED,
@@ -302,6 +332,31 @@ def _landed_result(job_id: int, *, applied: bool) -> MihomoReconciliationResult:
     return MihomoReconciliationResult(job_id, applied, True, False)
 
 
+def _persist_unknown_blocker(
+    db: Session,
+    job_id: int,
+    *,
+    operation_id: str | None,
+    snapshot_revision: int | None,
+    diagnostic: str,
+    applied: bool,
+) -> MihomoReconciliationResult:
+    try:
+        ensure_mihomo_blocker(
+            db,
+            blocker_kind=MIHOMO_BLOCKER_KIND_FINALIZATION,
+            source_job_id=job_id,
+            operation_id=operation_id,
+            snapshot_revision=snapshot_revision,
+            reason_code=diagnostic,
+        )
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        raise MihomoCommitOutcomeUnknown(diagnostic) from exc
+    return MihomoReconciliationResult(job_id, applied, False, False, diagnostic)
+
+
 def _mark_unknown(
     db: Session,
     job_id: int,
@@ -312,6 +367,7 @@ def _mark_unknown(
     candidate_fingerprint: str,
     diagnostic: str,
     applied: bool = True,
+    persist_blocker: bool = False,
 ) -> MihomoReconciliationResult:
     """Persist uncertainty only after a fresh exact read proves it is safe.
 
@@ -339,11 +395,25 @@ def _mark_unknown(
         .execution_options(populate_existing=True)
     )
     if current is None:
-        return MihomoReconciliationResult(job_id, applied, False, False, diagnostic)
+        return _persist_unknown_blocker(
+            db,
+            job_id,
+            operation_id=operation_id,
+            snapshot_revision=snapshot_revision,
+            diagnostic=diagnostic,
+            applied=applied,
+        )
     try:
         current_payload = _payload(current)
-    except MihomoReconciliationError:
-        return MihomoReconciliationResult(job_id, applied, False, False, diagnostic)
+    except MihomoPayloadError:
+        return _persist_unknown_blocker(
+            db,
+            job_id,
+            operation_id=operation_id,
+            snapshot_revision=snapshot_revision,
+            diagnostic=diagnostic,
+            applied=applied,
+        )
     exact_identity = (
         current.job_type == MIHOMO_RECONCILE_JOB_TYPE
         and current_payload.get("operation_id") == operation_id
@@ -368,10 +438,26 @@ def _mark_unknown(
         or evidence is not None
         or current.last_error_code in MIHOMO_UNKNOWN_DIAGNOSTICS
     ):
-        return MihomoReconciliationResult(job_id, applied, False, False, diagnostic)
+        return _persist_unknown_blocker(
+            db,
+            job_id,
+            operation_id=operation_id,
+            snapshot_revision=snapshot_revision,
+            diagnostic=diagnostic,
+            applied=applied,
+        )
     current.status = JobStatus.RUNNING
     current.locked_at = datetime.now(UTC)
     current.last_error_code = diagnostic
+    if persist_blocker:
+        return _persist_unknown_blocker(
+            db,
+            job_id,
+            operation_id=operation_id,
+            snapshot_revision=snapshot_revision,
+            diagnostic=diagnostic,
+            applied=applied,
+        )
     try:
         db.commit()
     except Exception as exc:
@@ -406,11 +492,27 @@ def reconcile_mihomo_job(
         except MihomoReconciliationBlocked:
             _reset_blocked_claim(db, job)
             return None
+        db.info[SESSION_INFO_RELEASE_METADATA_KEY] = {"source_job_id": job.id}
         try:
-            payload = _payload(job)
-            operation_id = _validate_operation_id(payload.get("operation_id"))
-            operation_kind = _validate_operation_kind(payload.get("operation_kind"))
-            expected = _validate_revision(payload.get("snapshot_revision"))
+            try:
+                payload = _payload(job)
+                operation_id = _validate_operation_id(payload.get("operation_id"))
+                operation_kind = _validate_operation_kind(payload.get("operation_kind"))
+                expected = _validate_revision(payload.get("snapshot_revision"))
+            except (MihomoPayloadError, ValueError):
+                return _persist_unknown_blocker(
+                    db,
+                    job.id,
+                    operation_id=None,
+                    snapshot_revision=None,
+                    diagnostic=MIHOMO_FINALIZATION_UNKNOWN,
+                    applied=False,
+                )
+            db.info[SESSION_INFO_RELEASE_METADATA_KEY] = {
+                "source_job_id": job.id,
+                "operation_id": operation_id,
+                "snapshot_revision": expected,
+            }
             desired = loader.load(db, job)
             if desired.snapshot_revision != expected:
                 raise MihomoReconciliationError("MIHOMO_STALE_DESIRED_SNAPSHOT")
@@ -432,7 +534,16 @@ def reconcile_mihomo_job(
             except (MihomoRollbackVerifiedError, MihomoApplyError) as exc:
                 return _failure(db, job.id, exc, datetime.now(UTC))
             if getattr(apply_result, "applied", False) is not True:
-                raise MihomoReconciliationError("MIHOMO_APPLY_NOT_CONFIRMED")
+                return _mark_unknown(
+                    db,
+                    job.id,
+                    operation_id=operation_id,
+                    operation_kind=operation_kind,
+                    snapshot_revision=expected,
+                    candidate_fingerprint=fingerprint,
+                    diagnostic=MIHOMO_RUNTIME_UNKNOWN,
+                    persist_blocker=True,
+                )
             try:
                 verification = verifier.verify(
                     candidate, operation_id=operation_id, snapshot_revision=expected

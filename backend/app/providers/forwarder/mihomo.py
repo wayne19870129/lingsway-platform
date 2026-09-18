@@ -210,7 +210,7 @@ class MihomoForwarderProvider(ForwarderProvider):
         revision = desired.deployment_constants.get("api-secret-revision")
         if not isinstance(secret_ref, str) or not secret_ref:
             raise MihomoRuntimeError("Mihomo controller secret reference is missing")
-        if not isinstance(revision, int) or revision <= 0:
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision <= 0:
             raise MihomoRuntimeError("Mihomo controller secret revision is invalid")
         return ProjectionTemplate(dict(parsed), version, secret_ref, revision)
 

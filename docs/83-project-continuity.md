@@ -73,7 +73,11 @@ materialization is restricted input, not Mihomo activation.
 - **S04-B1:** ACTIVE on `task/s04-b1-mihomo-durable-reconciliation`. It adds only
   the durable Job-backed Mihomo intent, global named writer lock, retry and
   stale-running recovery, commit-outcome certainty, unresolved-intent guard,
-  injectable reconciliation orchestration, and crash/concurrency semantics.
+  durable global manual blockers for ambiguous finalization and lock-release
+  outcomes, injectable reconciliation orchestration, and crash/concurrency
+  semantics. An unresolved blocker stops every later Mihomo writer, and a
+  release-uncertain blocker is retained until controlled recovery. It remains
+  fail-closed and is not automatically repaired.
   It does not claim S04-B2 or S04-C complete, and does not wire production
   lifespan, real snapshot loading, real secret resolution, runtime readback, or
   Mihomo activation. S04-A guarantees canonical mapping/value ownership for DNS

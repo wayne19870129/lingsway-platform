@@ -22,6 +22,7 @@ from backend.app.providers.forwarder.mihomo import (
     MihomoRollbackVerifiedError,
     MihomoRuntimeError,
 )
+from backend.app.providers.forwarder.mihomo_projection import MihomoProjectionError
 
 
 @dataclass
@@ -140,6 +141,24 @@ def test_candidate_fingerprint_is_secret_neutral() -> None:
     assert first.version == second.version
     assert first.content["secret"] != second.content["secret"]
     assert first.version not in {"secret-a", "secret-b"}
+
+
+def test_controller_secret_revision_rejects_bool() -> None:
+    provider = MihomoForwarderProvider(Runtime())
+    with pytest.raises(MihomoProjectionError, match="CONTROLLER_SECRET_REVISION_INVALID"):
+        provider.render(
+            DesiredForwarderState(
+                listener_specs=(
+                    ForwarderListenerDTO("listener", "socks", "127.0.0.1", 7891, "BLOCK"),
+                ),
+                rules=({"match": "MATCH", "target": "BLOCK"},),
+                deployment_constants={
+                    "external-controller": "172.30.0.10:9090",
+                    "api-secret-ref": "mihomo/api-secret",
+                    "api-secret-revision": True,
+                },
+            )
+        )
 
 
 def test_controller_secret_mismatch_fails_before_backup() -> None:

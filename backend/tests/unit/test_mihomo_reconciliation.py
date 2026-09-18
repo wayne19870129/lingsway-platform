@@ -8,11 +8,16 @@ from types import SimpleNamespace
 from typing import cast
 
 import pytest
-from sqlalchemy import Table, create_engine
+from sqlalchemy import Table, create_engine, select
 from sqlalchemy.orm import Session
 
 import backend.app.models  # noqa: F401
 from backend.app.infra import mihomo_reconciliation as reconciliation
+from backend.app.infra.mihomo_blocker import (
+    MIHOMO_BLOCKER_KIND_FINALIZATION,
+    MIHOMO_RECONCILE_BLOCKER_JOB_TYPE,
+    ensure_mihomo_blocker,
+)
 from backend.app.infra.mihomo_reconciliation import (
     MIHOMO_FINALIZATION_UNKNOWN,
     MIHOMO_ROLLBACK_UNKNOWN,
@@ -88,6 +93,51 @@ def test_enqueue_rejects_noncanonical_operation_identity(db: Session) -> None:
         enqueue_mihomo_reconciliation(
             db, operation_id=" op-1", operation_kind="RECONCILE", snapshot_revision=1
         )
+
+
+def test_operation_id_is_bounded_by_job_dedupe_key(db: Session) -> None:
+    operation_id = "x" * 143
+    job = enqueue_mihomo_reconciliation(
+        db, operation_id=operation_id, operation_kind="RECONCILE", snapshot_revision=1
+    )
+    assert len(job.dedupe_key) == 160
+    db.rollback()
+    with pytest.raises(ValueError):
+        enqueue_mihomo_reconciliation(
+            db,
+            operation_id=operation_id + "x",
+            operation_kind="RECONCILE",
+            snapshot_revision=1,
+        )
+
+
+def test_blocker_is_identifier_only_idempotent_and_global(db: Session) -> None:
+    blocker = ensure_mihomo_blocker(
+        db,
+        blocker_kind=MIHOMO_BLOCKER_KIND_FINALIZATION,
+        source_job_id=77,
+        operation_id="op-blocked",
+        snapshot_revision=1,
+        reason_code=MIHOMO_FINALIZATION_UNKNOWN,
+    )
+    db.commit()
+    same = ensure_mihomo_blocker(
+        db,
+        blocker_kind=MIHOMO_BLOCKER_KIND_FINALIZATION,
+        source_job_id=77,
+        operation_id="op-blocked",
+        snapshot_revision=1,
+        reason_code=MIHOMO_FINALIZATION_UNKNOWN,
+    )
+    assert same.id == blocker.id
+    assert "secret" not in same.payload_json.casefold()
+    assert "token" not in same.payload_json.casefold()
+    assert db.scalar(
+        select(Job).where(Job.job_type == MIHOMO_RECONCILE_BLOCKER_JOB_TYPE)
+    ) is not None
+    db.info["mihomo_projection_lock_held"] = True
+    with pytest.raises(MihomoReconciliationBlocked, match="GLOBAL_MANUAL_BLOCKER"):
+        assert_no_unresolved_mihomo_mutation(db)
     with pytest.raises(ValueError):
         enqueue_mihomo_reconciliation(
             db, operation_id="op-1", operation_kind="ARBITRARY", snapshot_revision=1
@@ -275,6 +325,110 @@ def test_partial_finalization_evidence_is_preserved_as_unknown(db: Session) -> N
         "finalization_evidence"
     ]
     assert current.last_error_code is None
+
+
+@pytest.mark.parametrize(
+    "state", ["missing", "malformed", "partial", "wrong-fingerprint", "wrong-identity"]
+)
+def test_ambiguous_finalization_persists_global_blocker(
+    db: Session, state: str
+) -> None:
+    job_id = 9001
+    if state != "missing":
+        job = enqueue_mihomo_reconciliation(
+            db, operation_id="op-ambiguous", operation_kind="RECONCILE", snapshot_revision=1
+        )
+        job_id = job.id
+        if state == "malformed":
+            job.payload_json = "not-json"
+        else:
+            payload = json.loads(job.payload_json)
+            if state == "wrong-identity":
+                payload["operation_id"] = "different-operation"
+            payload["finalization_evidence"] = {
+                "operation_id": (
+                    "different-operation" if state == "wrong-identity" else "op-ambiguous"
+                ),
+                "operation_kind": "RECONCILE",
+                "snapshot_revision": 1,
+                "candidate_fingerprint": (
+                    "wrong" if state == "wrong-fingerprint" else "projection-v1"
+                ),
+            }
+            job.status = JobStatus.SUCCEEDED
+            job.payload_json = json.dumps(payload, sort_keys=True)
+        db.commit()
+
+    result = _mark_unknown(
+        db,
+        job_id,
+        operation_id="op-ambiguous",
+        operation_kind="RECONCILE",
+        snapshot_revision=1,
+        candidate_fingerprint="projection-v1",
+        diagnostic=MIHOMO_FINALIZATION_UNKNOWN,
+        applied=False,
+    )
+
+    assert result.retryable is False
+    blocker = db.scalar(
+        select(Job).where(Job.job_type == MIHOMO_RECONCILE_BLOCKER_JOB_TYPE)
+    )
+    assert blocker is not None
+    if state != "missing":
+        current = db.get(Job, job_id)
+        assert current is not None
+        if state == "malformed":
+            assert current.payload_json == "not-json"
+        else:
+            assert current.status is JobStatus.SUCCEEDED
+
+
+def test_exact_landed_and_exact_running_need_no_duplicate_blocker(db: Session) -> None:
+    job = enqueue_mihomo_reconciliation(
+        db, operation_id="op-exact", operation_kind="RECONCILE", snapshot_revision=1
+    )
+    payload = json.loads(job.payload_json)
+    payload["finalization_evidence"] = {
+        "operation_id": "op-exact",
+        "operation_kind": "RECONCILE",
+        "snapshot_revision": 1,
+        "candidate_fingerprint": "projection-v1",
+        "verification": "readback-v1",
+    }
+    job.status = JobStatus.SUCCEEDED
+    job.payload_json = json.dumps(payload, sort_keys=True)
+    db.commit()
+    landed = _mark_unknown(
+        db,
+        job.id,
+        operation_id="op-exact",
+        operation_kind="RECONCILE",
+        snapshot_revision=1,
+        candidate_fingerprint="projection-v1",
+        diagnostic=MIHOMO_FINALIZATION_UNKNOWN,
+        applied=False,
+    )
+    assert landed.finalized is True
+    assert db.scalar(select(Job).where(Job.job_type == MIHOMO_RECONCILE_BLOCKER_JOB_TYPE)) is None
+
+    job.status = JobStatus.RUNNING
+    job.payload_json = json.dumps(
+        {"operation_id": "op-exact", "operation_kind": "RECONCILE", "snapshot_revision": 1}
+    )
+    db.commit()
+    running = _mark_unknown(
+        db,
+        job.id,
+        operation_id="op-exact",
+        operation_kind="RECONCILE",
+        snapshot_revision=1,
+        candidate_fingerprint="projection-v1",
+        diagnostic=MIHOMO_FINALIZATION_UNKNOWN,
+        applied=False,
+    )
+    assert running.finalized is False
+    assert db.scalar(select(Job).where(Job.job_type == MIHOMO_RECONCILE_BLOCKER_JOB_TYPE)) is None
 
 
 def test_ack_loss_after_durable_commit_is_landed_without_downgrade(
@@ -561,6 +715,7 @@ class _Provider:
         self.finalize_count = 0
         self.apply_count = 0
         self.apply_error: Exception | None = None
+        self.apply_result: object = SimpleNamespace(applied=True)
 
     def render(self, desired: DesiredForwarderState) -> object:
         self.render_count += 1
@@ -574,7 +729,7 @@ class _Provider:
         self.apply_count += 1
         if self.apply_error is not None:
             raise self.apply_error
-        return SimpleNamespace(applied=True)
+        return self.apply_result
 
 
 class _Candidate:
@@ -636,6 +791,38 @@ def test_positive_verification_finalizes_with_secret_neutral_version(
     assert job is not None
     assert "never-store" not in job.payload_json
     assert "projection-v1" in job.payload_json
+
+
+def test_nonpositive_apply_result_persists_runtime_blocker_and_blocks_newer(
+    db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    enqueue_mihomo_reconciliation(
+        db, operation_id="op-apply-unknown", operation_kind="RECONCILE", snapshot_revision=1
+    )
+    db.commit()
+    provider = _Provider()
+    provider.apply_result = SimpleNamespace(applied=False)
+    result = _reconcile_with_fake_lock(
+        db,
+        provider,
+        _Verifier(ProjectionVerification(True, "readback-v1")),
+        monkeypatch,
+    )
+
+    assert result is not None
+    assert result.retryable is False
+    assert result.reason_code == MIHOMO_RUNTIME_UNKNOWN
+    assert (
+        db.scalar(select(Job).where(Job.job_type == MIHOMO_RECONCILE_BLOCKER_JOB_TYPE))
+        is not None
+    )
+    newer = enqueue_mihomo_reconciliation(
+        db, operation_id="op-apply-unknown-newer", operation_kind="RECONCILE", snapshot_revision=1
+    )
+    db.commit()
+    db.info["mihomo_projection_lock_held"] = True
+    with pytest.raises(MihomoReconciliationBlocked):
+        assert_no_unresolved_mihomo_mutation(db, owning_job_id=newer.id)
 
 
 def test_rollback_verified_is_failed_and_retryable(
