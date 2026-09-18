@@ -11,7 +11,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 import backend.app.models  # noqa: F401
-from backend.app.core.database import build_engine
+from backend.app.core.database import Base, build_engine
 from backend.app.infra import mihomo_projection_lock as lock_module
 from backend.app.infra.mihomo_blocker import MIHOMO_RECONCILE_BLOCKER_JOB_TYPE
 from backend.app.infra.mihomo_projection_lock import (
@@ -62,9 +62,11 @@ def mysql_engine() -> Iterator[Engine]:
     if engine.dialect.name != "mysql":
         engine.dispose()
         pytest.skip("GET_LOCK coverage is MySQL-only")
+    Base.metadata.create_all(engine)
     try:
         yield engine
     finally:
+        Base.metadata.drop_all(engine)
         engine.dispose()
 
 
