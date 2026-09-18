@@ -49,7 +49,7 @@ def snapshot() -> DesiredForwarderState:
             ),
         ),
         transport_references=(TransportMaterializationReference(1, "A", 1, "cache/1"),),
-        deployment_constants={"mode": "rule"},
+        deployment_constants={"mode": "rule", "api-secret-ref": "mihomo/api-secret"},
     )
 
 
@@ -59,7 +59,7 @@ def test_same_snapshot_is_deterministic_and_secret_neutral() -> None:
     second, second_fingerprint = compose_mihomo_document(state)
     assert first == second
     assert first_fingerprint == second_fingerprint
-    assert "secret" not in repr(first).lower()
+    assert "S04A_SECRET_SENTINEL_DO_NOT_LEAK" not in repr(first)
     assert "token" not in first_fingerprint.lower()
     assert "S04A_SECRET_SENTINEL_DO_NOT_LEAK" not in repr(
         materialization(1, "A", {"secret": "S04A_SECRET_SENTINEL_DO_NOT_LEAK"})
@@ -117,7 +117,9 @@ def test_transport_reference_owners_are_one_to_one() -> None:
 
 def test_materialized_content_is_rendered_into_candidate() -> None:
     document, _ = compose_mihomo_document(snapshot())
-    assert {item["name"] for item in document["proxies"]} >= {"materialized-a"}
+    proxies = document["proxies"]
+    assert isinstance(proxies, list)
+    assert {item["name"] for item in proxies} >= {"materialized-a"}
 
 
 @pytest.mark.parametrize(
@@ -163,7 +165,15 @@ def test_snapshot_defensively_freezes_nested_input() -> None:
 
 def test_deleted_desired_entries_are_not_retained() -> None:
     document, _ = compose_mihomo_document(snapshot())
-    assert document["listeners"] == [{"name": "listener-a", "listen": "127.0.0.1:10001"}]
+    assert document["listeners"] == [
+        {
+            "name": "listener-a",
+            "type": "socks",
+            "port": 7890,
+            "proxy": "BLOCK",
+            "listen": "127.0.0.1:10001",
+        }
+    ]
     with pytest.raises(MihomoProjectionError, match="FALLBACK_RULE_INVALID"):
         compose_mihomo_document(DesiredForwarderState())
 

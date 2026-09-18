@@ -15,13 +15,21 @@ class MihomoProjectionError(ValueError):
     """Secret-safe fail-closed projection error."""
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, repr=False)
 class TransportMaterializationReference:
     owner_record_id: int
     provider_code: str
     source_revision: int
     cache_identity: str
     implementation: str = "subscription"
+
+    def __repr__(self) -> str:
+        return (
+            "TransportMaterializationReference("
+            f"owner_record_id={self.owner_record_id!r}, provider_code={self.provider_code!r}, "
+            f"source_revision={self.source_revision!r}, cache_identity=<redacted>, "
+            f"implementation={self.implementation!r})"
+        )
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -118,22 +126,27 @@ def _validate_sections(desired: DesiredForwarderState) -> None:
         refs = group.get("proxies")
         if not isinstance(refs, tuple) or any(ref not in names for ref in refs):
             raise MihomoProjectionError("MIHOMO_PROXY_GROUP_REFERENCE_INVALID")
-    fallback_rules = []
+    fallback_rules: list[Mapping[str, object]] = []
     for rule in desired.rules:
         rule = _mapping(rule, "MIHOMO_RULE_INVALID")
-        if not isinstance(rule.get("match"), str) or not isinstance(rule.get("target"), str):
+        match = rule.get("match")
+        target = rule.get("target")
+        if not isinstance(match, str) or not isinstance(target, str):
             raise MihomoProjectionError("MIHOMO_RULE_INVALID")
-        if rule["match"].upper() == "MATCH":
+        if match.upper() == "MATCH":
             fallback_rules.append(rule)
-        if rule["match"].upper() == "MATCH" and rule["target"].upper() == "DIRECT":
+        if match.upper() == "MATCH" and target.upper() == "DIRECT":
             raise MihomoProjectionError("MIHOMO_DIRECT_FALLBACK_FORBIDDEN")
     if len(fallback_rules) != 1:
         raise MihomoProjectionError("MIHOMO_FALLBACK_RULE_INVALID")
-    if fallback_rules[0]["target"].upper() != "BLOCK":
+    fallback_target = fallback_rules[0].get("target")
+    if not isinstance(fallback_target, str) or fallback_target.upper() != "BLOCK":
         raise MihomoProjectionError("MIHOMO_FALLBACK_MUST_BLOCK")
+    if desired.rules[-1] is not fallback_rules[0]:
+        raise MihomoProjectionError("MIHOMO_FALLBACK_NOT_TERMINAL")
     _mapping(desired.dns, "MIHOMO_DNS_INVALID")
     _mapping(desired.policy, "MIHOMO_POLICY_INVALID")
-    allowed = {"mode", "mixed-port", "allow-lan", "log-level"}
+    allowed = {"mode", "mixed-port", "allow-lan", "log-level", "api-secret-ref"}
     if any(key not in allowed for key in desired.deployment_constants):
         raise MihomoProjectionError("MIHOMO_DEPLOYMENT_CONSTANT_UNSUPPORTED")
 
@@ -192,10 +205,30 @@ def compose_mihomo_document(desired: DesiredForwarderState) -> tuple[dict[str, o
         snapshot_identity=desired.snapshot_identity,
     )
     _validate_sections(effective_desired)
-    raw_document: dict[str, object] = {
+    constants = {
+        "ipv6": False,
+        "unified-delay": True,
+        "tcp-concurrent": True,
+        "mixed-port": 7890,
+        "allow-lan": False,
+        "bind-address": "127.0.0.1",
+        "mode": "rule",
+        "log-level": "warning",
+        "external-controller": "127.0.0.1:9090",
         **dict(desired.deployment_constants),
+    }
+    raw_document: dict[str, object] = {
+        **constants,
+        "proxy-providers": {},
         "listeners": [
-            {"name": name, "listen": value} for name, value in sorted(desired.listeners.items())
+            {
+                "name": name,
+                "type": "socks",
+                "port": 7890,
+                "proxy": "BLOCK",
+                "listen": value,
+            }
+            for name, value in sorted(desired.listeners.items())
         ],
         "proxies": list(effective_proxies),
         "proxy-groups": list(desired.proxy_groups),
@@ -203,6 +236,10 @@ def compose_mihomo_document(desired: DesiredForwarderState) -> tuple[dict[str, o
         "dns": dict(desired.dns),
         "policy": dict(desired.policy),
     }
+    secret_ref = desired.deployment_constants.get("api-secret-ref")
+    if not isinstance(secret_ref, str) or not secret_ref:
+        raise MihomoProjectionError("MIHOMO_API_SECRET_REF_REQUIRED")
+    raw_document["secret-ref"] = secret_ref
     document_value = _canonical(raw_document)
     if not isinstance(document_value, dict):
         raise MihomoProjectionError("MIHOMO_DOCUMENT_INVALID")
