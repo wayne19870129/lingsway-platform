@@ -48,7 +48,11 @@ from backend.app.providers.base import (
     HealthReport,
     TenantDTO,
 )
-from backend.app.providers.forwarder.mihomo import MihomoForwarderProvider, MihomoRuntimeError
+from backend.app.providers.forwarder.mihomo import (
+    ControllerSecretSnapshot,
+    MihomoForwarderProvider,
+    MihomoRuntimeError,
+)
 from backend.app.providers.registry import build_registry
 from backend.app.schemas.public import OrderCreate
 
@@ -469,7 +473,9 @@ def test_mihomo_render_failure_restores_exact_pre_operation_state(
         )
     )
 
-    candidate = provider.finalize(template, "test-api-secret")
+    candidate = provider.finalize(
+        template, ControllerSecretSnapshot("mihomo/api-secret", 1, "test-api-secret")
+    )
     with pytest.raises(MihomoRuntimeError):
         provider.apply(candidate)
 
@@ -546,7 +552,9 @@ def test_mihomo_unhealthy_post_reload_restores_exact_pre_operation_state(
         )
     )
 
-    candidate = provider.finalize(template, "test-api-secret")
+    candidate = provider.finalize(
+        template, ControllerSecretSnapshot("mihomo/api-secret", 1, "test-api-secret")
+    )
     with pytest.raises(MihomoRuntimeError, match="unhealthy"):
         provider.apply(candidate)
 

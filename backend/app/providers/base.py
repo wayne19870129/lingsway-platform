@@ -10,7 +10,7 @@ from datetime import datetime
 from decimal import Decimal
 from enum import Enum
 from types import MappingProxyType
-from typing import Protocol
+from typing import Protocol, cast
 
 
 @dataclass(frozen=True, slots=True)
@@ -267,7 +267,7 @@ class DesiredForwarderState:
             "DesiredForwarderState("
             f"snapshot_revision={self.snapshot_revision!r}, "
             f"snapshot_identity={self.snapshot_identity!r}, "
-            f"listener_count={len(self.listeners)}, proxy_count={len(self.proxies)}, "
+            f"listener_count={len(self.listener_specs)}, proxy_count={len(self.proxies)}, "
             f"proxy_group_count={len(self.proxy_groups)}, rule_count={len(self.rules)}, "
             f"content=<redacted>)"
         )
@@ -276,16 +276,13 @@ class DesiredForwarderState:
 class CandidateConfig:
     """Immutable candidate whose generic dataclass serialization is unavailable."""
 
-    __slots__ = ("_content", "_version", "_finalized")
+    __slots__ = ("_content", "_version")
     _content: Mapping[str, object]
     _version: str
 
-    def __init__(
-        self, content: Mapping[str, object], version: str, *, finalized: bool = True
-    ) -> None:
+    def __init__(self, content: Mapping[str, object], version: str) -> None:
         object.__setattr__(self, "_content", content)
         object.__setattr__(self, "_version", version)
-        object.__setattr__(self, "_finalized", finalized)
 
     @property
     def content(self) -> Mapping[str, object]:
@@ -295,22 +292,11 @@ class CandidateConfig:
     def version(self) -> str:
         return self._version
 
-    @property
-    def finalized(self) -> bool:
-        return self._finalized
-
     def __setattr__(self, name: str, value: object) -> None:
         raise AttributeError(f"{type(self).__name__} is immutable")
 
     def __repr__(self) -> str:
         return f"CandidateConfig(version={self.version!r}, content=<redacted>)"
-
-
-class ProjectionTemplate(CandidateConfig):
-    """Secret-free, non-installable projection awaiting operation finalization."""
-
-    def __init__(self, content: Mapping[str, object], version: str) -> None:
-        super().__init__(content, version, finalized=False)
 
     def __eq__(self, other: object) -> bool:
         return (
@@ -318,6 +304,46 @@ class ProjectionTemplate(CandidateConfig):
             and self.content == other.content
             and self.version == other.version
         )
+
+
+class ProjectionTemplate(CandidateConfig):
+    """Secret-free, non-installable projection awaiting operation finalization."""
+
+    __slots__ = ("_controller_secret_ref", "_controller_secret_revision")
+
+    def __init__(
+        self,
+        content: Mapping[str, object],
+        version: str,
+        controller_secret_ref: str,
+        controller_secret_revision: int,
+    ) -> None:
+        super().__init__(cast(Mapping[str, object], _freeze_content(content)), version)
+        object.__setattr__(self, "_controller_secret_ref", controller_secret_ref)
+        object.__setattr__(self, "_controller_secret_revision", controller_secret_revision)
+
+    @property
+    def controller_secret_ref(self) -> str:
+        return self._controller_secret_ref
+
+    @property
+    def controller_secret_revision(self) -> int:
+        return self._controller_secret_revision
+
+    def __repr__(self) -> str:
+        return (
+            "ProjectionTemplate("
+            f"version={self.version!r}, controller_secret_ref=<redacted>, "
+            f"controller_secret_revision={self.controller_secret_revision!r}, content=<redacted>)"
+        )
+
+
+def _freeze_content(value: object) -> object:
+    if isinstance(value, Mapping):
+        return MappingProxyType({str(key): _freeze_content(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_content(item) for item in value)
+    return value
 
 
 @dataclass(frozen=True, slots=True)

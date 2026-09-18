@@ -10,7 +10,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import NoReturn, Protocol
+from typing import NoReturn, Protocol, cast
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -23,12 +23,41 @@ from backend.app.providers.base import (
     ForwarderProvider,
     HealthReport,
     ProjectionTemplate,
+    _freeze_content,
 )
 from backend.app.providers.forwarder.mihomo_projection import compose_mihomo_document
 
 
 class MihomoRuntimeError(RuntimeError):
     """Raised when Mihomo installation or reload fails."""
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class ControllerSecretSnapshot:
+    ref: str
+    revision: int
+    value: str
+
+    def __repr__(self) -> str:
+        return (
+            "ControllerSecretSnapshot(ref=<redacted>, "
+            f"revision={self.revision!r}, value=<redacted>)"
+        )
+
+
+class MihomoCandidateConfig(CandidateConfig):
+    """Only provider-specific, finalized Mihomo candidates are installable."""
+
+    def __init__(self, content: Mapping[str, object], version: str) -> None:
+        super().__init__(cast(Mapping[str, object], _freeze_content(content)), version)
+
+
+def _plain(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {key: _plain(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_plain(item) for item in value]
+    return value
 
 
 class MihomoRuntime(Protocol):
@@ -124,22 +153,35 @@ class MihomoForwarderProvider(ForwarderProvider):
             raise MihomoRuntimeError("rendered Mihomo document is invalid YAML") from exc
         if not isinstance(parsed, Mapping):
             raise MihomoRuntimeError("rendered Mihomo document is not a mapping")
-        return ProjectionTemplate(dict(parsed), version)
+        secret_ref = desired.deployment_constants.get("api-secret-ref")
+        revision = desired.deployment_constants.get("api-secret-revision", 1)
+        if not isinstance(secret_ref, str) or not secret_ref:
+            raise MihomoRuntimeError("Mihomo controller secret reference is missing")
+        if not isinstance(revision, int) or revision <= 0:
+            raise MihomoRuntimeError("Mihomo controller secret revision is invalid")
+        return ProjectionTemplate(dict(parsed), version, secret_ref, revision)
 
-    def finalize(self, template: ProjectionTemplate, controller_secret: str) -> CandidateConfig:
-        if not isinstance(template, ProjectionTemplate) or template.finalized:
+    def finalize(
+        self, template: ProjectionTemplate, snapshot: ControllerSecretSnapshot
+    ) -> MihomoCandidateConfig:
+        if not isinstance(template, ProjectionTemplate):
             raise MihomoRuntimeError("invalid Mihomo projection template")
-        if not controller_secret:
+        if (
+            snapshot.ref != template.controller_secret_ref
+            or snapshot.revision != template.controller_secret_revision
+        ):
+            raise MihomoRuntimeError("Mihomo controller secret identity mismatch")
+        if not snapshot.value.strip():
             raise MihomoRuntimeError("Mihomo controller secret resolution failed")
         content = dict(template.content)
-        content["secret"] = controller_secret
-        return CandidateConfig(content, template.version, finalized=True)
+        content["secret"] = snapshot.value
+        return MihomoCandidateConfig(content, template.version)
 
-    def apply(self, candidate: CandidateConfig) -> ApplyResult:
-        if not candidate.finalized:
+    def apply(self, candidate: MihomoCandidateConfig) -> ApplyResult:
+        if not isinstance(candidate, MihomoCandidateConfig):
             raise MihomoRuntimeError("cannot install non-finalized Mihomo projection")
         backup = self._runtime.backup()
-        document = yaml.safe_dump(candidate.content, sort_keys=False).encode()
+        document = yaml.safe_dump(_plain(candidate.content), sort_keys=False).encode()
 
         # `install()`/`reload()` succeeding without raising is not the same
         # as the reload having actually taken effect -- a reload command

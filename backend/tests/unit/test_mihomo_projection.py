@@ -5,8 +5,14 @@ from typing import cast
 
 import pytest
 
-from backend.app.providers.base import DesiredForwarderState
-from backend.app.providers.forwarder.mihomo import MihomoForwarderProvider, MihomoRuntime
+from backend.app.providers.base import CandidateConfig, DesiredForwarderState, ProjectionTemplate
+from backend.app.providers.forwarder.mihomo import (
+    ControllerSecretSnapshot,
+    MihomoCandidateConfig,
+    MihomoForwarderProvider,
+    MihomoRuntime,
+    MihomoRuntimeError,
+)
 from backend.app.providers.forwarder.mihomo_projection import (
     MihomoProjectionError,
     TransportMaterialization,
@@ -316,3 +322,40 @@ def test_provider_render_uses_desired_snapshot_not_external_renderer() -> None:
     listeners = cast(list[dict[str, object]], candidate.content["listeners"])
     assert listeners[0]["name"] == "listener-a"
     assert candidate.version == compose_mihomo_document(state)[1]
+
+
+def test_template_secret_identity_and_finalization_boundary() -> None:
+    provider = MihomoForwarderProvider(runtime=cast(MihomoRuntime, object()))
+    template = provider.render(snapshot())
+    assert isinstance(template, ProjectionTemplate)
+    assert template.controller_secret_ref == "mihomo/api-secret"
+    assert template.controller_secret_revision == 1
+    assert "S04A_SECRET_SENTINEL_DO_NOT_LEAK" not in repr(template)
+    candidate = provider.finalize(
+        template,
+        ControllerSecretSnapshot("mihomo/api-secret", 1, "S04A_SECRET_SENTINEL_DO_NOT_LEAK"),
+    )
+    assert isinstance(candidate, MihomoCandidateConfig)
+    assert candidate.content["secret"] == "S04A_SECRET_SENTINEL_DO_NOT_LEAK"
+    assert "S04A_SECRET_SENTINEL_DO_NOT_LEAK" not in repr(candidate)
+
+
+def test_finalization_identity_and_blank_secret_fail_closed() -> None:
+    provider = MihomoForwarderProvider(runtime=cast(MihomoRuntime, object()))
+    template = provider.render(snapshot())
+    with pytest.raises(MihomoRuntimeError, match="identity mismatch"):
+        provider.finalize(template, ControllerSecretSnapshot("other", 1, "secret"))
+    with pytest.raises(MihomoRuntimeError, match="resolution failed"):
+        provider.finalize(template, ControllerSecretSnapshot("mihomo/api-secret", 1, "   "))
+
+
+def test_generic_candidate_and_template_cannot_be_applied() -> None:
+    class Runtime:
+        def backup(self) -> object:
+            raise AssertionError("backup must not run")
+
+    provider = MihomoForwarderProvider(runtime=cast(MihomoRuntime, Runtime()))
+    with pytest.raises(MihomoRuntimeError, match="non-finalized"):
+        provider.apply(cast(MihomoCandidateConfig, CandidateConfig({}, "v1")))
+    with pytest.raises(MihomoRuntimeError, match="non-finalized"):
+        provider.apply(cast(MihomoCandidateConfig, provider.render(snapshot())))

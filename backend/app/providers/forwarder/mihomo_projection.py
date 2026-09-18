@@ -200,7 +200,14 @@ def _validate_sections(desired: DesiredForwarderState) -> None:
             raise MihomoProjectionError("MIHOMO_RULE_TARGET_INVALID")
     _mapping(desired.dns, "MIHOMO_DNS_INVALID")
     _mapping(desired.policy, "MIHOMO_POLICY_INVALID")
-    allowed = {"mode", "mixed-port", "allow-lan", "log-level", "api-secret-ref"}
+    allowed = {
+        "mode",
+        "mixed-port",
+        "allow-lan",
+        "log-level",
+        "api-secret-ref",
+        "api-secret-revision",
+    }
     if any(key not in allowed for key in desired.deployment_constants):
         raise MihomoProjectionError("MIHOMO_DEPLOYMENT_CONSTANT_UNSUPPORTED")
 
@@ -300,6 +307,7 @@ def compose_mihomo_document(desired: DesiredForwarderState) -> tuple[dict[str, o
         raise MihomoProjectionError("MIHOMO_API_SECRET_REF_REQUIRED")
     # The opaque reference is an operation input only; it is never serialized.
     raw_document.pop("api-secret-ref", None)
+    raw_document.pop("api-secret-revision", None)
     document_value = _canonical(raw_document)
     if not isinstance(document_value, dict):
         raise MihomoProjectionError("MIHOMO_DOCUMENT_INVALID")
@@ -308,6 +316,10 @@ def compose_mihomo_document(desired: DesiredForwarderState) -> tuple[dict[str, o
         {
             "snapshot_revision": desired.snapshot_revision,
             "snapshot_identity": desired.snapshot_identity,
+            "controller_secret_ref": desired.deployment_constants.get("api-secret-ref"),
+            "controller_secret_revision": desired.deployment_constants.get(
+                "api-secret-revision", 1
+            ),
             "document": document,
             "transport_proofs": [
                 {

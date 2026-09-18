@@ -13,8 +13,9 @@ from pathlib import Path
 
 import pytest
 
-from backend.app.providers.base import CandidateConfig, HealthReport
+from backend.app.providers.base import HealthReport
 from backend.app.providers.forwarder.mihomo import (
+    MihomoCandidateConfig,
     MihomoForwarderProvider,
     MihomoRuntimeError,
 )
@@ -73,8 +74,8 @@ class Runtime:
         return HealthReport(value)
 
 
-def candidate() -> CandidateConfig:
-    return CandidateConfig({"rules": ["MATCH,DIRECT"]}, "v1")
+def candidate() -> MihomoCandidateConfig:
+    return MihomoCandidateConfig({"rules": ["MATCH,DIRECT"]}, "v1")
 
 
 def test_successful_apply_verifies_health_after_reload() -> None:
