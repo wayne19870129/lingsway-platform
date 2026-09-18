@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import MappingProxyType
 
-from backend.app.providers.base import DesiredForwarderState
+from backend.app.providers.base import DesiredForwarderState, ForwarderListenerDTO
 
 
 class MihomoProjectionError(ValueError):
@@ -122,26 +122,18 @@ def _validate_sections(desired: DesiredForwarderState) -> None:
     listener_names: set[str] = set()
     listener_bindings: set[tuple[str, int]] = set()
     for listener in desired.listener_specs:
-        item = _mapping(listener, "MIHOMO_LISTENER_INVALID")
-        name, kind, address, port, target = (
-            item.get("name"),
-            item.get("type"),
-            item.get("listen"),
-            item.get("port"),
-            item.get("proxy"),
-        )
-        if not (
-            isinstance(name, str)
-            and isinstance(kind, str)
-            and isinstance(address, str)
-            and isinstance(target, str)
-        ):
+        if not isinstance(listener, ForwarderListenerDTO):
             raise MihomoProjectionError("MIHOMO_LISTENER_INVALID")
-        if (
-            kind not in {"socks", "http", "mixed"}
-            or not isinstance(port, int)
-            or not 1 <= port <= 65535
-        ):
+        name = listener.name.strip()
+        kind = listener.listener_type
+        address = listener.listen.strip()
+        port = listener.port
+        target = listener.proxy
+        if not name or not address or not target:
+            raise MihomoProjectionError("MIHOMO_LISTENER_INVALID")
+        if any(ord(char) < 32 for char in f"{name}{address}{target}"):
+            raise MihomoProjectionError("MIHOMO_LISTENER_INVALID")
+        if kind not in {"socks", "http", "mixed"} or not 1 <= port <= 65535:
             raise MihomoProjectionError("MIHOMO_LISTENER_INVALID")
         if name in listener_names or (address, port) in listener_bindings:
             raise MihomoProjectionError("MIHOMO_LISTENER_DUPLICATE")
@@ -166,7 +158,7 @@ def _validate_sections(desired: DesiredForwarderState) -> None:
     }
     allowed_targets = set(names) | group_names | {"BLOCK"}
     for listener in desired.listener_specs:
-        if listener.get("proxy") not in allowed_targets:
+        if listener.proxy not in allowed_targets:
             raise MihomoProjectionError("MIHOMO_LISTENER_TARGET_INVALID")
     fallback_rules: list[Mapping[str, object]] = []
     supported_rules = {"DOMAIN", "DOMAIN-SUFFIX", "IP-CIDR"}
@@ -296,7 +288,16 @@ def compose_mihomo_document(desired: DesiredForwarderState) -> tuple[dict[str, o
 
     raw_document: dict[str, object] = {
         **constants,
-        "listeners": list(desired.listener_specs),
+        "listeners": [
+            {
+                "name": listener.name,
+                "type": listener.listener_type,
+                "listen": listener.listen,
+                "port": listener.port,
+                "proxy": listener.proxy,
+            }
+            for listener in desired.listener_specs
+        ],
         "proxies": list(effective_proxies),
         "proxy-groups": list(desired.proxy_groups),
         "rules": [serialize_rule(rule) for rule in desired.rules],

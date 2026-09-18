@@ -5,7 +5,12 @@ from typing import cast
 
 import pytest
 
-from backend.app.providers.base import CandidateConfig, DesiredForwarderState, ProjectionTemplate
+from backend.app.providers.base import (
+    CandidateConfig,
+    DesiredForwarderState,
+    ForwarderListenerDTO,
+    ProjectionTemplate,
+)
 from backend.app.providers.forwarder.mihomo import (
     ControllerSecretSnapshot,
     MihomoCandidateConfig,
@@ -39,17 +44,19 @@ def materialization(owner: int, code: str, content: dict[str, object]) -> Transp
     )
 
 
+class Resolver:
+    def __init__(self, snapshot: ControllerSecretSnapshot) -> None:
+        self.snapshot = snapshot
+        self.refs: list[str] = []
+
+    def resolve(self, secret_ref: str) -> ControllerSecretSnapshot:
+        self.refs.append(secret_ref)
+        return self.snapshot
+
+
 def snapshot() -> DesiredForwarderState:
     return DesiredForwarderState(
-        listener_specs=(
-            {
-                "name": "listener-a",
-                "type": "socks",
-                "listen": "127.0.0.1",
-                "port": 10001,
-                "proxy": "BLOCK",
-            },
-        ),
+        listener_specs=(ForwarderListenerDTO("listener-a", "socks", "127.0.0.1", 10001, "BLOCK"),),
         proxies=({"name": "proxy-a", "type": "ss", "server": "example.invalid"},),
         proxy_groups=({"name": "AUTO", "type": "select", "proxies": ["proxy-a"]},),
         rules=({"match": "MATCH", "target": "BLOCK"},),
@@ -62,7 +69,11 @@ def snapshot() -> DesiredForwarderState:
             ),
         ),
         transport_references=(TransportMaterializationReference(1, "A", 1, "cache/1"),),
-        deployment_constants={"mode": "rule", "api-secret-ref": "mihomo/api-secret"},
+        deployment_constants={
+            "mode": "rule",
+            "api-secret-ref": "mihomo/api-secret",
+            "api-secret-revision": 1,
+        },
     )
 
 
@@ -100,7 +111,8 @@ def test_canonical_mihomo_document_contract() -> None:
     assert "api-secret-ref" not in document
     assert "secret-ref" not in document
     assert document["rules"] == ["MATCH,BLOCK"]
-    assert document["listeners"][0]["port"] == 10001
+    listeners = cast(list[dict[str, object]], document["listeners"])
+    assert listeners[0]["port"] == 10001
 
 
 @pytest.mark.parametrize(
@@ -113,20 +125,12 @@ def test_canonical_mihomo_document_contract() -> None:
 )
 def test_supported_rule_kinds_serialize_canonically(kind: str, value: str, expected: str) -> None:
     state = DesiredForwarderState(
-        listener_specs=(
-            {
-                "name": "listener",
-                "type": "socks",
-                "listen": "127.0.0.1",
-                "port": 7890,
-                "proxy": "BLOCK",
-            },
-        ),
+        listener_specs=(ForwarderListenerDTO("listener", "socks", "127.0.0.1", 7890, "BLOCK"),),
         rules=(
             {"match": kind, "value": value, "target": "BLOCK"},
             {"match": "MATCH", "target": "BLOCK"},
         ),
-        deployment_constants={"api-secret-ref": "mihomo/api-secret"},
+        deployment_constants={"api-secret-ref": "mihomo/api-secret", "api-secret-revision": 1},
     )
     document, _ = compose_mihomo_document(state)
     assert document["rules"] == [expected, "MATCH,BLOCK"]
@@ -134,17 +138,9 @@ def test_supported_rule_kinds_serialize_canonically(kind: str, value: str, expec
 
 def test_unsupported_rule_kind_fails_closed() -> None:
     state = DesiredForwarderState(
-        listener_specs=(
-            {
-                "name": "listener",
-                "type": "socks",
-                "listen": "127.0.0.1",
-                "port": 7890,
-                "proxy": "BLOCK",
-            },
-        ),
+        listener_specs=(ForwarderListenerDTO("listener", "socks", "127.0.0.1", 7890, "BLOCK"),),
         rules=({"match": "TYPO", "value": "x", "target": "BLOCK"},),
-        deployment_constants={"api-secret-ref": "mihomo/api-secret"},
+        deployment_constants={"api-secret-ref": "mihomo/api-secret", "api-secret-revision": 1},
     )
     with pytest.raises(MihomoProjectionError, match="RULE_TYPE_UNSUPPORTED"):
         compose_mihomo_document(state)
@@ -201,7 +197,8 @@ def test_materialized_content_is_rendered_into_candidate() -> None:
     document, _ = compose_mihomo_document(snapshot())
     proxies = document["proxies"]
     assert isinstance(proxies, list)
-    assert {item["name"] for item in proxies} >= {"materialized-a"}
+    proxy_items = cast(list[dict[str, object]], proxies)
+    assert {item["name"] for item in proxy_items} >= {"materialized-a"}
 
 
 @pytest.mark.parametrize(
@@ -222,13 +219,7 @@ def test_fallback_policy_is_fail_closed(
         compose_mihomo_document(
             DesiredForwarderState(
                 listener_specs=(
-                    {
-                        "name": "listener",
-                        "type": "socks",
-                        "listen": "127.0.0.1",
-                        "port": 7890,
-                        "proxy": "BLOCK",
-                    },
+                    ForwarderListenerDTO("listener", "socks", "127.0.0.1", 7890, "BLOCK"),
                 ),
                 rules=rules,
                 transport_materializations=(materialization(1, "A", {"proxies": []}),),
@@ -331,10 +322,11 @@ def test_template_secret_identity_and_finalization_boundary() -> None:
     assert template.controller_secret_ref == "mihomo/api-secret"
     assert template.controller_secret_revision == 1
     assert "S04A_SECRET_SENTINEL_DO_NOT_LEAK" not in repr(template)
-    candidate = provider.finalize(
-        template,
-        ControllerSecretSnapshot("mihomo/api-secret", 1, "S04A_SECRET_SENTINEL_DO_NOT_LEAK"),
+    resolver = Resolver(
+        ControllerSecretSnapshot("mihomo/api-secret", 1, "S04A_SECRET_SENTINEL_DO_NOT_LEAK")
     )
+    candidate = provider.finalize(template, resolver)
+    assert resolver.refs == ["mihomo/api-secret"]
     assert isinstance(candidate, MihomoCandidateConfig)
     assert candidate.content["secret"] == "S04A_SECRET_SENTINEL_DO_NOT_LEAK"
     assert "S04A_SECRET_SENTINEL_DO_NOT_LEAK" not in repr(candidate)
@@ -344,9 +336,33 @@ def test_finalization_identity_and_blank_secret_fail_closed() -> None:
     provider = MihomoForwarderProvider(runtime=cast(MihomoRuntime, object()))
     template = provider.render(snapshot())
     with pytest.raises(MihomoRuntimeError, match="identity mismatch"):
-        provider.finalize(template, ControllerSecretSnapshot("other", 1, "secret"))
+        provider.finalize(template, Resolver(ControllerSecretSnapshot("other", 1, "secret")))
     with pytest.raises(MihomoRuntimeError, match="resolution failed"):
-        provider.finalize(template, ControllerSecretSnapshot("mihomo/api-secret", 1, "   "))
+        provider.finalize(
+            template, Resolver(ControllerSecretSnapshot("mihomo/api-secret", 1, "   "))
+        )
+
+
+def test_missing_secret_revision_fails_closed() -> None:
+    provider = MihomoForwarderProvider(runtime=cast(MihomoRuntime, object()))
+    state = DesiredForwarderState(
+        listener_specs=(ForwarderListenerDTO("listener", "socks", "127.0.0.1", 7890, "BLOCK"),),
+        rules=({"match": "MATCH", "target": "BLOCK"},),
+        deployment_constants={"api-secret-ref": "mihomo/api-secret"},
+    )
+    with pytest.raises(MihomoRuntimeError, match="revision is invalid"):
+        provider.render(state)
+
+
+def test_finalized_candidate_content_is_immutable() -> None:
+    provider = MihomoForwarderProvider(runtime=cast(MihomoRuntime, object()))
+    template = provider.render(snapshot())
+    candidate = provider.finalize(
+        template,
+        Resolver(ControllerSecretSnapshot("mihomo/api-secret", 1, "runtime-secret")),
+    )
+    with pytest.raises(TypeError):
+        candidate.content["secret"] = "changed"  # type: ignore[index]
 
 
 def test_generic_candidate_and_template_cannot_be_applied() -> None:

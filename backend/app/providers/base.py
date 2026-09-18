@@ -224,9 +224,18 @@ class DesiredRoutingState:
 
 
 @dataclass(frozen=True, slots=True)
+class ForwarderListenerDTO:
+    name: str
+    listener_type: str
+    listen: str
+    port: int
+    proxy: str
+
+
+@dataclass(frozen=True, slots=True)
 class DesiredForwarderState:
     listeners: Mapping[str, str] = field(default_factory=dict)
-    listener_specs: tuple[Mapping[str, object], ...] = ()
+    listener_specs: tuple[ForwarderListenerDTO, ...] = ()
     # Provider-neutral full-projection inputs.  Mihomo-specific validation and
     # composition live at the forwarder boundary, never in the domain.
     proxies: tuple[Mapping[str, object], ...] = ()
@@ -254,7 +263,9 @@ class DesiredForwarderState:
             raise TypeError("desired snapshot contains unsupported value")
 
         object.__setattr__(self, "listeners", freeze(self.listeners))
-        object.__setattr__(self, "listener_specs", freeze(self.listener_specs))
+        if not all(isinstance(item, ForwarderListenerDTO) for item in self.listener_specs):
+            raise TypeError("desired listener specs must use ForwarderListenerDTO")
+        object.__setattr__(self, "listener_specs", tuple(self.listener_specs))
         object.__setattr__(self, "proxies", freeze(self.proxies))
         object.__setattr__(self, "proxy_groups", freeze(self.proxy_groups))
         object.__setattr__(self, "rules", freeze(self.rules))
@@ -310,6 +321,8 @@ class ProjectionTemplate(CandidateConfig):
     """Secret-free, non-installable projection awaiting operation finalization."""
 
     __slots__ = ("_controller_secret_ref", "_controller_secret_revision")
+    _controller_secret_ref: str
+    _controller_secret_revision: int
 
     def __init__(
         self,

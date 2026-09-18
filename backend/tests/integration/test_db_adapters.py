@@ -45,6 +45,7 @@ from backend.app.providers.base import (
     CredentialDTO,
     DesiredForwarderState,
     EgressEndpointDTO,
+    ForwarderListenerDTO,
     HealthReport,
     TenantDTO,
 )
@@ -55,6 +56,11 @@ from backend.app.providers.forwarder.mihomo import (
 )
 from backend.app.providers.registry import build_registry
 from backend.app.schemas.public import OrderCreate
+
+
+class FakeControllerSecretResolver:
+    def resolve(self, secret_ref: str) -> ControllerSecretSnapshot:
+        return ControllerSecretSnapshot(secret_ref, 1, "test-api-secret")
 
 
 @pytest.fixture
@@ -459,23 +465,13 @@ def test_mihomo_render_failure_restores_exact_pre_operation_state(
     provider = MihomoForwarderProvider(runtime)
     template = provider.render(
         DesiredForwarderState(
-            listener_specs=(
-                {
-                    "name": "listener",
-                    "type": "socks",
-                    "listen": "127.0.0.1",
-                    "port": 7891,
-                    "proxy": "BLOCK",
-                },
-            ),
+            listener_specs=(ForwarderListenerDTO("listener", "socks", "127.0.0.1", 7891, "BLOCK"),),
             rules=({"match": "MATCH", "target": "BLOCK"},),
-            deployment_constants={"api-secret-ref": "mihomo/api-secret"},
+            deployment_constants={"api-secret-ref": "mihomo/api-secret", "api-secret-revision": 1},
         )
     )
 
-    candidate = provider.finalize(
-        template, ControllerSecretSnapshot("mihomo/api-secret", 1, "test-api-secret")
-    )
+    candidate = provider.finalize(template, FakeControllerSecretResolver())
     with pytest.raises(MihomoRuntimeError):
         provider.apply(candidate)
 
@@ -538,23 +534,13 @@ def test_mihomo_unhealthy_post_reload_restores_exact_pre_operation_state(
     provider = MihomoForwarderProvider(runtime)
     template = provider.render(
         DesiredForwarderState(
-            listener_specs=(
-                {
-                    "name": "listener",
-                    "type": "socks",
-                    "listen": "127.0.0.1",
-                    "port": 7891,
-                    "proxy": "BLOCK",
-                },
-            ),
+            listener_specs=(ForwarderListenerDTO("listener", "socks", "127.0.0.1", 7891, "BLOCK"),),
             rules=({"match": "MATCH", "target": "BLOCK"},),
-            deployment_constants={"api-secret-ref": "mihomo/api-secret"},
+            deployment_constants={"api-secret-ref": "mihomo/api-secret", "api-secret-revision": 1},
         )
     )
 
-    candidate = provider.finalize(
-        template, ControllerSecretSnapshot("mihomo/api-secret", 1, "test-api-secret")
-    )
+    candidate = provider.finalize(template, FakeControllerSecretResolver())
     with pytest.raises(MihomoRuntimeError, match="unhealthy"):
         provider.apply(candidate)
 

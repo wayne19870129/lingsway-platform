@@ -45,11 +45,40 @@ class ControllerSecretSnapshot:
         )
 
 
+class ControllerSecretResolver(Protocol):
+    def resolve(self, secret_ref: str) -> ControllerSecretSnapshot: ...
+
+
+_FINALIZATION_PROOF = object()
+
+
 class MihomoCandidateConfig(CandidateConfig):
     """Only provider-specific, finalized Mihomo candidates are installable."""
 
-    def __init__(self, content: Mapping[str, object], version: str) -> None:
+    __slots__ = (
+        "_finalization_proof",
+        "_controller_secret_ref",
+        "_controller_secret_revision",
+    )
+    _finalization_proof: object
+    _controller_secret_ref: str
+    _controller_secret_revision: int
+
+    def __init__(
+        self,
+        content: Mapping[str, object],
+        version: str,
+        *,
+        controller_secret_ref: str,
+        controller_secret_revision: int,
+        _proof: object,
+    ) -> None:
+        if _proof is not _FINALIZATION_PROOF:
+            raise MihomoRuntimeError("Mihomo candidate must be produced by finalization")
         super().__init__(cast(Mapping[str, object], _freeze_content(content)), version)
+        object.__setattr__(self, "_finalization_proof", _proof)
+        object.__setattr__(self, "_controller_secret_ref", controller_secret_ref)
+        object.__setattr__(self, "_controller_secret_revision", controller_secret_revision)
 
 
 def _plain(value: object) -> object:
@@ -154,7 +183,7 @@ class MihomoForwarderProvider(ForwarderProvider):
         if not isinstance(parsed, Mapping):
             raise MihomoRuntimeError("rendered Mihomo document is not a mapping")
         secret_ref = desired.deployment_constants.get("api-secret-ref")
-        revision = desired.deployment_constants.get("api-secret-revision", 1)
+        revision = desired.deployment_constants.get("api-secret-revision")
         if not isinstance(secret_ref, str) or not secret_ref:
             raise MihomoRuntimeError("Mihomo controller secret reference is missing")
         if not isinstance(revision, int) or revision <= 0:
@@ -162,10 +191,14 @@ class MihomoForwarderProvider(ForwarderProvider):
         return ProjectionTemplate(dict(parsed), version, secret_ref, revision)
 
     def finalize(
-        self, template: ProjectionTemplate, snapshot: ControllerSecretSnapshot
+        self, template: ProjectionTemplate, resolver: ControllerSecretResolver
     ) -> MihomoCandidateConfig:
         if not isinstance(template, ProjectionTemplate):
             raise MihomoRuntimeError("invalid Mihomo projection template")
+        try:
+            snapshot = resolver.resolve(template.controller_secret_ref)
+        except Exception as exc:
+            raise MihomoRuntimeError("Mihomo controller secret resolution failed") from exc
         if (
             snapshot.ref != template.controller_secret_ref
             or snapshot.revision != template.controller_secret_revision
@@ -175,11 +208,27 @@ class MihomoForwarderProvider(ForwarderProvider):
             raise MihomoRuntimeError("Mihomo controller secret resolution failed")
         content = dict(template.content)
         content["secret"] = snapshot.value
-        return MihomoCandidateConfig(content, template.version)
+        return MihomoCandidateConfig(
+            content,
+            template.version,
+            controller_secret_ref=template.controller_secret_ref,
+            controller_secret_revision=template.controller_secret_revision,
+            _proof=_FINALIZATION_PROOF,
+        )
 
-    def apply(self, candidate: MihomoCandidateConfig) -> ApplyResult:
+    def apply(self, candidate: CandidateConfig) -> ApplyResult:
         if not isinstance(candidate, MihomoCandidateConfig):
             raise MihomoRuntimeError("cannot install non-finalized Mihomo projection")
+        if candidate._finalization_proof is not _FINALIZATION_PROOF:
+            raise MihomoRuntimeError("Mihomo candidate finalization proof is invalid")
+        secret = candidate.content.get("secret")
+        if not isinstance(secret, str) or not secret.strip():
+            raise MihomoRuntimeError("Mihomo candidate controller secret is missing")
+        if any(
+            key in candidate.content
+            for key in ("api-secret-ref", "secret-ref", "api-secret-revision")
+        ):
+            raise MihomoRuntimeError("Mihomo candidate contains internal metadata")
         backup = self._runtime.backup()
         document = yaml.safe_dump(_plain(candidate.content), sort_keys=False).encode()
 

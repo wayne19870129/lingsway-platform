@@ -13,9 +13,9 @@ from pathlib import Path
 
 import pytest
 
-from backend.app.providers.base import HealthReport
+from backend.app.providers.base import DesiredForwarderState, ForwarderListenerDTO, HealthReport
 from backend.app.providers.forwarder.mihomo import (
-    MihomoCandidateConfig,
+    ControllerSecretSnapshot,
     MihomoForwarderProvider,
     MihomoRuntimeError,
 )
@@ -74,18 +74,30 @@ class Runtime:
         return HealthReport(value)
 
 
-def candidate() -> MihomoCandidateConfig:
-    return MihomoCandidateConfig({"rules": ["MATCH,DIRECT"]}, "v1")
+class Resolver:
+    def resolve(self, secret_ref: str) -> ControllerSecretSnapshot:
+        return ControllerSecretSnapshot(secret_ref, 1, "test-secret")
+
+
+def candidate(provider: MihomoForwarderProvider):
+    template = provider.render(
+        DesiredForwarderState(
+            listener_specs=(ForwarderListenerDTO("listener", "socks", "127.0.0.1", 7890, "BLOCK"),),
+            rules=({"match": "MATCH", "target": "BLOCK"},),
+            deployment_constants={"api-secret-ref": "mihomo/api-secret", "api-secret-revision": 1},
+        )
+    )
+    return provider.finalize(template, Resolver())
 
 
 def test_successful_apply_verifies_health_after_reload() -> None:
     runtime = Runtime()
     provider = MihomoForwarderProvider(runtime)
 
-    result = provider.apply(candidate())
+    result = provider.apply(candidate(provider))
 
     assert result.applied is True
-    assert result.version == "v1"
+    assert result.version
     assert runtime.events == ["backup", "install", "reload:1", "health"]
 
 
@@ -94,7 +106,7 @@ def test_install_exception_triggers_rollback_and_fails_closed() -> None:
     provider = MihomoForwarderProvider(runtime)
 
     with pytest.raises(MihomoRuntimeError, match="configuration restored"):
-        provider.apply(candidate())
+        provider.apply(candidate(provider))
 
     assert runtime.events == ["backup", "install", "restore", "reload:1", "health"]
     assert runtime.restored is True
@@ -105,7 +117,7 @@ def test_reload_exception_triggers_rollback_and_fails_closed() -> None:
     provider = MihomoForwarderProvider(runtime)
 
     with pytest.raises(MihomoRuntimeError, match="configuration restored"):
-        provider.apply(candidate())
+        provider.apply(candidate(provider))
 
     assert runtime.events == ["backup", "install", "reload:1", "restore", "reload:2", "health"]
     assert runtime.restored is True
@@ -118,7 +130,7 @@ def test_unhealthy_post_reload_triggers_rollback_and_fails_closed() -> None:
     provider = MihomoForwarderProvider(runtime)
 
     with pytest.raises(MihomoRuntimeError, match="unhealthy"):
-        provider.apply(candidate())
+        provider.apply(candidate(provider))
 
     assert runtime.events == [
         "backup",
@@ -137,7 +149,7 @@ def test_rollback_restore_exception_fails_closed_without_claiming_recovery() -> 
     provider = MihomoForwarderProvider(runtime)
 
     with pytest.raises(MihomoRuntimeError, match="unknown"):
-        provider.apply(candidate())
+        provider.apply(candidate(provider))
 
     assert runtime.events == ["backup", "install", "reload:1", "health", "restore"]
     assert runtime.reload_calls == 1
@@ -152,7 +164,7 @@ def test_rollback_reload_exception_fails_closed_without_claiming_recovery() -> N
     provider = MihomoForwarderProvider(runtime)
 
     with pytest.raises(MihomoRuntimeError, match="unknown"):
-        provider.apply(candidate())
+        provider.apply(candidate(provider))
 
     assert runtime.events == [
         "backup",
@@ -170,7 +182,7 @@ def test_rollback_health_exception_fails_closed_without_claiming_recovery() -> N
     provider = MihomoForwarderProvider(runtime)
 
     with pytest.raises(MihomoRuntimeError, match="unknown"):
-        provider.apply(candidate())
+        provider.apply(candidate(provider))
 
     assert runtime.events == [
         "backup",
@@ -191,7 +203,7 @@ def test_rollback_reload_succeeds_but_still_unhealthy_fails_closed() -> None:
     provider = MihomoForwarderProvider(runtime)
 
     with pytest.raises(MihomoRuntimeError, match="unhealthy afterwards"):
-        provider.apply(candidate())
+        provider.apply(candidate(provider))
 
     assert runtime.events == [
         "backup",
