@@ -9,6 +9,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
+from backend.app.core.database import Base
 from backend.app.core.secrets import put_secret
 from backend.app.models.ops import Secret
 
@@ -22,6 +23,7 @@ def mysql_engine() -> Engine:
     engine = create_engine(sync_url, pool_pre_ping=True)
     if engine.dialect.name != "mysql":
         pytest.skip("MySQL secret concurrency tests require a MySQL engine")
+    Base.metadata.create_all(engine, tables=[Base.metadata.tables["secrets"]])
     return engine
 
 
