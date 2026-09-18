@@ -36,11 +36,13 @@ remain subject to the repository safeguards and explicit approval boundaries.
 
 Registry selection is explicit and construction is intended to remain zero-I/O.
 Defaults are mock/noop. Accounting mock/marzban and gateway mock/xray selection
-boundaries exist; Webshare and Subscription transport have readiness evidence
-but remain separately gated for real registry wiring. Mihomo has an accepted
-full-config and activation boundary in ADR-023, but implementation, durable
-activation/recovery, and production readiness remain separate work. Transport
-subscription cache materialization is restricted input, not Mihomo activation.
+boundaries exist; Subscription registry wiring is implemented by S03-B, while
+merge/readiness remains subject to exact-head review and checks. Mihomo
+activation, production deployment, and real-provider production authorization
+remain independent gates. Mihomo has an accepted full-config and activation
+boundary in ADR-023, but implementation, durable activation/recovery, and
+production readiness remain separate work. Transport subscription cache
+materialization is restricted input, not Mihomo activation.
 
 ## 5. Current phase and S03 boundary
 
