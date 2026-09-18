@@ -51,22 +51,24 @@ subscription cache materialization is restricted input, not Mihomo activation.
   mapping, opaque secret references, per-record cache isolation, registry-owned
   lazy provider lifecycle, zero-I/O construction, and scheduler failure
   isolation.
-- **S03-B:** Registry wiring is the next implementation step but remains
-  blocked until S03-A acceptance and exact-head review are complete. It must
-  not invent DB-aware generic provider contracts, plaintext URL configuration,
-  mutable current-provider state, mock fallback, or Mihomo activation.
+- **S03-B:** ACTIVE on the dedicated implementation branch and awaiting
+  exact-head review. It implements the accepted descriptor-based resolver,
+  secret revision/snapshot boundary, lazy registry ownership, isolated cache
+  identity, and scheduler record isolation. It must not invent DB-aware generic
+  provider contracts, plaintext URL configuration, mutable current-provider
+  state, mock fallback, or Mihomo activation.
 
 ## 6. Current blockers and carry-over
 
-Before S03-B, independently verify the exact mutable GitHub state and confirm
-ADR-024 remains the accepted contract. S03-B must implement the scheduler to
-produce immutable provider-neutral descriptors from current DB records, let a
-process-lifetime registry resolver lazily create and retain providers, resolve
-secrets only at explicit sync time, isolate cache identity, and fail closed on
-identity/configuration drift. New records may be created lazily; unchanged
-descriptors reuse their instance; incompatible changes require controlled
-replacement or restart. No schema, production activation, deployment, or real
-provider request is included in S03-A.
+Before resuming S03-B, independently verify the exact mutable GitHub state and
+confirm ADR-024 remains the accepted contract. The implementation produces
+immutable provider-neutral descriptors from current DB records, lets a
+process-lifetime registry resolver lazily create and retain providers, resolves
+purpose-bound secrets in a short transaction before network I/O, isolates cache
+identity, and fails closed on descriptor or secret-revision drift. New records
+may be created lazily; unchanged descriptors reuse their instance; incompatible
+changes require controlled replacement or restart. No Mihomo activation,
+deployment, or real provider request is included.
 
 ## 7. S03-A delivery reference
 

@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Any, cast
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -13,6 +14,12 @@ from backend.app.models import Secret
 
 class SecretStoreError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class SecretSnapshot:
+    value: str = field(repr=False)
+    revision: int
 
 
 def _cipher() -> Fernet:
@@ -36,12 +43,15 @@ def decrypt_secret(ciphertext: str) -> str:
 
 
 def put_secret(db: Session, secret_ref: str, plaintext: str, purpose: str) -> Secret:
-    existing = db.scalar(select(Secret).where(Secret.secret_ref == secret_ref))
+    existing = db.scalar(
+        select(Secret).where(Secret.secret_ref == secret_ref).with_for_update()
+    )
     if existing is not None:
         if decrypt_secret(existing.ciphertext) == plaintext and existing.purpose == purpose:
             return existing
         existing.ciphertext = encrypt_secret(plaintext)
         existing.purpose = purpose
+        existing.revision += 1
         db.flush()
         return existing
 
@@ -61,6 +71,7 @@ def put_secret(db: Session, secret_ref: str, plaintext: str, purpose: str) -> Se
             raise
         recovered.ciphertext = encrypt_secret(plaintext)
         recovered.purpose = purpose
+        recovered.revision += 1
         db.flush()
         return recovered
 
@@ -130,6 +141,22 @@ def reveal_secret_for_purpose(db: Session, secret_ref: str, purpose: str) -> str
     if stored.purpose != purpose:
         raise SecretStoreError("Secret purpose mismatch")
     return decrypt_secret(stored.ciphertext)
+
+
+def reveal_secret_snapshot_for_purpose(
+    db: Session, secret_ref: str, purpose: str
+) -> SecretSnapshot:
+    """Read and decrypt one purpose-bound secret with its non-secret revision."""
+    statement = (
+        select(Secret)
+        .where(Secret.secret_ref == secret_ref, Secret.purpose == purpose)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    stored = db.scalar(statement)
+    if stored is None:
+        raise SecretStoreError("Secret reference or purpose not found")
+    return SecretSnapshot(value=decrypt_secret(stored.ciphertext), revision=stored.revision)
 
 
 def reveal_secret(db: Session, secret_ref: str) -> str:

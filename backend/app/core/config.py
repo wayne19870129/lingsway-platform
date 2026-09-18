@@ -53,6 +53,7 @@ class Settings:
     admin_initial_email: str = "admin@example.com"
     admin_initial_password: str = "CHANGE_ME"
     transport_provider_mode: str = "mock"
+    transport_cache_root: str = "/app/data/transport"
     cors_origins: str = "http://localhost:3000"
 
     def __post_init__(self) -> None:

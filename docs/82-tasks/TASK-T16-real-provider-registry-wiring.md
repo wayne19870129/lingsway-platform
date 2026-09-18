@@ -126,6 +126,19 @@ cache 隔离、secret-ref 失败、client close ownership、zero-I/O constructio
 以及单 provider failure isolation。S03-A 允许修改范围仅为 ADR、TASK 与
 continuity 文档，不包含代码、schema、测试或真实 provider 请求。
 
+## S03-B implementation state
+
+S03-B implementation is active on the dedicated branch. The current slice adds
+the monotonic encrypted-secret revision and purpose-bound snapshot boundary,
+the immutable transport descriptor and registry-owned lazy resolver, explicit
+\`TRANSPORT_PROVIDER_MODE=subscription\` selection, deterministic per-record
+cache identity, and scheduler resolution/failure isolation. Registry
+construction remains zero DB/network/cache I/O; subscription fetch and cache
+materialization occur only during explicit scheduler sync. Mihomo activation,
+Webshare/Xray, deployment, real credentials, and production authorization
+remain out of scope. Exact-head tests and CI review are required before any
+human merge.
+
 ### 关键发现：真实 provider 至少分三类，不是简单的"外部 vs 本机"二分
 
 **这一节是第一版盘点的修正版**——第一版把"四个非 mock/noop 实现"分成

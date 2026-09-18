@@ -23,6 +23,7 @@ from backend.app.models import (
 )
 from backend.app.providers.base import AccountingProvider
 from backend.app.providers.registry import ProviderRegistry, build_registry
+from backend.app.providers.transport.resolver import SubscriptionTransportResolver
 from backend.app.workers.accounting_sync import (
     reconcile_usage_period_cache,
     run_next_usage_job,
@@ -62,9 +63,19 @@ def sync_transport_capacity_and_inventory(db: Any, registry: ProviderRegistry) -
         )
     ).all()
     completed = 0
+    settings = get_settings()
     for record in records:
         try:
-            refresh_provider_inventory(db, record, registry.transport)
+            if settings.transport_provider_mode == "subscription":
+                if registry.transport_resolver is None:
+                    raise RuntimeError("Subscription transport resolver is unavailable")
+                descriptor = SubscriptionTransportResolver.descriptor_for(record)
+                provider = registry.transport_resolver.resolve(descriptor)
+            else:
+                if registry.transport is None:
+                    raise RuntimeError("Mock transport provider is unavailable")
+                provider = registry.transport
+            refresh_provider_inventory(db, record, provider)
         except Exception:
             db.rollback()
             failed = db.get(TransportProviderRecord, record.id)

@@ -73,6 +73,7 @@ class Secret(Base):
     secret_ref: Mapped[str] = mapped_column(String(160), unique=True, index=True)
     ciphertext: Mapped[str] = mapped_column(Text)
     purpose: Mapped[str] = mapped_column(String(80))
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1, server_default="1")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow

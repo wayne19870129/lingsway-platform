@@ -68,9 +68,12 @@ def test_registry_rejects_unimplemented_selection() -> None:
         build_registry(Settings(egress_provider="webshare"))
 
 
-def test_registry_rejects_unimplemented_transport_selection() -> None:
-    with pytest.raises(ProviderConfigurationError, match="TRANSPORT_PROVIDER_MODE"):
-        build_registry(Settings(transport_provider_mode="subscription"))
+def test_registry_selects_subscription_mode_without_constructing_provider() -> None:
+    registry = build_registry(Settings(transport_provider_mode="subscription"))
+
+    assert registry.transport is None
+    assert registry.transport_resolver is not None
+    registry.close()
 
 
 # ---------------------------------------------------------------------------
