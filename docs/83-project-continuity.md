@@ -11,6 +11,12 @@ state, reviews, and checks. Do not rely on an older chat or SHA snapshot.
 
 ## 2. Roles and workflow
 
+> The concrete three-way operating model — ChatGPT directs, Codex/LUNA
+> implements, Claude Code audits periodically — is written out in
+> [`85-agent-operating-model.md`](85-agent-operating-model.md), including
+> when to call Claude Code in for a whole-repository review. That file is a
+> working procedure and never overrides `AGENTS.md`.
+
 - User owns acceptance, manual merge, and production approval.
 - The task-assigned execution agent is the sole writer for its task and branch;
   agents do not modify another active workstream concurrently.
@@ -35,9 +41,35 @@ remain subject to the repository safeguards and explicit approval boundaries.
 ## 4. Durable provider state
 
 Registry selection is explicit and construction is intended to remain zero-I/O.
-Defaults are mock/noop. Accounting mock/marzban and gateway mock/xray selection
-boundaries exist; Subscription registry wiring is implemented by S03-B, which is
-already merged. Mihomo
+Defaults are mock/noop.
+
+**Exact `build_registry()` selection matrix** (verified against
+`backend/app/providers/registry.py` on 2026-09-18 — re-verify in code, not from
+this table, before relying on it):
+
+| Setting | Accepted values | Real implementation reachable? |
+|---|---|---|
+| `EGRESS_PROVIDER` | `mock` only | ❌ `webshare.py` exists but is **unreachable** |
+| `ACCOUNTING_PROVIDER` | `mock`, `marzban` | ✅ Marzban wired |
+| `GATEWAY_PROVIDER` | `mock`, `xray_file` | ✅ Xray wired |
+| `FORWARDER_PROVIDER` | `mock` only | ❌ `mihomo.py` exists but is **unreachable** (S04 gate) |
+| `TRANSPORT_PROVIDER_MODE` | `mock`, `subscription` | ✅ subscription resolver wired |
+| `PAYMENT` / `NOTIFY` / `EMAIL` / `CAPTCHA` / `STORAGE` | mock / noop only | ❌ no real implementation exists yet |
+
+Two consequences a fresh session must not re-derive:
+
+1. **Webshare is blocked by more than registry wiring.**
+   `WebshareEgressProvider.capacity()` and `.get_tenant_usage()` deliberately
+   raise `WebshareContractError` because the recorded API contract does not
+   establish the DTO fields/units. Since `ProvisionStep.CAPACITY` calls
+   `egress.capacity()` first, wiring `EGRESS_PROVIDER=webshare` today would fail
+   every provisioning run at step 1. Closing the `docs/70-external-facts.md`
+   evidence gap is a prerequisite, not a follow-up.
+2. `docs/84-implementation-roadmap-2026-09.md`'s "registry is stub-only, no real
+   adapter is selectable" verdict is **stale** — it predates the Marzban, Xray,
+   and subscription-transport wiring above. See that file's own correction banner.
+
+Mihomo
 activation, production deployment, and real-provider production authorization
 remain independent gates. Mihomo has an accepted full-config and activation
 boundary in ADR-023, but implementation, durable activation/recovery, and
@@ -46,7 +78,64 @@ materialization is restricted input, not Mihomo activation — and per ADR-025
 §3a it is only usable once anchored by a committed DB receipt; the cache file
 is never authority for its own contents.
 
-## 5. Current phase and S03 boundary
+## 4b. Task numbering: T-series vs S-series
+
+Two numbering schemes coexist and a fresh session must not read this as a
+contradiction:
+
+- **T-series (`TASK-T0`…`TASK-T25`)** is the original build-out sequence from
+  `ARCHITECTURE.md` §12 / `docs/CODEX_PROMPT.md`. `docs/82-tasks/` holds files
+  for T5G and T13–T25 only; the earlier ones were never written as files. T17–T25
+  are all **automation/tooling** work (the Claude Code GitHub Action), not product
+  work. T13 remains deliberately blocked on `docs/70-external-facts.md` evidence.
+- **S-series (`S02`, `S03-A/B`, `S04-A/B1/B2`, `S04-C`)** is the current product
+  workstream, started after TASK-T16 Phase 2C. Its boundaries are recorded in
+  section 5 below and in ADR-023/ADR-024.
+
+**Process gap, and what was done about it:** S02→S04-B1 (eight merged PRs,
+#120–#127) were delivered with **no** TASK file at all, though `AGENTS.md`
+named one as the sole record carrier. Three things changed on 2026-09-18:
+
+- Forward coverage: `TASK-S04-mihomo-activation.md` and
+  `TASK-S05-compensation-failure-contract.md` are the first S-series TASK
+  files. Already-merged S02/S03 scope is **not** retro-filed — writing
+  acceptance criteria after delivery proves nothing.
+- The rule itself was made enforceable rather than aspirational.
+  `AGENTS.md`'s requirement used to be "anything that isn't a small change
+  needs an Issue/TASK first", which nobody followed for eight PRs. It now
+  lists explicit triggers (multi-PR workstreams; `domain/`,
+  `providers/base.py`, migrations, `deploy/`, real external write side
+  effects; auth/payment/credentials) and explicitly exempts single-PR bug
+  fixes, refactors, tests, and docs.
+- **GitHub Issues were dropped as a record carrier** (product owner's call).
+  The working method is manual copy-paste between ChatGPT and Codex; nothing
+  is dispatched through Issues and the repository has none open. A `TASK-*.md`
+  file lives in the repo, is reviewed alongside the PR, and is readable by
+  every executing agent, so it was already the better source of truth. The
+  `.github/ISSUE_TEMPLATE/` files are unaffected — incident write-ups and
+  external-fact verification are records, not task dispatch.
+
+**ADR numbering:** ADR-010 does not exist and is not referenced anywhere. The
+sequence runs 001–009, 011–026. This is a numbering hole, not a missing document
+— do not go looking for it.
+
+**Resolved collision (2026-09-18):** two unmerged branches independently
+claimed ADR-025. PR #128 kept it (`ADR-025-mihomo-projection-generation-authority.md`,
+reviewed under that number); the audit branch's compensation-failure ADR was
+renumbered to **ADR-026** (`ADR-026-compensation-failure-ownership.md`) before
+merge. Neither file existed on `main` at the time, so nothing merged carries
+the old number. **Lesson for concurrent branches: claim the next ADR/TASK
+number against current `main` plus every open PR, not against `main` alone** —
+`TASK-S04-mihomo-activation.md` collided the same way (same filename, two
+different contents) and the PR #128 version won.
+
+## 5. Current phase and S03/S04 boundary
+
+> **Status convention (added 2026-09-18):** a PR cannot mark its own work
+> COMPLETE, because the merge happens after the PR's last commit. Statuses below
+> are therefore written against **merge evidence** (merge commit SHA), and the
+> phrase "ACTIVE on `<branch>`" means only "open PR at the time of writing" —
+> always re-verify against current `main` and open PRs before trusting it.
 
 - **S02:** COMPLETE.
 - **S03:** COMPLETE.
@@ -71,7 +160,8 @@ is never authority for its own contents.
   freshness proof. It does not activate
   Mihomo, wire `FORWARDER_PROVIDER=mihomo` into production, deploy, or authorize
   real-provider production use.
-- **S04-B:** ACTIVE.
+- **S04-B:** ACTIVE. B1 merged; B2-A merged (PR #128); B2-B not started —
+  see `TASK-S04-mihomo-activation.md` for the authorized scope of each stage.
 - **S04-B1:** COMPLETE / merged from `task/s04-b1-mihomo-durable-reconciliation`.
   Merge commit: `c494ade7d40419afd1a812c8b5ddefb154b1c14c`. It adds only
   the durable Job-backed Mihomo intent, global named writer lock, retry and
@@ -149,3 +239,98 @@ S03-A base: `6162fefaa63639bf896daad8349dbe883baaa298`. This is the S03-A base,
 not a permanent claim about current `main`; current GitHub `main` must always
 be re-verified before starting or resuming work. The S03-A PR and its current
 head/review/check state are the mutable source of delivery truth.
+
+## 8. Open defects carried forward (audit 2026-09-18)
+
+These were found by a repository-wide audit, reproduced against the current
+working tree, and are **not** fixed by any merged PR. Each is recorded here so a
+later session does not have to rediscover it.
+
+1. ~~**Compensation-failure paths in `domain/provisioning.py` mask the original
+   error and skip terminal bookkeeping.**~~ **FIXED 2026-09-18** by ADR-026 +
+   `TASK-S05-compensation-failure-contract.md`. When a compensating action
+   itself raised — the `APPLY_FORWARDER` restore, the `APPLY_GATEWAY`
+   `disable_user()`, or the same call in
+   `fail_apply_gateway_lock_acquisition()` — the compensation exception replaced
+   the real failure, `state.rollback_database()` / `_failed()` never ran, and
+   the run stayed at `RUNNING` forever with an uncompensated external side
+   effect reported as a clean `FAILED`. All three now end `PENDING_MANUAL` with
+   a typed reason. 8 new tests; 4 of them verified failing against the pre-fix
+   code.
+
+2. ~~**`ops/**` and `infrastructure/**` Python is never linted.**~~
+   **FIXED 2026-09-18.** `make lint` now runs
+   `ruff check backend ops infrastructure scripts`.
+   `infrastructure/alembic/versions/` is excluded via `pyproject.toml`'s
+   `extend-exclude`, because 铁律 7 freezes existing revisions — linting them
+   can only ever produce findings that must not be fixed. **Still open:** `mypy`
+   coverage stops at `backend/`; `ops/**` has no type checking. That is a
+   larger change (the ops scripts are not annotated) and is not scheduled.
+
+3. **`ops/backup/` is empty**, so `AGENTS.md`'s "`alembic upgrade` 前提：先成功跑
+   一次加密备份" precondition is unsatisfiable, `Makefile`'s `backup`/`restore`
+   targets point at non-existent scripts, and `deploy/lib/80_schedule.sh`
+   installs a cron for a script that does not exist. `deploy/lib/70_verify.sh`
+   `check_13_backup` does fail closed on this, so a real deploy cannot silently
+   pass — but it also cannot pass at all until this lands.
+
+4. ~~**Plan-tier configuration is inconsistent.**~~ **MOSTLY FIXED 2026-09-18**
+   by `TASK-S06-plan-catalogue.md`. The product owner settled the catalogue:
+   four tiers on a 30-day cycle, priced in **CNY** — 50GB/¥30, 100GB/¥50,
+   200GB/¥80, 500GB/¥120. `backend/app/catalog.py` is now the single source;
+   `ADMIN_CAPACITY_PLAN_CODES` derives from it, `GET /plans` filters to it, and
+   both frontend pages dropped their duplicated lists. `PLAN_1000GB` and
+   `PLAN_300GB` are withdrawn and their orphaned config removed.
+
+   **Still open, and important:** the catalogue does **not** reach the
+   database. `deploy/lib/60_seed.sh` deliberately refuses implicit seed data
+   (`SEED_COMMAND must be explicitly configured`), and nothing else in this
+   repository creates `Plan` rows — the `plans` table is populated entirely
+   out-of-band. So the agreed prices are declared but not yet in effect
+   anywhere. Wiring the catalogue into a seed path needs the product owner's
+   sign-off first, because it means this repository would start writing
+   business data during deployment.
+
+   Also still open: `Settings.addon_20gb_price` / `addon_50gb_price` /
+   `addon_100gb_price` remain dead config. ADDON orders are driven by
+   `addon_bytes`, not by a `Plan` row, so whether add-on traffic is sold at
+   all — and at what price — is an unanswered product question.
+
+5. **`.env.example` omitted `XRAY_CONFIG_PATH`, `XRAY_BACKUP_DIR`, and
+   `XRAY_LOG_LEVEL`** — real `Settings` fields consumed by the now-wired
+   `xray_file` gateway. **Fixed 2026-09-18**: added with their code defaults
+   rather than blank, because an empty `XRAY_LOG_LEVEL` raises at startup
+   instead of falling back (verified). Note this trap applies to the whole
+   "Legacy migration inventory" block in `.env.example`: those names are listed
+   blank by convention, and any of them that `Settings` validates will hard-fail
+   if copied into a real `.env` as-is.
+
+6. **Frontend components are written one-statement-per-file-line.** Entire React
+   components sit on single 1000+ character lines
+   (`frontend/app/(customer)/**/page.tsx`, `(admin)/admin/components.tsx`).
+   `eslint`/`tsc` pass, so nothing is broken — but the code is effectively
+   undiffable and unreviewable, which conflicts with `AGENTS.md`'s requirement
+   that the PR timeline be a reconstructable record. Type definitions are also
+   duplicated per page rather than shared, which is the concrete form of
+   `docs/84-*`'s "`frontend/lib/api.ts` is not a real typed client" gap.
+
+## 9. Spec-vs-reality drift in `ARCHITECTURE.md`
+
+`ARCHITECTURE.md` is the original build spec and has **not** been kept in sync.
+Known divergences (do not treat these as missing work without checking intent):
+
+| Spec says | Reality |
+|---|---|
+| `backend/app/core/rate_limit.py` | Does not exist; rate limiting lives inside `providers/egress/webshare.py` |
+| `workers/usage_sync.py`, `workers/baseline.py` | Renamed to `accounting_sync.py`, `transport_sync.py`, `drift_check.py` |
+| `ops/backup/{backup,restore,install-cron}.sh`, `ops/status.py` | None exist |
+| `egress/manual`, `payment/manual`, `notify/telegram`, `email/{resend,smtp}`, `captcha/turnstile`, `storage/{r2,s3,local}` | None exist; only mock/noop |
+| `providers/base.py` Protocol signatures | Materially evolved (e.g. `GatewayProvider.render()` now requires a `CredentialResolver`; `AccountUserDTO.routing_principal` added per ADR-016) |
+| `(docs)/guides/{windows,macos,ios,android}` | Route directories exist but contain only `.gitkeep` |
+| `frontend/lib/api.ts` typed client | One line: a base-URL constant |
+| Task sequence T1–T8 | Superseded; see section 4b |
+
+`ARCHITECTURE.md`'s §1 design goals, §2 layering rules, the three 铁律, §6 guard
+requirements, and §8 deployment acceptance list **do** still hold and are
+actively enforced by tests — the drift is in the file tree and task sequence,
+not the invariants.

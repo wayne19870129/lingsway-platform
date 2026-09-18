@@ -75,6 +75,13 @@ class PendingManualReason(StrEnum):
     EXTERNAL_TENANT_CREATION = "EXTERNAL_TENANT_CREATION"
     ACCOUNTING_CREATE_AMBIGUOUS = "ACCOUNTING_CREATE_AMBIGUOUS"
     ACCOUNTING_COMPENSATION_FAILED = "ACCOUNTING_COMPENSATION_FAILED"
+    # ADR-026: the two compensation actions outside CREATE_ACCOUNTING_USER
+    # that can themselves fail, leaving a real external side effect that
+    # nothing has undone. Reported as PENDING_MANUAL for the same reason
+    # ACCOUNTING_COMPENSATION_FAILED is -- a plain FAILED would claim the
+    # run was fully compensated when it was not.
+    FORWARDER_COMPENSATION_FAILED = "FORWARDER_COMPENSATION_FAILED"
+    GATEWAY_COMPENSATION_FAILED = "GATEWAY_COMPENSATION_FAILED"
 
 
 #: Fixed, safe, business-facing messages for each :class:`PendingManualReason`
@@ -93,6 +100,16 @@ PENDING_MANUAL_BUSINESS_MESSAGES: Mapping[PendingManualReason, str] = {
     PendingManualReason.ACCOUNTING_COMPENSATION_FAILED: (
         "accounting user creation failed and automatic compensation "
         "(disable) also failed; requires manual review"
+    ),
+    PendingManualReason.FORWARDER_COMPENSATION_FAILED: (
+        "forwarder configuration apply failed and restoring the previous "
+        "configuration also failed; forwarder runtime state is unknown and "
+        "requires manual review"
+    ),
+    PendingManualReason.GATEWAY_COMPENSATION_FAILED: (
+        "gateway apply failed and automatic compensation (disable) also "
+        "failed; the accounting user may still be enabled and requires "
+        "manual review"
     ),
 }
 
@@ -303,6 +320,12 @@ class ProvisioningService:
             self.mark_run_pending_manual(prepared.run_id, prepared.pending_manual_error)
             return prepared
         outcome = self.provision_apply_gateway(prepared, request)
+        if outcome.status is ProvisionStatus.PENDING_MANUAL:
+            # ADR-026: phase B can now also end PENDING_MANUAL (gateway
+            # compensation failed). That is not a success, so it must never
+            # be marked SUCCEEDED.
+            self.mark_run_pending_manual(outcome.run_id, outcome.pending_manual_error)
+            return outcome
         self.mark_apply_gateway_succeeded(outcome.run_id)
         return outcome
 
@@ -408,7 +431,31 @@ class ProvisioningService:
             )
             self.forwarder.apply(self.forwarder.render(desired_forwarder))
         except Exception as exc:
-            self.forwarder.apply(self.forwarder.render(previous_forwarder))
+            try:
+                self.forwarder.apply(self.forwarder.render(previous_forwarder))
+            except Exception as restore_exc:
+                # ADR-026: the compensating restore itself failed, so the
+                # forwarder's runtime configuration is in an unknown state
+                # -- this can never be reported as a plain, fully-compensated
+                # FAILED. Same shape as CREATE_ACCOUNTING_USER's
+                # compensation-failed branch (ADR-018): no rollback (the
+                # partial state is what manual review needs to see, and the
+                # external tenant created at CREATE_TENANT still exists), no
+                # internal mark_status() (ADR-017 -- the caller persists the
+                # terminal PENDING_MANUAL after its own business commit), and
+                # only exception *type names* in the diagnostic, never raw
+                # provider text.
+                self.runs.record_step(run_id, ProvisionStep.APPLY_FORWARDER, "PENDING_MANUAL")
+                return ProvisionOutcome(
+                    run_id,
+                    ProvisionStatus.PENDING_MANUAL,
+                    pending_manual_error=(
+                        f"forwarder apply failed ({type(exc).__name__}), and "
+                        "restoring the previous forwarder configuration also "
+                        f"failed ({type(restore_exc).__name__})"
+                    ),
+                    reason=PendingManualReason.FORWARDER_COMPENSATION_FAILED,
+                )
             # STORE_CREDENTIALS already flushed this run's credential/
             # binding mutation -- roll it back before recording FAILED.
             self.state.rollback_database()
@@ -525,8 +572,30 @@ class ProvisioningService:
                 raise RuntimeError(f"gateway candidate validation failed: {errors}")
             self.gateway.apply(candidate)
         except Exception as exc:
-            self.accounting.disable_user(request.username)
+            # Alert first: it is best-effort (never raises) and must fire
+            # whether or not the compensation below succeeds.
             self._alert("GATEWAY_APPLY_FAILED", {"run_id": run_id, "user": request.username})
+            try:
+                self.accounting.disable_user(request.username)
+            except Exception as disable_exc:
+                # ADR-026: the accounting user created in phase A may still
+                # be enabled. Never a plain FAILED -- identical treatment to
+                # CREATE_ACCOUNTING_USER's compensation-failed branch
+                # (ADR-018): no rollback, no internal mark_status(), and
+                # only exception type names in the diagnostic. Callers must
+                # branch on this status and must NOT proceed to activate the
+                # purchase (see services.confirm_payment_and_provision).
+                self.runs.record_step(run_id, ProvisionStep.APPLY_GATEWAY, "PENDING_MANUAL")
+                return ProvisionOutcome(
+                    run_id,
+                    ProvisionStatus.PENDING_MANUAL,
+                    pending_manual_error=(
+                        f"gateway apply failed ({type(exc).__name__}), and "
+                        "disabling the accounting user also failed "
+                        f"({type(disable_exc).__name__})"
+                    ),
+                    reason=PendingManualReason.GATEWAY_COMPENSATION_FAILED,
+                )
             # desired_routing_state() flushed (but never committed) a
             # GatewayRouteBinding mutation -- roll it back here, before
             # recording FAILED, rather than relying on the caller's own
@@ -642,7 +711,7 @@ class ProvisioningService:
 
     def fail_apply_gateway_lock_acquisition(
         self, checkpoint: ProvisioningCheckpoint, request: ProvisionRequest, error: Exception
-    ) -> None:
+    ) -> ProvisionOutcome | None:
         """Compensation for the ADR-017 lock-acquisition-failure scenario.
 
         Call this when ``state.gateway_route_binding_lock()`` itself
@@ -664,12 +733,35 @@ class ProvisioningService:
         ``except GatewayRouteBindingLockError`` branch for the actual
         call order: rollback, then this method, then the business-side
         ``fail_paid_purchase()``.
+
+        ADR-026: returns ``None`` when compensation succeeded (the run is
+        durably ``FAILED`` and the caller should continue its own failure
+        path), or a ``PENDING_MANUAL`` :class:`ProvisionOutcome` when
+        ``disable_user()`` itself failed -- keeping this path semantically
+        identical to ``provision_apply_gateway``'s ``APPLY_GATEWAY``
+        handler, which ADR-017 requires the two never to drift apart on.
         """
-        self.accounting.disable_user(request.username)
         self._alert(
             "GATEWAY_APPLY_FAILED", {"run_id": checkpoint.run_id, "user": request.username}
         )
+        try:
+            self.accounting.disable_user(request.username)
+        except Exception as disable_exc:
+            self.runs.record_step(
+                checkpoint.run_id, ProvisionStep.APPLY_GATEWAY, "PENDING_MANUAL"
+            )
+            return ProvisionOutcome(
+                checkpoint.run_id,
+                ProvisionStatus.PENDING_MANUAL,
+                pending_manual_error=(
+                    f"gateway route lock acquisition failed ({type(error).__name__}), "
+                    "and disabling the accounting user also failed "
+                    f"({type(disable_exc).__name__})"
+                ),
+                reason=PendingManualReason.GATEWAY_COMPENSATION_FAILED,
+            )
         self._failed(checkpoint.run_id, ProvisionStep.APPLY_GATEWAY, error)
+        return None
 
     def _compensate_created_accounting_user(
         self, run_id: str, request: ProvisionRequest, exc: Exception

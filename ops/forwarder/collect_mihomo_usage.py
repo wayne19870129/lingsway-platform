@@ -12,7 +12,6 @@ from typing import Any
 
 import httpx
 
-
 SCHEMA = """
 PRAGMA journal_mode=WAL;
 PRAGMA synchronous=FULL;

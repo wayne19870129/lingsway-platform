@@ -33,6 +33,11 @@ packages = ["backend/app"]
 [tool.ruff]
 target-version = "py312"
 line-length = 100
+# Frozen by AGENTS.md 铁律 7: an existing Alembic revision must never be
+# rewritten. Linting them only ever produces findings that cannot legitimately
+# be fixed, so they are excluded rather than left as permanent noise. New
+# reconciliation migrations are still reviewed by hand and must be idempotent.
+extend-exclude = ["infrastructure/alembic/versions"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]

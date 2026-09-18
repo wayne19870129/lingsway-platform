@@ -1,5 +1,25 @@
 # Implementation Roadmap Audit — 2026-09-13
 
+> ## ⚠️ 部分结论已过期（2026-09-18 审计更正）
+>
+> 本文件自身的「Maintenance note」要求：发现过期时**优先重跑审计**，并加更正
+> 而不是就地改写，以保留"当时我们以为什么是真的"的轨迹。以下是就地更正，
+> 不改动原文正文：
+>
+> | 原文结论 | 现状（2026-09-18 直接核对代码） |
+> |---|---|
+> | Provider registry「Stub-only wiring, real adapters unwired」；`build_registry()` 对任何非 mock/noop 一律抛错 | **已过期。** `ACCOUNTING_PROVIDER=marzban`、`GATEWAY_PROVIDER=xray_file`、`TRANSPORT_PROVIDER_MODE=subscription` 均已接通（PR #111/#114/#116/#125）。仍被挡住的只有 egress、forwarder、payment、notify、email、captcha、storage |
+> | 「TASK-T16 Phase 2C 尚未开始」 | **已过期。** Phase 2C1–2C3D 已全部合并；此后工作已切换到 S 系列（见 `83-project-continuity.md` §4b） |
+> | `webshare.py` 的 `list_endpoints()` 丢弃响应返回 `[]` | **已过期。** 现已真实解析分页结果 |
+> | `webshare.py` 的 `capacity()` 返回全零 `CapacityDTO` | **已过期，但结论方向不变。** 现改为 fail-closed 抛 `WebshareContractError`——比返回全零更安全，但也意味着 Webshare 即使接线也会在开通第 1 步直接失败 |
+> | `get_tenant_usage()` / `get_credentials()` 抛 `NotImplementedError` | **部分过期。** `get_credentials()` 已实现；`get_tenant_usage()` 仍 fail-closed（单位未经实测确认） |
+>
+> **仍然成立、且仍是最高优先级的结论：** §2 的 gap 1（`ops/backup/` 为空）、
+> gap 2（`ops/status.py` 缺失）、gap 3（客户端配置指南只有空目录）、
+> gap 4（`frontend/lib/api.ts` 不是真正的客户端）、gap 5（`core/rate_limit.py`
+> 不存在，限速在 webshare provider 内）——2026-09-18 逐项复核，全部未变。
+> §5 的排序建议（备份工具先于任何真实外部写入接线）同样仍然成立。
+
 **Status:** snapshot as of Issue #81, reconciled against `main` at the SHA
 recorded in `docs/83-project-continuity.md` plus direct inspection of the
 current working tree during this audit. This document is a **point-in-time

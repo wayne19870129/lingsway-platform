@@ -11,6 +11,7 @@ import yaml
 
 from backend.app.domain.capacity import CapacityExceededError
 from backend.app.domain.provisioning import (
+    PENDING_MANUAL_BUSINESS_MESSAGES,
     ExternalTenantCreationError,
     PendingManualReason,
     ProvisioningService,
@@ -30,6 +31,8 @@ from backend.app.providers.base import (
     AccountingCreateEffect,
     AccountingCreateUserError,
     AccountUserDTO,
+    ApplyResult,
+    CandidateConfig,
     CredentialDTO,
     DesiredForwarderState,
     DesiredRoutingState,
@@ -335,6 +338,209 @@ def test_step_6_created_disable_failure_uses_correct_pending_reason() -> None:
     assert "AccountingCreateUserError" in outcome.pending_manual_error
     assert "RuntimeError" in outcome.pending_manual_error
     assert accounting.delete_calls == []
+
+
+# --- ADR-026: compensation-action failures ---------------------------------
+#
+# Before ADR-026 all four cases below shared one defect: the compensating
+# action was a bare call, so when it raised, the compensation exception
+# replaced the original failure, state.rollback_database() and the terminal
+# run status were both skipped, and the run stayed at RUNNING forever while a
+# real external side effect (unrestored forwarder config / still-enabled
+# accounting user) went unclaimed.
+
+
+@dataclass(slots=True)
+class _ForwarderFailsOnApply(MockForwarderProvider):
+    """First apply() is the real failure; later applies are the restore."""
+
+    applies: int = 0
+    restore_raises: bool = False
+
+    def render(self, desired: DesiredForwarderState) -> CandidateConfig:
+        return CandidateConfig({"listeners": dict(desired.listeners)}, "v1")
+
+    def apply(self, candidate: CandidateConfig) -> ApplyResult:
+        self.applies += 1
+        if self.applies == 1:
+            raise RuntimeError("simulated forwarder apply failure")
+        if self.restore_raises:
+            raise OSError("simulated forwarder restore failure")
+        return ApplyResult(applied=True, version=candidate.version)
+
+
+def _service_with_forwarder(
+    forwarder: MockForwarderProvider, state: FakeState, runs: FakeRuns
+) -> ProvisioningService:
+    return ProvisioningService(
+        egress=MockEgressProvider(),
+        accounting=MockAccountingProvider(),
+        gateway=MockGatewayProvider(),
+        credential_resolver=FakeCredentialResolver(),
+        forwarder=forwarder,
+        notify=NoopNotifyProvider(),
+        state=state,
+        runs=runs,
+        token_factory=lambda: "one-time-token",
+    )
+
+
+def test_step_5_failure_with_successful_restore_stays_failed() -> None:
+    """Regression guard: when the compensating restore succeeds, behavior is
+    unchanged -- the ORIGINAL exception propagates, the DB is rolled back,
+    and the run is durably FAILED."""
+    forwarder = _ForwarderFailsOnApply(restore_raises=False)
+    state, runs = FakeState(), FakeRuns()
+
+    with pytest.raises(RuntimeError, match="simulated forwarder apply failure"):
+        _service_with_forwarder(forwarder, state, runs).provision_prepare(request())
+
+    assert forwarder.applies == 2, "the previous configuration must be restored"
+    assert state.database_rolled_back is True
+    assert runs.status is ProvisionStatus.FAILED
+
+
+def test_step_5_failure_with_failing_restore_is_pending_manual() -> None:
+    """ADR-026: the restore itself failed, so forwarder runtime state is
+    unknown. The original failure must not be masked, and this must never be
+    reported as a fully-compensated FAILED."""
+    forwarder = _ForwarderFailsOnApply(restore_raises=True)
+    state, runs = FakeState(), FakeRuns()
+
+    outcome = _service_with_forwarder(forwarder, state, runs).provision_prepare(request())
+
+    assert isinstance(outcome, ProvisionOutcome)
+    assert outcome.status is ProvisionStatus.PENDING_MANUAL
+    assert outcome.reason is PendingManualReason.FORWARDER_COMPENSATION_FAILED
+    assert outcome.pending_manual_error is not None
+    # Both the original failure and the restore failure are identified, by
+    # exception TYPE only -- never raw provider text.
+    assert "RuntimeError" in outcome.pending_manual_error
+    assert "OSError" in outcome.pending_manual_error
+    assert "simulated" not in outcome.pending_manual_error
+    # PENDING_MANUAL preserves partial state for review and never writes the
+    # terminal status itself (ADR-017) -- the caller does, after its commit.
+    assert state.database_rolled_back is False
+    assert runs.status is ProvisionStatus.RUNNING
+    assert (ProvisionStep.APPLY_FORWARDER, "PENDING_MANUAL") in runs.steps
+
+
+@dataclass(slots=True)
+class _GatewayFailsOnApply(MockGatewayProvider):
+    def apply(self, candidate: CandidateConfig) -> ApplyResult:
+        raise RuntimeError("simulated gateway apply failure")
+
+
+@dataclass(slots=True)
+class _DisableFailsAccounting(TrackingAccounting):
+    def disable_user(self, username: str) -> None:
+        raise OSError("simulated disable failure")
+
+
+def test_step_7_failure_with_successful_disable_stays_failed() -> None:
+    """Regression guard for the compensated APPLY_GATEWAY path."""
+    accounting = TrackingAccounting()
+    state, runs = FakeState(), FakeRuns()
+    svc = service(
+        accounting=accounting, gateway=_GatewayFailsOnApply(), state=state, runs=runs
+    )
+    checkpoint = svc.provision_prepare(request())
+    assert not isinstance(checkpoint, ProvisionOutcome)
+    state.database_rolled_back = False
+
+    with pytest.raises(RuntimeError, match="simulated gateway apply failure"):
+        svc.provision_apply_gateway(checkpoint, request())
+
+    assert "customer-1" in accounting.disabled_users
+    assert accounting.delete_calls == [], "AGENTS.md 铁律 4: disable, never DELETE"
+    assert state.database_rolled_back is True
+    assert runs.status is ProvisionStatus.FAILED
+
+
+def test_step_7_failure_with_failing_disable_is_pending_manual() -> None:
+    """ADR-026: the accounting user may still be enabled, so this must be
+    PENDING_MANUAL rather than a FAILED that claims full compensation."""
+    accounting = _DisableFailsAccounting()
+    state, runs = FakeState(), FakeRuns()
+    svc = service(
+        accounting=accounting, gateway=_GatewayFailsOnApply(), state=state, runs=runs
+    )
+    checkpoint = svc.provision_prepare(request())
+    assert not isinstance(checkpoint, ProvisionOutcome)
+    state.database_rolled_back = False
+
+    outcome = svc.provision_apply_gateway(checkpoint, request())
+
+    assert outcome.status is ProvisionStatus.PENDING_MANUAL
+    assert outcome.reason is PendingManualReason.GATEWAY_COMPENSATION_FAILED
+    assert outcome.pending_manual_error is not None
+    assert "RuntimeError" in outcome.pending_manual_error
+    assert "OSError" in outcome.pending_manual_error
+    assert accounting.delete_calls == []
+    assert state.database_rolled_back is False
+    assert runs.status is ProvisionStatus.RUNNING
+    assert (ProvisionStep.APPLY_GATEWAY, "PENDING_MANUAL") in runs.steps
+
+
+def test_provision_never_marks_a_pending_manual_phase_b_run_succeeded() -> None:
+    """ADR-026: provision()'s composition must branch on the new phase-B
+    PENDING_MANUAL outcome -- marking it SUCCEEDED would durably claim a
+    provisioning that never applied its gateway configuration."""
+    runs = FakeRuns()
+    outcome = service(
+        accounting=_DisableFailsAccounting(), gateway=_GatewayFailsOnApply(), runs=runs
+    ).provision(request())
+
+    assert outcome.status is ProvisionStatus.PENDING_MANUAL
+    assert runs.status is ProvisionStatus.PENDING_MANUAL
+
+
+def test_lock_acquisition_compensation_failure_is_pending_manual() -> None:
+    """ADR-017 requires the lock-acquisition failure path and APPLY_GATEWAY's
+    own handler not to drift apart semantically; ADR-026 extends that to the
+    compensation-failed case."""
+    accounting = _DisableFailsAccounting()
+    runs = FakeRuns()
+    svc = service(accounting=accounting, runs=runs)
+    checkpoint = svc.provision_prepare(request())
+    assert not isinstance(checkpoint, ProvisionOutcome)
+
+    pending = svc.fail_apply_gateway_lock_acquisition(
+        checkpoint, request(), RuntimeError("simulated lock acquisition failure")
+    )
+
+    assert pending is not None
+    assert pending.status is ProvisionStatus.PENDING_MANUAL
+    assert pending.reason is PendingManualReason.GATEWAY_COMPENSATION_FAILED
+    assert accounting.delete_calls == []
+    assert runs.status is ProvisionStatus.RUNNING
+
+
+def test_lock_acquisition_compensation_success_returns_none_and_marks_failed() -> None:
+    accounting = TrackingAccounting()
+    runs = FakeRuns()
+    svc = service(accounting=accounting, runs=runs)
+    checkpoint = svc.provision_prepare(request())
+    assert not isinstance(checkpoint, ProvisionOutcome)
+
+    assert (
+        svc.fail_apply_gateway_lock_acquisition(
+            checkpoint, request(), RuntimeError("simulated lock acquisition failure")
+        )
+        is None
+    )
+    assert "customer-1" in accounting.disabled_users
+    assert runs.status is ProvisionStatus.FAILED
+
+
+def test_every_pending_manual_reason_has_a_business_message() -> None:
+    """ADR-018 Major 2: services.py looks the business-facing
+    Subscription.provision_error message up by reason. A reason with no entry
+    would KeyError at exactly the moment a run needs manual review."""
+    for reason in PendingManualReason:
+        assert reason in PENDING_MANUAL_BUSINESS_MESSAGES
+        message = PENDING_MANUAL_BUSINESS_MESSAGES[reason]
+        assert message and message == message.strip()
 
 
 def test_capacity_failure_happens_before_mark_paid() -> None:

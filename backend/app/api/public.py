@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
+from backend.app.catalog import SELLABLE_PLAN_CODES
 from backend.app.core.security import hash_password, verify_password
 from backend.app.dependencies import (
     CurrentAuth,
@@ -110,8 +111,23 @@ def me(customer: CurrentCustomer) -> Customer:
 
 @router.get("/plans", response_model=list[PlanRead])
 def list_plans(db: DbSession) -> list[Plan]:
+    """Only the catalogue's sellable tiers (TASK-S06).
+
+    This used to return every ACTIVE plan and leave filtering to each
+    frontend page, which meant the sellable list existed in three places
+    and could drift. Narrowing it here makes the backend the single
+    authority: a plan row that is ACTIVE but outside the catalogue (a
+    legacy tier, a migration artefact) is never offered for purchase.
+    """
     return list(
-        db.scalars(select(Plan).where(Plan.status == PlanStatus.ACTIVE).order_by(Plan.price))
+        db.scalars(
+            select(Plan)
+            .where(
+                Plan.status == PlanStatus.ACTIVE,
+                Plan.plan_code.in_(SELLABLE_PLAN_CODES),
+            )
+            .order_by(Plan.price)
+        )
     )
 
 
