@@ -1,4 +1,5 @@
 """Immutable, deterministic Mihomo full-config projection boundary (ADR-023)."""
+
 from __future__ import annotations
 
 import hashlib
@@ -112,6 +113,31 @@ def _validate_materialization(item: object) -> TransportMaterialization:
 
 
 def _validate_sections(desired: DesiredForwarderState) -> None:
+    if not desired.listener_specs:
+        raise MihomoProjectionError("MIHOMO_LISTENER_SPEC_REQUIRED")
+    listener_names: set[str] = set()
+    listener_bindings: set[tuple[str, int]] = set()
+    for listener in desired.listener_specs:
+        item = _mapping(listener, "MIHOMO_LISTENER_INVALID")
+        name, kind, address, port, target = (
+            item.get("name"),
+            item.get("type"),
+            item.get("listen"),
+            item.get("port"),
+            item.get("proxy"),
+        )
+        if not all(isinstance(value, str) for value in (name, kind, address, target)):
+            raise MihomoProjectionError("MIHOMO_LISTENER_INVALID")
+        if (
+            kind not in {"socks", "http", "mixed"}
+            or not isinstance(port, int)
+            or not 1 <= port <= 65535
+        ):
+            raise MihomoProjectionError("MIHOMO_LISTENER_INVALID")
+        if name in listener_names or (address, port) in listener_bindings:
+            raise MihomoProjectionError("MIHOMO_LISTENER_DUPLICATE")
+        listener_names.add(name)
+        listener_bindings.add((address, port))
     for proxy in desired.proxies:
         proxy = _mapping(proxy, "MIHOMO_PROXY_INVALID")
         if not isinstance(proxy.get("name"), str) or not isinstance(proxy.get("type"), str):
@@ -126,6 +152,13 @@ def _validate_sections(desired: DesiredForwarderState) -> None:
         refs = group.get("proxies")
         if not isinstance(refs, tuple) or any(ref not in names for ref in refs):
             raise MihomoProjectionError("MIHOMO_PROXY_GROUP_REFERENCE_INVALID")
+    group_names = {
+        group.get("name") for group in desired.proxy_groups if isinstance(group.get("name"), str)
+    }
+    allowed_targets = set(names) | group_names | {"BLOCK"}
+    for listener in desired.listener_specs:
+        if listener.get("proxy") not in allowed_targets:
+            raise MihomoProjectionError("MIHOMO_LISTENER_TARGET_INVALID")
     fallback_rules: list[Mapping[str, object]] = []
     for rule in desired.rules:
         rule = _mapping(rule, "MIHOMO_RULE_INVALID")
@@ -144,6 +177,11 @@ def _validate_sections(desired: DesiredForwarderState) -> None:
         raise MihomoProjectionError("MIHOMO_FALLBACK_MUST_BLOCK")
     if desired.rules[-1] is not fallback_rules[0]:
         raise MihomoProjectionError("MIHOMO_FALLBACK_NOT_TERMINAL")
+    for rule in desired.rules:
+        match = rule.get("match")
+        target = rule.get("target")
+        if isinstance(match, str) and match.upper() != "MATCH" and target not in allowed_targets:
+            raise MihomoProjectionError("MIHOMO_RULE_TARGET_INVALID")
     _mapping(desired.dns, "MIHOMO_DNS_INVALID")
     _mapping(desired.policy, "MIHOMO_POLICY_INVALID")
     allowed = {"mode", "mixed-port", "allow-lan", "log-level", "api-secret-ref"}
@@ -167,9 +205,8 @@ def compose_mihomo_document(desired: DesiredForwarderState) -> tuple[dict[str, o
         for ref in references
         if isinstance(ref, TransportMaterializationReference)
     ]
-    if (
-        len(reference_owners) != len(references)
-        or len(set(reference_owners)) != len(reference_owners)
+    if len(reference_owners) != len(references) or len(set(reference_owners)) != len(
+        reference_owners
     ):
         raise MihomoProjectionError("MIHOMO_DUPLICATE_TRANSPORT_REFERENCE")
     if set(material_by_owner) != set(reference_owners):
@@ -179,7 +216,10 @@ def compose_mihomo_document(desired: DesiredForwarderState) -> tuple[dict[str, o
             raise MihomoProjectionError("MIHOMO_TRANSPORT_REFERENCE_INVALID")
         item = material_by_owner.get(ref.owner_record_id)
         if item is None or (
-            item.provider_code, item.source_revision, item.cache_identity, item.implementation
+            item.provider_code,
+            item.source_revision,
+            item.cache_identity,
+            item.implementation,
         ) != (ref.provider_code, ref.source_revision, ref.cache_identity, ref.implementation):
             raise MihomoProjectionError("MIHOMO_TRANSPORT_PROOF_MISMATCH")
     materialized_proxies: list[Mapping[str, object]] = []
@@ -195,6 +235,7 @@ def compose_mihomo_document(desired: DesiredForwarderState) -> tuple[dict[str, o
     effective_proxies = tuple(desired.proxies) + tuple(materialized_proxies)
     effective_desired = DesiredForwarderState(
         listeners=desired.listeners,
+        listener_specs=desired.listener_specs,
         proxies=effective_proxies,
         proxy_groups=desired.proxy_groups,
         rules=desired.rules,
@@ -219,27 +260,25 @@ def compose_mihomo_document(desired: DesiredForwarderState) -> tuple[dict[str, o
     }
     raw_document: dict[str, object] = {
         **constants,
-        "proxy-providers": {},
-        "listeners": [
-            {
-                "name": name,
-                "type": "socks",
-                "port": 7890,
-                "proxy": "BLOCK",
-                "listen": value,
-            }
-            for name, value in sorted(desired.listeners.items())
-        ],
+        "listeners": list(desired.listener_specs),
         "proxies": list(effective_proxies),
         "proxy-groups": list(desired.proxy_groups),
-        "rules": list(desired.rules),
+        "rules": [
+            (
+                f"{rule['match']},{rule['target']}"
+                if str(rule["match"]).upper() == "MATCH"
+                else f"{rule['match']},{rule.get('value')},{rule['target']}"
+            )
+            for rule in desired.rules
+        ],
         "dns": dict(desired.dns),
         "policy": dict(desired.policy),
     }
     secret_ref = desired.deployment_constants.get("api-secret-ref")
     if not isinstance(secret_ref, str) or not secret_ref:
         raise MihomoProjectionError("MIHOMO_API_SECRET_REF_REQUIRED")
-    raw_document["secret-ref"] = secret_ref
+    # The opaque reference is an operation input only; it is never serialized.
+    raw_document.pop("api-secret-ref", None)
     document_value = _canonical(raw_document)
     if not isinstance(document_value, dict):
         raise MihomoProjectionError("MIHOMO_DOCUMENT_INVALID")

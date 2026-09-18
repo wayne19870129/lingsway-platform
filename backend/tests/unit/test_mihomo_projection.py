@@ -36,6 +36,15 @@ def materialization(owner: int, code: str, content: dict[str, object]) -> Transp
 def snapshot() -> DesiredForwarderState:
     return DesiredForwarderState(
         listeners={"listener-a": "127.0.0.1:10001"},
+        listener_specs=(
+            {
+                "name": "listener-a",
+                "type": "socks",
+                "listen": "127.0.0.1",
+                "port": 10001,
+                "proxy": "BLOCK",
+            },
+        ),
         proxies=({"name": "proxy-a", "type": "ss", "server": "example.invalid"},),
         proxy_groups=({"name": "AUTO", "type": "select", "proxies": ["proxy-a"]},),
         rules=({"match": "MATCH", "target": "BLOCK"},),
@@ -72,6 +81,7 @@ def test_transport_proof_changes_projection_identity() -> None:
     changed_hash = materialization(1, "A", {"proxies": [{"name": "changed", "type": "ss"}]})
     changed = DesiredForwarderState(
         listeners=state.listeners,
+        listener_specs=state.listener_specs,
         proxies=state.proxies,
         proxy_groups=state.proxy_groups,
         rules=state.rules,
@@ -91,6 +101,7 @@ def test_transport_reference_must_match_materialization_exactly() -> None:
     state = snapshot()
     mismatched = DesiredForwarderState(
         listeners=state.listeners,
+        listener_specs=state.listener_specs,
         proxies=state.proxies,
         proxy_groups=state.proxy_groups,
         rules=state.rules,
@@ -139,6 +150,15 @@ def test_fallback_policy_is_fail_closed(
     with pytest.raises(MihomoProjectionError, match=expected):
         compose_mihomo_document(
             DesiredForwarderState(
+                listener_specs=(
+                    {
+                        "name": "listener",
+                        "type": "socks",
+                        "listen": "127.0.0.1",
+                        "port": 7890,
+                        "proxy": "BLOCK",
+                    },
+                ),
                 rules=rules,
                 transport_materializations=(materialization(1, "A", {"proxies": []}),),
                 transport_references=(TransportMaterializationReference(1, "A", 1, "cache/1"),),
@@ -169,12 +189,12 @@ def test_deleted_desired_entries_are_not_retained() -> None:
         {
             "name": "listener-a",
             "type": "socks",
-            "port": 7890,
+            "port": 10001,
             "proxy": "BLOCK",
-            "listen": "127.0.0.1:10001",
+            "listen": "127.0.0.1",
         }
     ]
-    with pytest.raises(MihomoProjectionError, match="FALLBACK_RULE_INVALID"):
+    with pytest.raises(MihomoProjectionError, match="LISTENER_SPEC_REQUIRED"):
         compose_mihomo_document(DesiredForwarderState())
 
 
@@ -182,9 +202,7 @@ def test_deleted_desired_entries_are_not_retained() -> None:
     "mutator, expected",
     [
         (
-            lambda state: DesiredForwarderState(
-                transport_materializations=(object(),)
-            ),
+            lambda state: DesiredForwarderState(transport_materializations=(object(),)),
             "MATERIALIZATION_INVALID",
         ),
         (

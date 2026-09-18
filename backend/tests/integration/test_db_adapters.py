@@ -185,12 +185,17 @@ def test_gateway_route_binding_is_idempotent_and_active_unique(
         db.commit()
 
     assert first.id == second.id
-    assert db.scalar(
-        select(func.count()).select_from(GatewayRouteBinding).where(
-            GatewayRouteBinding.subscription_id == state.subscription_id,
-            GatewayRouteBinding.released_at.is_(None),
+    assert (
+        db.scalar(
+            select(func.count())
+            .select_from(GatewayRouteBinding)
+            .where(
+                GatewayRouteBinding.subscription_id == state.subscription_id,
+                GatewayRouteBinding.released_at.is_(None),
+            )
         )
-    ) == 1
+        == 1
+    )
 
     duplicate = GatewayRouteBinding(
         subscription_id=state.subscription_id,
@@ -369,10 +374,7 @@ def test_place_order_precheck_does_not_reserve_or_bind_the_endpoint(db: Session)
     assert persisted is not None
     assert persisted.status == "AVAILABLE"
     assert persisted.current_count == 0
-    assert (
-        db.scalar(select(func.count()).select_from(EgressBinding))
-        == 0
-    )
+    assert db.scalar(select(func.count()).select_from(EgressBinding)) == 0
 
 
 @dataclass
@@ -454,6 +456,15 @@ def test_mihomo_render_failure_restores_exact_pre_operation_state(
     candidate = provider.render(
         DesiredForwarderState(
             listeners={"listener": "127.0.0.1"},
+            listener_specs=(
+                {
+                    "name": "listener",
+                    "type": "socks",
+                    "listen": "127.0.0.1",
+                    "port": 7891,
+                    "proxy": "BLOCK",
+                },
+            ),
             rules=({"match": "MATCH", "target": "BLOCK"},),
             deployment_constants={"api-secret-ref": "mihomo/api-secret"},
         )
@@ -517,13 +528,20 @@ def test_mihomo_unhealthy_post_reload_restores_exact_pre_operation_state(
     original = b"rules:\n  - MATCH,OLD\n"
     config_path = tmp_path / "config.yaml"
     config_path.write_bytes(original)
-    runtime = FailingMihomoRuntime(
-        config_path, fail_reload_count=0, health_values=[False, True]
-    )
+    runtime = FailingMihomoRuntime(config_path, fail_reload_count=0, health_values=[False, True])
     provider = MihomoForwarderProvider(runtime)
     candidate = provider.render(
         DesiredForwarderState(
             listeners={"listener": "127.0.0.1"},
+            listener_specs=(
+                {
+                    "name": "listener",
+                    "type": "socks",
+                    "listen": "127.0.0.1",
+                    "port": 7891,
+                    "proxy": "BLOCK",
+                },
+            ),
             rules=({"match": "MATCH", "target": "BLOCK"},),
             deployment_constants={"api-secret-ref": "mihomo/api-secret"},
         )

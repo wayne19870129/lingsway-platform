@@ -226,6 +226,7 @@ class DesiredRoutingState:
 @dataclass(frozen=True, slots=True)
 class DesiredForwarderState:
     listeners: Mapping[str, str] = field(default_factory=dict)
+    listener_specs: tuple[Mapping[str, object], ...] = ()
     # Provider-neutral full-projection inputs.  Mihomo-specific validation and
     # composition live at the forwarder boundary, never in the domain.
     proxies: tuple[Mapping[str, object], ...] = ()
@@ -253,6 +254,7 @@ class DesiredForwarderState:
             raise TypeError("desired snapshot contains unsupported value")
 
         object.__setattr__(self, "listeners", freeze(self.listeners))
+        object.__setattr__(self, "listener_specs", freeze(self.listener_specs))
         object.__setattr__(self, "proxies", freeze(self.proxies))
         object.__setattr__(self, "proxy_groups", freeze(self.proxy_groups))
         object.__setattr__(self, "rules", freeze(self.rules))
@@ -394,9 +396,7 @@ class EgressProvider(Protocol):
 
     def capacity(self) -> CapacityDTO: ...
 
-    def create_tenant(
-        self, label: str, quota_gb: Decimal, thread_limit: int
-    ) -> TenantDTO: ...
+    def create_tenant(self, label: str, quota_gb: Decimal, thread_limit: int) -> TenantDTO: ...
 
     def update_tenant_quota(self, tenant_id: str, quota_gb: Decimal) -> TenantDTO: ...
 
@@ -404,9 +404,7 @@ class EgressProvider(Protocol):
 
     def get_credentials(self, tenant_id: str, endpoint_id: str) -> CredentialDTO: ...
 
-    def replace_endpoint(
-        self, endpoint_id: str, dry_run: bool = True
-    ) -> ReplacementDTO: ...
+    def replace_endpoint(self, endpoint_id: str, dry_run: bool = True) -> ReplacementDTO: ...
 
 
 class AccountingCreateEffect(Enum):
