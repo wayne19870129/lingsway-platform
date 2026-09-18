@@ -13,6 +13,7 @@ from sqlalchemy import and_, func, select
 from sqlalchemy.engine import Connection
 from sqlalchemy.orm import Session
 
+from backend.app.catalog import SELLABLE_PLAN_CODES
 from backend.app.core.config import get_settings
 from backend.app.dependencies import AdminCustomer, DbSession, ManagedRegistry
 from backend.app.domain.capacity import CapacityExceededError
@@ -62,7 +63,10 @@ from backend.app.services import confirm_payment_and_provision
 
 router = APIRouter(tags=["admin"])
 
-ADMIN_CAPACITY_PLAN_CODES = ("PLAN_50GB", "PLAN_100GB", "PLAN_200GB", "PLAN_500GB")
+#: TASK-S06: derived from the catalogue, never a second hardcoded list --
+#: the capacity report and the customer-facing plan list must never be able
+#: to disagree about which tiers are sellable.
+ADMIN_CAPACITY_PLAN_CODES = SELLABLE_PLAN_CODES
 
 
 class _SqlAlchemyOrderState:

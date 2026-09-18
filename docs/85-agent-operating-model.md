@@ -199,9 +199,14 @@ fail-closed 抛错的（API 契约未实测确认单位），开通第 1 步就�
 ### 还开着的问题（continuity §8 有完整清单）
 
 - `ops/**` 有 ruff 了，但**没有 mypy**（脚本未加类型标注）。
-- 套餐档位配置不一致：`.env.example` 的 `PLAN_300GB_PRICE` 没人读；
-  `PLAN_1000GB` 有价格配置但不在任何可售清单里；可售清单硬编码在 3 个地方。
-  **这是产品决定，需要 User 拍板。**
+- **套餐价格声明了但还没生效。** 目录已定（`backend/app/catalog.py`：
+  50GB/¥30、100GB/¥50、200GB/¥80、500GB/¥120，30 天周期，CNY），但
+  `plans` 表由仓库之外的手段填充，仓库里没有任何代码创建 `Plan` 行。
+  上线前必须人工核对库里现存的四行——**特别是 `currency`，如果是 `USD`，
+  客户会看到 "30 USD" 而不是 ¥30，并且这个错误会经 `Order.currency`
+  带到订单上。** 见 `TASK-S06-plan-catalogue.md` 文末。
+- 加购（ADDON）是否要卖、卖多少钱 —— `addon_*_price` 三个配置是死的，
+  ADDON 订单走 `addon_bytes` 而不是 `Plan` 行。**需要 User 拍板。**
 - 前端组件一行一个组件写（单行 1000+ 字符），不可 diff 不可审查。
 - `ops/status.py`、`frontend/lib/api.ts` 真正的类型化客户端——都还不存在。
 

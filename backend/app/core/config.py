@@ -43,11 +43,15 @@ class Settings:
     addon_20gb_price: Decimal = Decimal("0.00")
     addon_50gb_price: Decimal = Decimal("0.00")
     addon_100gb_price: Decimal = Decimal("0.00")
+    # Sellable tier prices, resolved into PlanSpec by backend/app/catalog.py.
+    # Decided 2026-09-18: four tiers only, 30-day cycle, priced in CNY.
+    # PLAN_1000GB was removed -- it had a price here but no matching plan code
+    # anywhere in the codebase, so it was never sellable.
     plan_50gb_price: Decimal = Decimal("30.00")
     plan_100gb_price: Decimal = Decimal("50.00")
     plan_200gb_price: Decimal = Decimal("80.00")
-    plan_500gb_price: Decimal = Decimal("150.00")
-    plan_1000gb_price: Decimal = Decimal("200.00")
+    plan_500gb_price: Decimal = Decimal("120.00")
+    plan_currency: str = "CNY"
     webshare_total_quota_gb: Decimal = Decimal("250")
     webshare_ops_reserve_gb: Decimal = Decimal("20")
     admin_initial_email: str = "admin@example.com"

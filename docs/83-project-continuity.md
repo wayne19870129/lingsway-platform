@@ -215,17 +215,27 @@ later session does not have to rediscover it.
    `check_13_backup` does fail closed on this, so a real deploy cannot silently
    pass — but it also cannot pass at all until this lands.
 
-4. **Plan-tier configuration is inconsistent in two separate ways.**
-   - `.env.example` declares `PLAN_300GB_PRICE`, which `Settings` does not read
-     at all — a dead variable.
-   - `Settings.plan_1000gb_price` and `PLAN_1000GB_PRICE` both exist, but the
-     plan **code** `PLAN_1000GB` appears in no sellable list: neither
-     `admin.py:ADMIN_CAPACITY_PLAN_CODES` nor either frontend page offers it.
-     Either a 1000GB tier was intended and never wired, or the price knob is a
-     leftover. This is a product decision, not a mechanical fix.
-   - The sellable plan-code list is hardcoded in **three** places
-     (`backend/app/api/admin.py`, `frontend/app/(customer)/plans/page.tsx`,
-     `frontend/app/(customer)/orders/new/page.tsx`) with no shared source.
+4. ~~**Plan-tier configuration is inconsistent.**~~ **MOSTLY FIXED 2026-09-18**
+   by `TASK-S06-plan-catalogue.md`. The product owner settled the catalogue:
+   four tiers on a 30-day cycle, priced in **CNY** — 50GB/¥30, 100GB/¥50,
+   200GB/¥80, 500GB/¥120. `backend/app/catalog.py` is now the single source;
+   `ADMIN_CAPACITY_PLAN_CODES` derives from it, `GET /plans` filters to it, and
+   both frontend pages dropped their duplicated lists. `PLAN_1000GB` and
+   `PLAN_300GB` are withdrawn and their orphaned config removed.
+
+   **Still open, and important:** the catalogue does **not** reach the
+   database. `deploy/lib/60_seed.sh` deliberately refuses implicit seed data
+   (`SEED_COMMAND must be explicitly configured`), and nothing else in this
+   repository creates `Plan` rows — the `plans` table is populated entirely
+   out-of-band. So the agreed prices are declared but not yet in effect
+   anywhere. Wiring the catalogue into a seed path needs the product owner's
+   sign-off first, because it means this repository would start writing
+   business data during deployment.
+
+   Also still open: `Settings.addon_20gb_price` / `addon_50gb_price` /
+   `addon_100gb_price` remain dead config. ADDON orders are driven by
+   `addon_bytes`, not by a `Plan` row, so whether add-on traffic is sold at
+   all — and at what price — is an unanswered product question.
 
 5. **`.env.example` omitted `XRAY_CONFIG_PATH`, `XRAY_BACKUP_DIR`, and
    `XRAY_LOG_LEVEL`** — real `Settings` fields consumed by the now-wired
