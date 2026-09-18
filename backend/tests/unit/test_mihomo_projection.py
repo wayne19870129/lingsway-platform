@@ -75,6 +75,30 @@ def test_same_snapshot_is_deterministic_and_secret_neutral() -> None:
     )
 
 
+def test_canonical_mihomo_document_contract() -> None:
+    document, _ = compose_mihomo_document(snapshot())
+    assert set(document) == {
+        "ipv6",
+        "unified-delay",
+        "tcp-concurrent",
+        "mixed-port",
+        "allow-lan",
+        "bind-address",
+        "mode",
+        "log-level",
+        "external-controller",
+        "listeners",
+        "proxies",
+        "proxy-groups",
+        "rules",
+        "dns",
+    }
+    assert "api-secret-ref" not in document
+    assert "secret-ref" not in document
+    assert document["rules"] == ["MATCH,BLOCK"]
+    assert document["listeners"][0]["port"] == 10001
+
+
 def test_transport_proof_changes_projection_identity() -> None:
     state = snapshot()
     _, baseline = compose_mihomo_document(state)

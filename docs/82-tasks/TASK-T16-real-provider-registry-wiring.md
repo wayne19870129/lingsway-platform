@@ -2824,3 +2824,17 @@ wire `FORWARDER_PROVIDER=mihomo` into the production registry, deploy, or grant
 real-provider production authorization. Durable pending/finalization,
 single-writer locking, crash recovery, and production registry wiring remain
 later S04-B/S04-C scope.
+
+### S04-A ownership matrix
+
+| Mihomo section | Owner/source | Required validation | Secret handling |
+|---|---|---|---|
+| core constants | deployment constants | allowlisted values only | no plaintext secret |
+| dns | desired snapshot | mapping/schema validation | no secret values |
+| controller | deployment constants | fixed canonical address shape | operation input only |
+| controller secret | opaque `api-secret-ref` metadata | must be resolved by a later operation boundary; never serialized here | plaintext excluded from snapshot/output |
+| proxy-providers | explicitly unsupported in S04-A | omitted, never emitted as an empty placeholder | n/a |
+| proxies | verified transport materialization plus desired non-conflicting entries | identity, type, and cross-reference validation | materialized content is hash-verified |
+| proxy-groups | desired snapshot | every proxy reference must resolve | no credential-bearing repr |
+| listeners | immutable `listener_specs` snapshot values | name/type/address/port/target uniqueness and range checks | no secret values |
+| rules | desired snapshot | canonical Mihomo serialization; final `MATCH,BLOCK` required | no secret values |

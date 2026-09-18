@@ -272,7 +272,6 @@ def compose_mihomo_document(desired: DesiredForwarderState) -> tuple[dict[str, o
             for rule in desired.rules
         ],
         "dns": dict(desired.dns),
-        "policy": dict(desired.policy),
     }
     secret_ref = desired.deployment_constants.get("api-secret-ref")
     if not isinstance(secret_ref, str) or not secret_ref:
