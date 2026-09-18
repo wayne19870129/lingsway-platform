@@ -52,6 +52,7 @@ from backend.app.providers.base import (
 from backend.app.providers.forwarder.mihomo import (
     ControllerSecretSnapshot,
     MihomoForwarderProvider,
+    MihomoRollbackVerifiedError,
     MihomoRuntimeError,
 )
 from backend.app.providers.registry import build_registry
@@ -553,7 +554,7 @@ def test_mihomo_unhealthy_post_reload_restores_exact_pre_operation_state(
     )
 
     candidate = provider.finalize(template, FakeControllerSecretResolver())
-    with pytest.raises(MihomoRuntimeError, match="unhealthy"):
+    with pytest.raises(MihomoRollbackVerifiedError, match="MIHOMO_ROLLBACK_VERIFIED"):
         provider.apply(candidate)
 
     assert config_path.read_bytes() == original

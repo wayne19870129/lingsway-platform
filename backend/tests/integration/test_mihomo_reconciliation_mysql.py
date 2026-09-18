@@ -122,6 +122,7 @@ def test_mysql_two_workers_only_one_applies(mysql_engine: Engine) -> None:
         job = enqueue_mihomo_reconciliation(
             db, operation_id="mysql-workers", operation_kind="RECONCILE", snapshot_revision=1
         )
+        job.available_at = datetime.now(UTC) - timedelta(seconds=1)
         db.commit()
         job_id = job.id
 
