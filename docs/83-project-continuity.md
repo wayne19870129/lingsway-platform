@@ -36,8 +36,8 @@ remain subject to the repository safeguards and explicit approval boundaries.
 
 Registry selection is explicit and construction is intended to remain zero-I/O.
 Defaults are mock/noop. Accounting mock/marzban and gateway mock/xray selection
-boundaries exist; Subscription registry wiring is implemented by S03-B, while
-merge/readiness remains subject to exact-head review and checks. Mihomo
+boundaries exist; Subscription registry wiring is implemented by S03-B, which is
+already merged. Mihomo
 activation, production deployment, and real-provider production authorization
 remain independent gates. Mihomo has an accepted full-config and activation
 boundary in ADR-023, but implementation, durable activation/recovery, and
@@ -61,14 +61,29 @@ materialization is restricted input, not Mihomo activation.
   requirements were satisfied before merge; subscription registry wiring is
   implemented. This does not authorize Mihomo activation or production
   deployment.
-- **S04-A:** ACTIVE on the projection-foundation branch. It establishes the
+- **S04-A:** COMPLETE / merged. Merge commit:
+  `e9b4db7b8e77d79fa4f526fbd2cba4262d82e931`. Its exact-head review passed and
+  CI, Security, and Risk were green before merge. It establishes the
   ADR-023 immutable/versioned desired snapshot, deterministic full-document
   composer, and exact transport reference/materialization identity and
   freshness proof. It does not activate
   Mihomo, wire `FORWARDER_PROVIDER=mihomo` into production, deploy, or authorize
-  real-provider production use. Durable pending/finalization, single-writer
-  locking, crash recovery, and production registry wiring remain later S04-B/C
-  work. S04-A guarantees canonical mapping/value ownership for DNS only; full
+  real-provider production use.
+- **S04-B:** ACTIVE.
+- **S04-B1:** ACTIVE on `task/s04-b1-mihomo-durable-reconciliation`. It adds only
+  the durable Job-backed Mihomo intent, global named writer lock, retry and
+  stale-running recovery, commit-outcome certainty, unresolved-intent guard,
+  durable global manual blockers for ambiguous finalization and lock-release
+  outcomes, injectable reconciliation orchestration, and crash/concurrency
+  semantics. An unresolved blocker stops every later Mihomo writer, and a
+  release-uncertain blocker is retained until controlled recovery. Finalization
+  success and the release-pending blocker share one durable boundary; clean
+  release requires confirmed `RELEASE_LOCK == 1` and blocker resolution. It
+  remains fail-closed and is not automatically repaired.
+  It does not claim S04-B2 or S04-C complete, and does not wire production
+  lifespan, real snapshot loading, real secret resolution, runtime readback, or
+  Mihomo activation. S04-A guarantees canonical mapping/value ownership for DNS
+  only; full
   Mihomo DNS field/type validation remains a later candidate-schema/runtime
   validation gate before production activation.
 
