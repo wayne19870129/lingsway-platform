@@ -302,7 +302,12 @@ TASK 已就绪：`docs/82-tasks/TASK-S04-mihomo-activation.md`，里面有逐文
   `plans` 表由仓库之外的手段填充，仓库里没有任何代码创建 `Plan` 行。
   上线前必须人工核对库里现存的四行——**特别是 `currency`，如果是 `USD`，
   客户会看到 "30 USD" 而不是 ¥30，且经 `Order.currency` 带到订单上。**
-- 加购（ADDON）是否要卖、卖多少钱 —— `addon_*_price` 是死配置。**需 User 拍板。**
+- ~~加购（ADDON）是否要卖、卖多少钱~~ **已拍板（2026-09-18）**：加购就是
+  再买一单，**只有四档那一张价目表，没有独立加购 SKU 也没有加购价格**。
+  订单排队，当前单额度用完或到期（先到者）才顶上下一单，订阅链接不变。
+  架构见 **ADR-027**，实现见 **TASK-S07-order-queue-billing.md**
+  （ADR-027 需 User 确认「已接受」后才能开工，尤其其中
+  `RENEWAL`/`ADDON` 合并那一条）。`addon_*_price` 三个死配置已删除。
 - 前端组件一行一个组件写（单行 1000+ 字符），不可 diff 不可审查。
 - `ops/status.py`、`frontend/lib/api.ts` 真正的类型化客户端——都还不存在。
 

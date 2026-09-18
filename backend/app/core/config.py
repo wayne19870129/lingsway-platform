@@ -40,13 +40,15 @@ class Settings:
     grace_period_hours: int = 24
     subscription_base_url: str = "http://localhost:8000"
     subscription_domain: str = ""
-    addon_20gb_price: Decimal = Decimal("0.00")
-    addon_50gb_price: Decimal = Decimal("0.00")
-    addon_100gb_price: Decimal = Decimal("0.00")
     # Sellable tier prices, resolved into PlanSpec by backend/app/catalog.py.
     # Decided 2026-09-18: four tiers only, 30-day cycle, priced in CNY.
-    # PLAN_1000GB was removed -- it had a price here but no matching plan code
-    # anywhere in the codebase, so it was never sellable.
+    #
+    # There is exactly ONE price list. A customer buying more traffic buys
+    # another order from this same list -- there is no separate add-on SKU and
+    # no add-on price. addon_20gb_price / addon_50gb_price / addon_100gb_price
+    # were removed for that reason; nothing read them, and keeping them implied
+    # a second product that does not exist. PLAN_1000GB was removed earlier for
+    # the same kind of reason: a price with no matching plan code.
     plan_50gb_price: Decimal = Decimal("30.00")
     plan_100gb_price: Decimal = Decimal("50.00")
     plan_200gb_price: Decimal = Decimal("80.00")
