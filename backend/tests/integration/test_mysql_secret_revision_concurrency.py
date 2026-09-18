@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import importlib.util
 import os
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, select
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
+from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from backend.app.core.database import Base
-from backend.app.core.secrets import put_secret
+from backend.app.core.secrets import decrypt_secret, encrypt_secret, put_secret
 from backend.app.models.ops import Secret
 
 
@@ -31,6 +35,65 @@ def _write(engine: Engine, ref: str, value: str) -> None:
     with Session(engine) as db:
         put_secret(db, ref, value, "TRANSPORT_SUBSCRIPTION_URL")
         db.commit()
+
+
+def test_mysql_0023_upgrade_preserves_rows_and_revision_semantics(
+    mysql_engine: Engine,
+) -> None:
+    migration_path = (
+        Path(__file__).parents[3]
+        / "infrastructure"
+        / "alembic"
+        / "versions"
+        / "0023_secret_revision.py"
+    )
+    spec = importlib.util.spec_from_file_location("migration_0023", migration_path)
+    assert spec is not None and spec.loader is not None
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+    ciphertext = encrypt_secret("https://before.invalid")
+    with mysql_engine.begin() as connection:
+        connection.execute(text("DROP TABLE IF EXISTS secrets"))
+        connection.execute(
+            text(
+                "CREATE TABLE secrets ("
+                "id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, "
+                "secret_ref VARCHAR(160) NOT NULL UNIQUE, "
+                "ciphertext TEXT NOT NULL, purpose VARCHAR(80) NOT NULL, "
+                "created_at DATETIME(6) NOT NULL, updated_at DATETIME(6) NOT NULL"
+                ") ENGINE=InnoDB"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO secrets (secret_ref, ciphertext, purpose, created_at, updated_at) "
+                "VALUES (:ref, :ciphertext, :purpose, NOW(6), NOW(6))"
+            ),
+            {"ref": "migration/old", "ciphertext": ciphertext, "purpose": "TEST"},
+        )
+        context = MigrationContext.configure(connection)
+        with Operations.context(context):
+            migration.upgrade()
+        columns = {column["name"]: column for column in inspect(connection).get_columns("secrets")}
+        assert columns["revision"]["nullable"] is False
+        assert columns["revision"]["default"] in ("1", "'1'")
+        row = connection.execute(
+            text("SELECT ciphertext, purpose, revision FROM secrets WHERE secret_ref = :ref"),
+            {"ref": "migration/old"},
+        ).one()
+        assert row.ciphertext == ciphertext
+        assert row.purpose == "TEST"
+        assert row.revision == 1
+
+    _write(mysql_engine, "migration/new", "https://new.invalid")
+    with Session(mysql_engine) as db:
+        row = db.scalar(select(Secret).where(Secret.secret_ref == "migration/new"))
+        assert row is not None and row.revision == 1
+        put_secret(db, "migration/new", "https://newer.invalid", "TRANSPORT_SUBSCRIPTION_URL")
+        db.commit()
+        row = db.scalar(select(Secret).where(Secret.secret_ref == "migration/new"))
+        assert row is not None and row.revision == 2
+        assert decrypt_secret(row.ciphertext) == "https://newer.invalid"
 
 
 def test_mysql_same_missing_secret_ref_keeps_revision_one(mysql_engine: Engine) -> None:
@@ -60,6 +123,7 @@ def test_mysql_semantic_secret_updates_serialize_revision(mysql_engine: Engine) 
         assert row is not None
         assert row.revision == 3
         assert row.ciphertext
+        assert decrypt_secret(row.ciphertext) in {"https://one.invalid", "https://two.invalid"}
 
 
 def test_mysql_different_missing_secret_refs_do_not_share_gap_lock(

@@ -67,3 +67,33 @@ def test_resolver_rejects_resolution_after_shutdown(tmp_path: Path) -> None:
         resolver.resolve(
             TransportProviderDescriptor(2, "B", "SUBSCRIPTION", "ref-b"), loader
         )
+
+
+def test_resolver_partial_close_is_truthful_and_idempotent_for_successes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+
+    def close(provider: object) -> None:
+        code = provider.provider_code  # type: ignore[attr-defined]
+        calls.append(code)
+        if code == "A":
+            raise RuntimeError("A close failed")
+
+    monkeypatch.setattr(
+        "backend.app.providers.transport.subscription.SubscriptionTransportProvider.close",
+        close,
+    )
+    resolver = SubscriptionTransportResolver(tmp_path)
+    def loader(_ref: str, _purpose: str) -> SecretSnapshot:
+        return SecretSnapshot("https://provider.invalid/private", 1)
+    resolver.resolve(TransportProviderDescriptor(1, "A", "SUBSCRIPTION", "a"), loader)
+    resolver.resolve(TransportProviderDescriptor(2, "B", "SUBSCRIPTION", "b"), loader)
+
+    with pytest.raises(ExceptionGroup, match="close failed"):
+        resolver.close()
+    with pytest.raises(TransportResolutionError, match="SHUTDOWN"):
+        resolver.resolve(TransportProviderDescriptor(3, "C", "SUBSCRIPTION", "c"), loader)
+    with pytest.raises(ExceptionGroup, match="close failed"):
+        resolver.close()
+    assert calls == ["A", "B", "A"]

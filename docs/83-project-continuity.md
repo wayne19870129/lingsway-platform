@@ -51,12 +51,14 @@ subscription cache materialization is restricted input, not Mihomo activation.
   mapping, opaque secret references, per-record cache isolation, registry-owned
   lazy provider lifecycle, zero-I/O construction, and scheduler failure
   isolation.
-- **S03-B:** ACTIVE on the dedicated implementation branch and awaiting
-  exact-head review. It implements the accepted descriptor-based resolver,
+- **S03-B:** Implements the accepted descriptor-based resolver,
   secret revision/snapshot boundary, lazy registry ownership, isolated cache
   identity, and scheduler record isolation. It must not invent DB-aware generic
   provider contracts, plaintext URL configuration, mutable current-provider
-  state, mock fallback, or Mihomo activation.
+  state, mock fallback, or Mihomo activation. Merge/readiness still depends on
+  exact-head review and green checks; after merge, subscription registry wiring
+  is implemented, but this does not authorize Mihomo activation or production
+  deployment.
 
 ## 6. Current blockers and carry-over
 
