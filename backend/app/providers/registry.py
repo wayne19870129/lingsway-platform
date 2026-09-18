@@ -7,7 +7,6 @@ from pathlib import Path
 from types import TracebackType
 
 from backend.app.core.config import Settings
-from backend.app.core.database import SessionLocal
 from backend.app.providers.accounting.marzban import MarzbanAccountingProvider
 from backend.app.providers.accounting.mock import MockAccountingProvider
 from backend.app.providers.base import (
@@ -173,7 +172,11 @@ class ProviderRegistry:
 
 def build_registry(settings: Settings) -> ProviderRegistry:
     """Build all providers without external I/O or hidden provider discovery."""
-    if settings.accounting_provider == "marzban" or settings.gateway_provider == "xray_file":
+    if (
+        settings.accounting_provider == "marzban"
+        or settings.gateway_provider == "xray_file"
+        or settings.transport_provider_mode == "subscription"
+    ):
         # Settings.from_env() already validates this, but callers
         # constructing Settings directly need the same fail-closed gate.
         settings.validate_runtime_safety()
@@ -232,7 +235,7 @@ def build_registry(settings: Settings) -> ProviderRegistry:
         )
 
     resolver = (
-        SubscriptionTransportResolver(Path(settings.transport_cache_root), SessionLocal)
+        SubscriptionTransportResolver(Path(settings.transport_cache_root))
         if settings.transport_provider_mode == "subscription"
         else None
     )

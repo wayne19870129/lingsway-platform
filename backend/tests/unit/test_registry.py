@@ -69,11 +69,18 @@ def test_registry_rejects_unimplemented_selection() -> None:
 
 
 def test_registry_selects_subscription_mode_without_constructing_provider() -> None:
-    registry = build_registry(Settings(transport_provider_mode="subscription"))
+    registry = build_registry(
+        Settings(transport_provider_mode="subscription", transport_cache_root="cache")
+    )
 
     assert registry.transport is None
     assert registry.transport_resolver is not None
     registry.close()
+
+
+def test_registry_rejects_blank_subscription_cache_root() -> None:
+    with pytest.raises(ValueError, match="TRANSPORT_CACHE_ROOT"):
+        build_registry(Settings(transport_provider_mode="subscription", transport_cache_root=" "))
 
 
 # ---------------------------------------------------------------------------

@@ -66,9 +66,14 @@ def put_secret(db: Session, secret_ref: str, plaintext: str, purpose: str) -> Se
             db.flush()
         return secret
     except IntegrityError:
-        recovered = db.scalar(select(Secret).where(Secret.secret_ref == secret_ref))
+        recovered = db.scalar(
+            select(Secret).where(Secret.secret_ref == secret_ref).with_for_update()
+        )
         if recovered is None:
             raise
+        current_plaintext = decrypt_secret(recovered.ciphertext)
+        if current_plaintext == plaintext and recovered.purpose == purpose:
+            return recovered
         recovered.ciphertext = encrypt_secret(plaintext)
         recovered.purpose = purpose
         recovered.revision += 1

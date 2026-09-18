@@ -12,6 +12,11 @@ from sqlalchemy import select
 
 from backend.app.core.config import get_settings
 from backend.app.core.database import SessionLocal
+from backend.app.core.secrets import (
+    SecretSnapshot,
+    SecretStoreError,
+    reveal_secret_snapshot_for_purpose,
+)
 from backend.app.models import (
     AuditLog,
     ProviderStatus,
@@ -23,7 +28,9 @@ from backend.app.models import (
 )
 from backend.app.providers.base import AccountingProvider
 from backend.app.providers.registry import ProviderRegistry, build_registry
-from backend.app.providers.transport.resolver import SubscriptionTransportResolver
+from backend.app.providers.transport.resolver import (
+    TransportProviderDescriptor,
+)
 from backend.app.workers.accounting_sync import (
     reconcile_usage_period_cache,
     run_next_usage_job,
@@ -55,7 +62,11 @@ def build_scheduler_registry() -> ProviderRegistry:
     return build_registry(get_settings())
 
 
-def sync_transport_capacity_and_inventory(db: Any, registry: ProviderRegistry) -> int:
+def sync_transport_capacity_and_inventory(
+    db: Any,
+    registry: ProviderRegistry,
+    secret_session_factory: Callable[[], Any] = SessionLocal,
+) -> int:
     records = db.scalars(
         select(TransportProviderRecord).where(
             TransportProviderRecord.enabled.is_(True),
@@ -69,8 +80,25 @@ def sync_transport_capacity_and_inventory(db: Any, registry: ProviderRegistry) -
             if settings.transport_provider_mode == "subscription":
                 if registry.transport_resolver is None:
                     raise RuntimeError("Subscription transport resolver is unavailable")
-                descriptor = SubscriptionTransportResolver.descriptor_for(record)
-                provider = registry.transport_resolver.resolve(descriptor)
+                descriptor = TransportProviderDescriptor(
+                    record_id=record.id,
+                    code=record.code,
+                    kind=record.kind.value,
+                    secret_ref=record.secret_ref,
+                )
+
+                def secret_loader(secret_ref: str, purpose: str) -> SecretSnapshot:
+                    secret_db = secret_session_factory()
+                    try:
+                        return reveal_secret_snapshot_for_purpose(
+                            secret_db, secret_ref, purpose
+                        )
+                    except SecretStoreError as exc:
+                        raise RuntimeError("TRANSPORT_SECRET_UNAVAILABLE") from exc
+                    finally:
+                        secret_db.close()
+
+                provider = registry.transport_resolver.resolve(descriptor, secret_loader)
             else:
                 if registry.transport is None:
                     raise RuntimeError("Mock transport provider is unavailable")

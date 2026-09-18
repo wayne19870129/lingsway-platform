@@ -88,6 +88,10 @@ class Settings:
         return settings
 
     def validate_runtime_safety(self) -> None:
+        if self.transport_provider_mode == "subscription" and not self.transport_cache_root.strip():
+            raise ValueError(
+                "TRANSPORT_CACHE_ROOT must not be blank when subscription transport is selected"
+            )
         if self.app_env == "production" and (
             self.jwt_secret.startswith("development-") or len(self.jwt_secret) < 32
         ):
