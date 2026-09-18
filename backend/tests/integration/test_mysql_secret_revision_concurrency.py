@@ -39,7 +39,7 @@ def _write(engine: Engine, ref: str, value: str) -> None:
 def test_mysql_0023_upgrade_preserves_rows_and_revision_semantics(
     mysql_engine: Engine, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    sync_url = str(mysql_engine.url)
+    sync_url = mysql_engine.url.render_as_string(hide_password=False)
     ciphertext = encrypt_secret("https://before.invalid")
     with mysql_engine.begin() as connection:
         connection.execute(text("DROP TABLE IF EXISTS secrets"))
