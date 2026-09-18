@@ -8,11 +8,10 @@ from types import SimpleNamespace
 from typing import cast
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import Table, create_engine
 from sqlalchemy.orm import Session
 
 import backend.app.models  # noqa: F401
-from backend.app.core.database import Base
 from backend.app.infra import mihomo_reconciliation as reconciliation
 from backend.app.infra.mihomo_reconciliation import (
     CommitOutcome,
@@ -35,7 +34,7 @@ from backend.app.providers.forwarder.mihomo import ControllerSecretResolver
 @pytest.fixture
 def db() -> Generator[Session, None, None]:
     engine = create_engine("sqlite:///:memory:")
-    Base.metadata.create_all(engine)
+    cast(Table, Job.__table__).create(bind=engine)
     session = Session(engine, expire_on_commit=False)
     try:
         yield session
