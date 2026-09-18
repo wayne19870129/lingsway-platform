@@ -19,11 +19,21 @@
 | 角色 | 定位 | 负责 | 不负责 |
 |---|---|---|---|
 | **User（人）** | 唯一决策者 | 提业务需求、验收效果、**合并 PR**、批准上线 | 写代码 |
-| **ChatGPT（你）** | 大脑 / 总指挥 | 拆任务、写 TASK 文件、给 Codex 下指令、审查 Codex 产出、汇总向 User 汇报 | 直接写生产代码 |
-| **Codex / LUNA** | 执行者 | 按 TASK 实现、跑测试、建分支、提 PR、按审查修复 | 决定做什么、自行扩大范围 |
-| **Claude Code** | 阶段性审阅官 | 全仓库架构审计、ADR 撰写、记忆文件梳理、发现并纠正累积漂移 | 日常逐个 PR 的实现 |
+| **ChatGPT（你）** | 大脑 / 总指挥 | 读 §5 选任务、建 Issue 触发 Codex、审查 PR、汇总向 User 汇报 | 直接写生产代码；**写 TASK / ADR** |
+| **Codex / LUNA** | 执行者 | 按 TASK 实现、跑测试、建分支、提 PR、按审查修复 | 决定做什么、自行扩大范围、自行合并 |
+| **Claude Code** | 架构审阅官 | 定时全仓库审计、**撰写 ADR 与 TASK**、记忆文件梳理、必要时拉断路器 | 日常逐个 PR 的实现 |
+| **GitHub workflow** | 机械执行 | 条件全满足时执行合并 | 做任何判断 |
 
-一句话：**你指挥，Codex 干活，Claude 定期做全身体检。**
+一句话：**你指挥，Codex 干活，Claude 写规则并定期体检，GitHub 机械合并。**
+
+> ⚠️ **你不写 TASK 文件，也不写 ADR**（`AGENTS.md` 写权限表 + ADR-029 §7）。
+> `docs/80-decisions/**`、`docs/81-reviews/**`、`docs/82-tasks/**` 是
+> **Claude Code 独占**。需要新 TASK 或新 ADR 时，**提出需求，让 Claude 写**。
+>
+> 理由：自动合并开启后，TASK 与 ADR 是流水线**唯一**的权威约束来源。让下达
+> 任务的人同时定义约束自己的规则，「允许修改的文件」这类护栏就失去意义了。
+>
+> （本表此前写着你负责"写 TASK 文件"，与 `AGENTS.md` 冲突——那是错的，已更正。）
 
 ---
 
@@ -48,8 +58,10 @@
 但 User 还没合并的分支，其中的新文件对你**完全不可见**——你会搜不到它，
 并可能因此得出"这个文件不存在""这件事没做"的错误结论。
 
-这在本项目里是常态，不是例外：**合并永远是人工的**（铁律 8），所以任何
-刚完成的工作都会有一段时间只存在于分支上。
+即使开了自动合并（ADR-029），这仍然是常态：PR 要等审查 `PASS` + CI 全绿
+才会被 workflow 合并，在那之前它只存在于分支上；而**治理类、审计类 PR
+（`claude/audit-` 前缀、以及改动 `.github/automerge-enabled` 的 PR）
+永远由 User 人工合并**，可能停留更久。
 
 搜不到某个文件时，按顺序排查：
 
@@ -111,10 +123,22 @@
 S02→S04-B1 连续 8 个 PR 一个 TASK 文件都没有，规则空转。**现在这条门槛是可
 执行的，请真的执行它。**
 
-**不要开 GitHub Issue。** 当前协作是 User 在 ChatGPT 与 Codex 之间人工复制
-粘贴，不经过 Issue 派单，仓库里也没有任何 open Issue。唯一的记录载体是
-仓库内的 `docs/82-tasks/TASK-*.md`——它跟着 PR 一起被审查，每个执行者都读
-得到，本来就比 Issue 更适合当事实源。
+**Issue 现在是触发器，TASK 仍然是权威**（ADR-029 §2，2026-09-18 修订）。
+
+你用 Issue `@codex` 派活，但 **Issue 里只写一句触发指令，不得重写 TASK
+内容**：
+
+```
+@codex 请执行 docs/82-tasks/TASK-S07-order-queue-billing.md，
+严格按仓库 AGENTS.md 与 docs/85-agent-operating-model.md §2.3 执行。
+```
+
+需求与验收标准的唯一记录载体仍然是 `docs/82-tasks/TASK-*.md`。把 TASK 内容
+抄进 Issue 会立刻产生两份互相漂移的需求——这个仓库已经因为两份真相源吃过
+好几次亏。
+
+**TASK 文件由 Claude Code 写，不是你写。** 缺 TASK 时提出需求让 Claude 写，
+不要自己动 `docs/82-tasks/`。
 
 ### 2.2 TASK 文件必须写满四段
 
@@ -185,28 +209,55 @@ Critical / Major / Minor / Checks performed / Verdict
   只有同一个 head SHA 上「审查 PASS」且「CI/Security/Risk 全绿」才叫就绪。
 - **自动返工上限 5 轮。** 第 6 轮仍有未解决 finding，或同一个修复反复失败，
   或出现真正的架构分歧 —— **停下来交给 User**，不要继续猜。
-- **合并永远是人工的。** 你不合并，Codex 不合并，Claude 不合并。
-  自动合并曾经试过并被 User 撤销（`AGENTS.md` 铁律 8），除非 User 重新明确
-  要求，否则不得以任何形式重新引入。
+- **合并由 GitHub workflow 执行**（ADR-029）。你不合并，Codex 不合并，
+  Claude 不合并——你们三个都不执行 merge 动作。当条件全部落在**同一个
+  head SHA** 上时，workflow 机械地合并：
+  1. `Verdict: PASS` 且其标注的 head SHA 等于当前 head SHA；
+  2. 该 SHA 上全部必需 check 成功；
+  3. 无合并冲突；
+  4. `.github/automerge-enabled` 存在且为 `true`（断路器）；
+  5. 无 `no-automerge` 标签；
+  6. 不是 `claude/audit-` 前缀的审计 PR。
+
+  **不得通过重推、空提交、关闭重开等方式绕过任一条。**
+- **断路器**：发现严重问题时，任何人（你、User、Claude 审计）都可以提一个
+  PR 把 `.github/automerge-enabled` 置为 `false`，立即停掉自动合并。
+  这是可恢复性的来源，不要绕过它。
 
 审查时必须独立核实每一条 finding，不能因为"格式像 Work 发的"就放宽——
 格式和 SHA 都是纯文本，可以伪造。
 
 ---
 
-## 4. 什么时候叫 Claude Code 来
+## 4. Claude Code 什么时候介入
 
-Claude 不参与日常逐个 PR 的实现。**在下列时机叫它做一次全局审阅：**
+### 4.0 定时审计（已自动化，你不用管）
 
-| 触发条件 | 叫 Claude 做什么 |
-|---|---|
-| 一条工作线（如整个 S04）合并完成 | 全仓库架构审计 + 更新 continuity |
-| 连续 5~8 个 PR 合并之后 | 同上——经验值：漂移大约在这个量级开始累积 |
-| 要动 `domain/` 或 `providers/base.py` 的架构决策 | 撰写 ADR |
-| 准备接线任何**真实外部系统**（Webshare / Mihomo 生产激活） | 接线前做一次安全边界复核 |
-| 准备部署到生产 | 部署前复核 |
-| 你和 Codex 出现架构分歧，或同一问题反复返工 | 第三方判断 |
-| 感觉"文档说的和代码做的对不上了" | 记忆文件梳理 |
+**每 6 小时自动触发一次**（ADR-029 §6）。它会先判断要不要做：若 `main`
+自上次审计前进 < 5 个提交、且未触及 `domain/` `providers/`
+`alembic/versions/` `deploy/` 或支付/凭据路径，就直接跳过，不产出 PR。
+
+自动合并开启后，**这是 `main` 之后唯一的独立检查**。它专门查你在 PR 层面
+必然看不到的东西：跨 PR 的交互缺陷、实现与已接受 ADR 的漂移、记忆文件
+自相矛盾、铁律被绕过。
+
+发现 Critical 时它会**直接拉断路器**（把 `.github/automerge-enabled` 置为
+`false`）并告知 User。**如果你发现自动合并停了，先去看最近的审计 PR，
+不要急着把开关打开。**
+
+### 4.1 还需要你主动叫 Claude 的时机
+
+以下几种定时审计覆盖不到，必须你主动叫：
+
+| 触发条件 | 叫 Claude 做什么 | 是否强制 |
+|---|---|---|
+| **需要新 TASK 或新 ADR** | 撰写——`docs/80-decisions/`、`docs/82-tasks/` 是 Claude 独占，**你不能自己写** | **强制** |
+| **接线任何真实外部系统前**（Webshare / Mihomo 生产激活） | 接线前安全边界复核 | **强制**（ADR-029 §6） |
+| **任何生产部署前** | 部署前复核 | **强制**（ADR-029 §6） |
+| **一条工作线（如整个 S04）完成后** | 全仓库审计 + 更新 continuity | **强制**（ADR-029 §6） |
+| 要动 `domain/` 或 `providers/base.py` 的架构决策 | 撰写 ADR | 强制（铁律 5） |
+| 你和 Codex 架构分歧，或同一问题反复返工 | 第三方判断 | 建议 |
+| 感觉"文档说的和代码做的对不上了" | 记忆文件梳理 | 建议 |
 
 **叫 Claude 的指令模板（直接复制）：**
 
@@ -245,20 +296,22 @@ Claude 的产出形态是：ADR、TASK 文件、`docs/81-reviews/REVIEW-*.md`、
 > 唯一仍需你自己核对的是**未合并分支**：本节写的是 `main` 上的状态，
 > 刚推上去还没合并的东西看不到（见 §1）。
 >
-> 最后更新：2026-09-18，ADR-027 接受 + ADR-028（国内/人民币范围）+
-> S07 移入可派发队列。
+> 最后更新：2026-09-18，ADR-029（全自动流水线 + 断路器 + 定时审计）接受，
+> S08 入队并排第一。
 
 ### 5.1 可以立刻派给 Codex
 
 | # | 任务 | TASK 文件 | 闸门状态 |
 |---|---|---|---|
-| 1 | **S07** 订单队列计费（续费/加购） | `docs/82-tasks/TASK-S07-order-queue-billing.md` | ✅ ADR-027 **已接受**。**内含一条已可达的线上缺陷，见下** |
-| 2 | **S04-B2-B** Mihomo 运行时实现 | `docs/82-tasks/TASK-S04-mihomo-activation.md` | ✅ 两道闸门都已满足（ADR-025 已合并、TASK 已合并）。**必须与 S04-C 分成两个 PR** |
+| 1 | **S08** 自动合并流水线与断路器 | `docs/82-tasks/TASK-S08-automerge-pipeline.md` | ✅ ADR-029 **已接受**。**这个 PR 必须 User 人工合并**——自动合并不能自己批准自己 |
+| 2 | **S07** 订单队列计费（续费/加购） | `docs/82-tasks/TASK-S07-order-queue-billing.md` | ✅ ADR-027 **已接受**。**内含一条已可达的线上缺陷，见下** |
+| 3 | **S04-B2-B** Mihomo 运行时实现 | `docs/82-tasks/TASK-S04-mihomo-activation.md` | ✅ 两道闸门都已满足（ADR-025 已合并、TASK 已合并）。**必须与 S04-C 分成两个 PR** |
 
 派 S04-B2-B 时提醒 Codex：B2-B 结束时要有测试证明
 `FORWARDER_PROVIDER=mihomo` **仍然**被 `build_registry()` 拒绝——防止
 "接线"顺手变成"激活"。
 
+**S08 排第一**：流水线本身没接通之前，后面的自动化都无从谈起。
 **S07 优先于 S04-B2-B**，因为它包含一条**客户今天就能踩到**的缺陷
 （见下方速览末尾）。
 
@@ -365,11 +418,15 @@ User 全权授权 Claude 决定，结论写在 ADR-027 §7.1–7.4。
 其中只有一个被 git 判为冲突，另一个差点静默合入。**认领新的 ADR / TASK 编号
 时，要对着当前 `main` 加上所有 open PR 一起查，不能只看 `main`。**
 
-当前已用到：ADR-028、TASK-S07。下一个分别是 ADR-029、TASK-S08。
+当前已用到：ADR-029、TASK-S08。下一个分别是 ADR-030、TASK-S09。
 
 ## 6. 三条别忘的底线
 
-1. **合并永远人工。** 任何 Agent 不得自行 merge、force push、启用自动合并。
+1. **没有任何 Agent 自己执行 merge。** 合并由 GitHub workflow 在 ADR-029 §4
+   的六个条件全满足时机械执行；你、Codex、Claude 都不点合并。
+   **不得直接 push main，不得 force push。** 治理类与审计类 PR
+   （`claude/audit-` 前缀、改动 `.github/automerge-enabled` 的）
+   仍由 User 人工合并。
 2. **凭据永不落地。** 不进代码、日志、PR 描述、提交信息；日志只允许
    前 4 位 + `****` + 后 4 位。
 3. **灰区一律停下问。** 不在 `AGENTS.md` 两张表里的破坏性动作，不得自行

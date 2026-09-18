@@ -98,15 +98,27 @@ contradicting it — if not, leave the document alone.
   own Pull Request — one task, one PR, matching the existing "Tasks T0
   through T8 ... every task is submitted as a PR" convention in
   `README.md` and the `docs/82-tasks/TASK-*.md` per-task structure.
-- No agent merges a PR automatically. Final merge is always a human
-  action. This restates `AGENTS.md` rule 8 ("不得自行 merge PR") in PR-
-  workflow terms; it is not a new or looser rule. (A conditional
-  auto-merge exception, `.github/workflows/claude-automerge.yml` /
-  `TASK-T18-conditional-auto-merge.md`, existed briefly and was reverted
-  by the user — in practice, PRs kept receiving new valid `NEEDS_CHANGES`
-  findings round after round and never actually reached auto-merge, just
-  burning review/fix cycles. Do not reintroduce any form of automatic
-  merge without the user explicitly asking for it again.)
+- **No agent executes a merge itself.** Since **ADR-029** (2026-09-18, at
+  the user's explicit re-request) business PRs are merged by a GitHub
+  workflow once all six conditions in ADR-029 §4 hold on the *same* head
+  SHA — a `Verdict: PASS` review matching the current SHA, every required
+  check green, no conflict, `.github/automerge-enabled` set to `true`, no
+  `no-automerge` label, and not a `claude/audit-` branch. Claude does not
+  click merge; neither does ChatGPT or Codex.
+
+  An earlier conditional auto-merge (`claude-automerge.yml` / `TASK-T18`)
+  was reverted because reviews kept producing valid `NEEDS_CHANGES` and
+  PRs never actually reached auto-merge, only burning cycles. Note the
+  failure directions differ: that one was too conservative to merge; this
+  one **can** merge, and could merge something wrong. ADR-029 therefore
+  pairs it with a circuit breaker and a scheduled independent audit —
+  **both are preconditions, not decoration**. Weakening either requires
+  revoking ADR-029 first.
+
+  **Still always human-merged:** governance PRs, audit PRs
+  (`claude/audit-` prefix), and anything changing
+  `.github/automerge-enabled`. An auditor must not approve its own
+  findings. Production deployment remains manual and unaffected.
 - No force-pushing `main`, no bypassing CI, no closing/reopening a PR to
   dodge a check.
 
@@ -208,8 +220,11 @@ After the task is implemented and locally verified:
      out-of-scope follow-ups (e.g. a new `docs/82-tasks/TASK-*.md` filed
      for something bigger discovered along the way, per the pattern used
      for `TASK-T16-real-provider-registry-wiring.md`).
-4. Never merge it yourself, regardless of CI color or how confident you
-   are. Say the PR is ready and wait for a human.
+4. **Never click merge yourself**, regardless of CI colour or how
+   confident you are. Under ADR-029 a workflow merges business PRs when
+   its six conditions hold; Claude's own PRs -- audits, ADRs, TASKs,
+   governance -- are outside that and wait for the user. Say the PR is
+   ready and stop.
 
 ### External AI Review
 
@@ -247,7 +262,9 @@ bot, a separate review agent, or another session's `/code-review` output:
    the same judgment. For an architecturally significant finding, consider
    also recording it under `docs/81-reviews/REVIEW-<id>-<topic>.md` (the
    existing convention for Claude's review output per `AGENTS.md`).
-10. Still never self-merge, no matter how the review resolves.
+10. Still never self-merge, no matter how the review resolves. A `PASS`
+    is an input the ADR-029 workflow consumes, not permission for Claude
+    to merge anything.
 
 ### Work review format, SHA scoping, and de-duplication
 
@@ -331,7 +348,10 @@ on infrastructure, VPS, and provider actions):
 - Force-pushing `main`.
 - Bypassing CI (skipping checks, disabling a failing test to get green,
   `continue-on-error` on something that should fail loudly).
-- Auto-merging into `main`.
+- Merging into `main` by hand, or arranging a merge outside ADR-029's
+  workflow and its six conditions. Weakening the circuit breaker
+  (`.github/automerge-enabled`) or the scheduled audit is equally
+  forbidden -- ADR-029 depends on both.
 
 ## After making changes here
 
