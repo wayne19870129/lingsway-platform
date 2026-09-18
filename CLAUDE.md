@@ -45,7 +45,8 @@ If a PR materially changes any of the following, update
 would otherwise make it stale:
 
 - the collaboration/agent role split (User / ChatGPT Work / Claude Code /
-  GitHub Issue-PR roles);
+  TASK-file and PR roles — GitHub Issues were dropped as a record carrier
+  on 2026-09-18; see `AGENTS.md`'s 流程 section);
 - merge/review/rework policy (round caps, review format, SHA scoping);
 - Claude Code model/effort/automation behavior
   (`.github/workflows/claude.yml` and its helper scripts);

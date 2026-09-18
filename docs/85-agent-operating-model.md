@@ -57,7 +57,7 @@
 
 `AGENTS.md`（2026-09-18 修订）的门槛：
 
-**必须先有 Issue 或 `docs/82-tasks/TASK-*.md`**，满足任一即触发：
+**必须先有 `docs/82-tasks/TASK-*.md`**，满足任一即触发：
 - 需要跨多个 PR 的工作线；
 - 触及 `backend/app/domain/`、`backend/app/providers/base.py`、
   `infrastructure/alembic/versions/`、`deploy/`，或任何产生**真实外部写副作用**
@@ -69,6 +69,11 @@
 这条门槛是收紧措辞的结果。此前的规则是"不是小改动就要先开 Issue"，结果
 S02→S04-B1 连续 8 个 PR 一个 TASK 文件都没有，规则空转。**现在这条门槛是可
 执行的，请真的执行它。**
+
+**不要开 GitHub Issue。** 当前协作是 User 在 ChatGPT 与 Codex 之间人工复制
+粘贴，不经过 Issue 派单，仓库里也没有任何 open Issue。唯一的记录载体是
+仓库内的 `docs/82-tasks/TASK-*.md`——它跟着 PR 一起被审查，每个执行者都读
+得到，本来就比 Issue 更适合当事实源。
 
 ### 2.2 TASK 文件必须写满四段
 

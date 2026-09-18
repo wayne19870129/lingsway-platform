@@ -91,9 +91,8 @@ contradiction:
   section 5 below and in ADR-023/ADR-024.
 
 **Process gap, and what was done about it:** S02→S04-B1 (eight merged PRs,
-#120–#127) were delivered with **no** Issue or TASK file at all, though
-`AGENTS.md` named those as the sole record carrier. Two things changed on
-2026-09-18:
+#120–#127) were delivered with **no** TASK file at all, though `AGENTS.md`
+named one as the sole record carrier. Three things changed on 2026-09-18:
 
 - Forward coverage: `TASK-S04-mihomo-activation.md` and
   `TASK-S05-compensation-failure-contract.md` are the first S-series TASK
@@ -106,6 +105,13 @@ contradiction:
   `providers/base.py`, migrations, `deploy/`, real external write side
   effects; auth/payment/credentials) and explicitly exempts single-PR bug
   fixes, refactors, tests, and docs.
+- **GitHub Issues were dropped as a record carrier** (product owner's call).
+  The working method is manual copy-paste between ChatGPT and Codex; nothing
+  is dispatched through Issues and the repository has none open. A `TASK-*.md`
+  file lives in the repo, is reviewed alongside the PR, and is readable by
+  every executing agent, so it was already the better source of truth. The
+  `.github/ISSUE_TEMPLATE/` files are unaffected — incident write-ups and
+  external-fact verification are records, not task dispatch.
 
 **ADR numbering:** ADR-010 does not exist and is not referenced anywhere. The
 sequence runs 001–009, 011–024. This is a numbering hole, not a missing document
@@ -142,7 +148,7 @@ sequence runs 001–009, 011–024. This is a numbering hole, not a missing docu
   freshness proof. It does not activate
   Mihomo, wire `FORWARDER_PROVIDER=mihomo` into production, deploy, or authorize
   real-provider production use.
-- **S04-B:** ACTIVE. B1 is merged; **B2 has not started** and has no PR, Issue, or
+- **S04-B:** ACTIVE. B1 is merged; **B2 has not started** and has no PR or
   TASK file yet — see `TASK-S04-mihomo-activation.md`.
 - **S04-B1:** COMPLETE / merged as PR #127, merge commit
   `c494ade` (verify against current `main`). It adds only

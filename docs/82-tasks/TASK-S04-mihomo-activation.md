@@ -1,7 +1,7 @@
 # TASK-S04-Mihomo 激活（S04-B2 / S04-C 的记录载体）
 
 > **为什么现在才有这个文件：** `AGENTS.md`「协作角色与职责」规定
-> GitHub Issue 或 `docs/82-tasks/TASK-*.md` 是需求与验收标准的**唯一记录载体**，
+> `docs/82-tasks/TASK-*.md` 是需求与验收标准的**唯一记录载体**，
 > 「聊天记录本身不构成记录」。但 S02→S04-B1 共 8 个已合并 PR（#120–#127）
 > 全程没有任何 TASK 文件，验收标准只存在于 PR 描述和
 > `docs/83-project-continuity.md` §5 的散文里。本文件**向前**补上这个载体，

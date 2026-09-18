@@ -56,10 +56,10 @@ AGENTS.md                  → 需人工确认才可修改
 ## 流程
 - Claude Code 从 `docs/82-tasks/TASK-xxx.md`(如任务已有 TASK 文件)或
   User 的直接需求出发,实现代码、跑测试/lint/build、建 branch、提 PR。
-  User 直接在对话里提出的需求,需要落成 GitHub Issue 或
-  `docs/82-tasks/TASK-*.md` 的**门槛如下**(2026-09-18 修订):
+  User 直接在对话里提出的需求,需要落成 `docs/82-tasks/TASK-*.md` 的
+  **门槛如下**(2026-09-18 修订):
 
-  **必须先有 Issue 或 TASK 文件**——满足任意一条即触发:
+  **必须先有 TASK 文件**——满足任意一条即触发:
   - 需要跨多个 PR 才能交付的工作线(例如 S04 这种分 A/B/C 阶段的);
   - 触及 `backend/app/domain/`、`backend/app/providers/base.py`、
     `infrastructure/alembic/versions/`、`deploy/`,或任何会产生真实外部
@@ -73,6 +73,14 @@ AGENTS.md                  → 需人工确认才可修改
   开 Issue/TASK",实践中 S02→S04-B1 共 8 个已合并 PR 一个 TASK 文件都没有,
   规则等于空转。与其保留一条没人执行的严规,不如定一条能真正被执行的门槛。
   触发门槛却跳过这一步,等同于让需求和验收标准处于未记录状态。
+
+  **GitHub Issue 不再是记录载体之一(2026-09-18,User 决定)。** 当前协作
+  方式是 User 在 ChatGPT 与 Codex 之间人工复制粘贴,不经过 Issue 派单,
+  仓库里也没有任何 open Issue。再要求"先开 Issue"只会增加一道谁都不走的
+  手续。**唯一的记录载体是 `docs/82-tasks/TASK-*.md`**——它在仓库里,
+  每个执行者都读得到,也跟着 PR 一起被审查,本来就比 Issue 更适合当事实源。
+  (`.github/ISSUE_TEMPLATE/` 下的事故复盘与外部事实核验模板不受影响,
+  它们服务的是记录事故与外部系统事实,不是派任务。)
 - Claude Code 独占撰写 TASK(`docs/82-tasks/`)、REVIEW(`docs/81-reviews/`)
   与 ADR(`docs/80-decisions/`),这些文档产出和上面的代码实现是同一个
   执行者做的两类工作,不是两个角色分工。
@@ -102,9 +110,10 @@ AGENTS.md                  → 需人工确认才可修改
 - **Claude Code**:实现代码、跑测试/lint/build、提交 PR、读取并核实审查
   意见、修复后推送新 commit。不自行 merge、不自行关闭他人的 PR(见「铁律」
   第 8 条)。
-- **GitHub Issue / `docs/82-tasks/TASK-*.md`**:需求和验收标准的唯一记录
-  载体。业务需求和验收标准不应该只存在于聊天记录里,必须落到 Issue 或
-  TASK 文件,否则视为未记录。
+- **`docs/82-tasks/TASK-*.md`**:需求和验收标准的唯一记录载体(2026-09-18
+  起不再包含 GitHub Issue——理由见上方「流程」一节)。达到「流程」一节门槛
+  的业务需求和验收标准不应该只存在于聊天记录里,必须落到 TASK 文件,
+  否则视为未记录。
 - **GitHub PR**:代码、审查、修复往返和 CI 结果的唯一交接记录。谁在什么
   commit 上说了什么、Claude 如何回应,都应该能在 PR 的 commits + comments
   + checks 时间线里完整重建,不依赖聊天记录佐证。
