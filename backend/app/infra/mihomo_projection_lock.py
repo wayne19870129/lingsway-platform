@@ -61,21 +61,28 @@ def mihomo_projection_write(
     session: Session, *, timeout_seconds: int = DEFAULT_LOCK_TIMEOUT_SECONDS
 ) -> Iterator[None]:
     raw: Connection | None = None
+    connection: Connection | None = None
+    acquired = False
     try:
         bind = session.get_bind()
         engine = bind.engine if isinstance(bind, Connection) else bind
         raw = engine.connect()
         connection = raw.execution_options(isolation_level="AUTOCOMMIT")
         name = mihomo_projection_lock_name(connection)
+        _get_lock(connection, name, timeout_seconds)
+        acquired = True
     except MihomoProjectionLockError:
+        with suppress(Exception):
+            if raw is not None and not acquired:
+                raw.close()
         raise
     except Exception as exc:
         with suppress(Exception):
-            if raw is not None:
+            if raw is not None and not acquired:
                 raw.close()
         raise MihomoProjectionLockError("failed to open Mihomo projection lock connection") from exc
+    assert connection is not None
     try:
-        _get_lock(connection, name, timeout_seconds)
         previous = bool(session.info.get(SESSION_INFO_LOCK_HELD_KEY, False))
         session.info[SESSION_INFO_LOCK_HELD_KEY] = True
         try:
