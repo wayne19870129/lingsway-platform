@@ -70,7 +70,8 @@ materialization is restricted input, not Mihomo activation.
   Mihomo, wire `FORWARDER_PROVIDER=mihomo` into production, deploy, or authorize
   real-provider production use.
 - **S04-B:** ACTIVE.
-- **S04-B1:** ACTIVE on `task/s04-b1-mihomo-durable-reconciliation`. It adds only
+- **S04-B1:** COMPLETE / merged from `task/s04-b1-mihomo-durable-reconciliation`.
+  Merge commit: `c494ade7d40419afd1a812c8b5ddefb154b1c14c`. It adds only
   the durable Job-backed Mihomo intent, global named writer lock, retry and
   stale-running recovery, commit-outcome certainty, unresolved-intent guard,
   durable global manual blockers for ambiguous finalization and lock-release
@@ -86,6 +87,20 @@ materialization is restricted input, not Mihomo activation.
   only; full
   Mihomo DNS field/type validation remains a later candidate-schema/runtime
   validation gate before production activation.
+
+- **S04-B2:** BLOCKED on `task/s04-b2-mihomo-runtime-reconciliation` pending
+  ADR-025. **S04-B2-A:** ACTIVE and architecture-only. The current schema has
+  no durable monotonic
+  revision for one complete Mihomo desired snapshot. The provider-neutral
+  `DesiredForwarderState.snapshot_revision` default and separate
+  `TransportVersion`/`EgressVersion` values are not a valid global snapshot
+  revision. No real snapshot loader, SQL controller-secret resolver, exact
+  runtime readback verifier, or controlled recovery service exists yet.
+  Do not fabricate the revision or add a migration without an accepted
+  architecture decision documenting the contract. **S04-B2-B:** NOT STARTED.
+  `FORWARDER_PROVIDER=mihomo` remains NOT selectable; no deployment
+  authorization exists.
+- **S04-C:** NOT STARTED.
 
 ## 6. Current blockers and carry-over
 
