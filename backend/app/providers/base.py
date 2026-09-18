@@ -260,6 +260,16 @@ class DesiredForwarderState:
         object.__setattr__(self, "policy", freeze(self.policy))
         object.__setattr__(self, "deployment_constants", freeze(self.deployment_constants))
 
+    def __repr__(self) -> str:
+        return (
+            "DesiredForwarderState("
+            f"snapshot_revision={self.snapshot_revision!r}, "
+            f"snapshot_identity={self.snapshot_identity!r}, "
+            f"listener_count={len(self.listeners)}, proxy_count={len(self.proxies)}, "
+            f"proxy_group_count={len(self.proxy_groups)}, rule_count={len(self.rules)}, "
+            f"content=<redacted>)"
+        )
+
 
 class CandidateConfig:
     """Immutable candidate whose generic dataclass serialization is unavailable."""

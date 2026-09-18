@@ -47,13 +47,13 @@ materialization is restricted input, not Mihomo activation.
 ## 5. Current phase and S03 boundary
 
 - **S02:** COMPLETE.
-- **S03:** ACTIVE.
-- **S03-A:** Accepted architecture contract in ADR-024. It preserves multiple
+- **S03:** COMPLETE.
+- **S03-A:** COMPLETE. Accepted architecture contract in ADR-024. It preserves multiple
   simultaneous subscription records and defines deterministic descriptor-based
   mapping, opaque secret references, per-record cache isolation, registry-owned
   lazy provider lifecycle, zero-I/O construction, and scheduler failure
   isolation.
-- **S03-B:** Implements the accepted descriptor-based resolver,
+- **S03-B:** COMPLETE / merged. It implements the accepted descriptor-based resolver,
   secret revision/snapshot boundary, lazy registry ownership, isolated cache
   identity, and scheduler record isolation. It must not invent DB-aware generic
   provider contracts, plaintext URL configuration, mutable current-provider
@@ -72,8 +72,8 @@ materialization is restricted input, not Mihomo activation.
 
 ## 6. Current blockers and carry-over
 
-Before resuming S03-B, independently verify the exact mutable GitHub state and
-confirm ADR-024 remains the accepted contract. The implementation produces
+For any future S03 maintenance, independently verify the exact mutable GitHub
+state and confirm ADR-024 remains the accepted contract. The implementation produces
 immutable provider-neutral descriptors from current DB records, lets a
 process-lifetime registry resolver lazily create and retain providers, resolves
 purpose-bound secrets in a short transaction before network I/O, isolates cache

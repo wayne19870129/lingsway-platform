@@ -118,10 +118,19 @@ def _validate_sections(desired: DesiredForwarderState) -> None:
         refs = group.get("proxies")
         if not isinstance(refs, tuple) or any(ref not in names for ref in refs):
             raise MihomoProjectionError("MIHOMO_PROXY_GROUP_REFERENCE_INVALID")
+    fallback_rules = []
     for rule in desired.rules:
         rule = _mapping(rule, "MIHOMO_RULE_INVALID")
         if not isinstance(rule.get("match"), str) or not isinstance(rule.get("target"), str):
             raise MihomoProjectionError("MIHOMO_RULE_INVALID")
+        if rule["match"].upper() == "MATCH":
+            fallback_rules.append(rule)
+        if rule["match"].upper() == "MATCH" and rule["target"].upper() == "DIRECT":
+            raise MihomoProjectionError("MIHOMO_DIRECT_FALLBACK_FORBIDDEN")
+    if len(fallback_rules) != 1:
+        raise MihomoProjectionError("MIHOMO_FALLBACK_RULE_INVALID")
+    if fallback_rules[0]["target"].upper() != "BLOCK":
+        raise MihomoProjectionError("MIHOMO_FALLBACK_MUST_BLOCK")
     _mapping(desired.dns, "MIHOMO_DNS_INVALID")
     _mapping(desired.policy, "MIHOMO_POLICY_INVALID")
     allowed = {"mode", "mixed-port", "allow-lan", "log-level"}
@@ -140,6 +149,18 @@ def compose_mihomo_document(desired: DesiredForwarderState) -> tuple[dict[str, o
     material_by_owner = {item.owner_record_id: item for item in materials}
     if len(material_by_owner) != len(materials):
         raise MihomoProjectionError("MIHOMO_DUPLICATE_TRANSPORT_IDENTITY")
+    reference_owners = [
+        ref.owner_record_id
+        for ref in references
+        if isinstance(ref, TransportMaterializationReference)
+    ]
+    if (
+        len(reference_owners) != len(references)
+        or len(set(reference_owners)) != len(reference_owners)
+    ):
+        raise MihomoProjectionError("MIHOMO_DUPLICATE_TRANSPORT_REFERENCE")
+    if set(material_by_owner) != set(reference_owners):
+        raise MihomoProjectionError("MIHOMO_TRANSPORT_OWNERSHIP_MISMATCH")
     for ref in references:
         if not isinstance(ref, TransportMaterializationReference):
             raise MihomoProjectionError("MIHOMO_TRANSPORT_REFERENCE_INVALID")
@@ -148,13 +169,35 @@ def compose_mihomo_document(desired: DesiredForwarderState) -> tuple[dict[str, o
             item.provider_code, item.source_revision, item.cache_identity, item.implementation
         ) != (ref.provider_code, ref.source_revision, ref.cache_identity, ref.implementation):
             raise MihomoProjectionError("MIHOMO_TRANSPORT_PROOF_MISMATCH")
-    _validate_sections(desired)
+    materialized_proxies: list[Mapping[str, object]] = []
+    for item in materials:
+        candidate = item.content.get("proxies")
+        if candidate is None:
+            raise MihomoProjectionError("MIHOMO_TRANSPORT_CONTENT_UNBOUND")
+        if not isinstance(candidate, (tuple, list)):
+            raise MihomoProjectionError("MIHOMO_TRANSPORT_CONTENT_INVALID")
+        materialized_proxies.extend(
+            _mapping(proxy, "MIHOMO_TRANSPORT_CONTENT_INVALID") for proxy in candidate
+        )
+    effective_proxies = tuple(desired.proxies) + tuple(materialized_proxies)
+    effective_desired = DesiredForwarderState(
+        listeners=desired.listeners,
+        proxies=effective_proxies,
+        proxy_groups=desired.proxy_groups,
+        rules=desired.rules,
+        dns=desired.dns,
+        policy=desired.policy,
+        deployment_constants=desired.deployment_constants,
+        snapshot_revision=desired.snapshot_revision,
+        snapshot_identity=desired.snapshot_identity,
+    )
+    _validate_sections(effective_desired)
     raw_document: dict[str, object] = {
         **dict(desired.deployment_constants),
         "listeners": [
             {"name": name, "listen": value} for name, value in sorted(desired.listeners.items())
         ],
-        "proxies": list(desired.proxies),
+        "proxies": list(effective_proxies),
         "proxy-groups": list(desired.proxy_groups),
         "rules": list(desired.rules),
         "dns": dict(desired.dns),

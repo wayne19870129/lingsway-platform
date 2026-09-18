@@ -41,7 +41,13 @@ def snapshot() -> DesiredForwarderState:
         rules=({"match": "MATCH", "target": "BLOCK"},),
         dns={"enable": True},
         policy={"mode": "strict"},
-        transport_materializations=(materialization(1, "A", {"content": "cache-a"}),),
+        transport_materializations=(
+            materialization(
+                1,
+                "A",
+                {"proxies": [{"name": "materialized-a", "type": "ss"}]},
+            ),
+        ),
         transport_references=(TransportMaterializationReference(1, "A", 1, "cache/1"),),
         deployment_constants={"mode": "rule"},
     )
@@ -63,7 +69,7 @@ def test_same_snapshot_is_deterministic_and_secret_neutral() -> None:
 def test_transport_proof_changes_projection_identity() -> None:
     state = snapshot()
     _, baseline = compose_mihomo_document(state)
-    changed_hash = materialization(1, "A", {"content": "different"})
+    changed_hash = materialization(1, "A", {"proxies": [{"name": "changed", "type": "ss"}]})
     changed = DesiredForwarderState(
         listeners=state.listeners,
         proxies=state.proxies,
@@ -93,8 +99,54 @@ def test_transport_reference_must_match_materialization_exactly() -> None:
         transport_materializations=state.transport_materializations,
         transport_references=(TransportMaterializationReference(9, "A", 1, "cache/1"),),
     )
-    with pytest.raises(MihomoProjectionError, match="PROOF_MISMATCH"):
+    with pytest.raises(MihomoProjectionError, match="OWNERSHIP_MISMATCH"):
         compose_mihomo_document(mismatched)
+
+
+def test_transport_reference_owners_are_one_to_one() -> None:
+    first = materialization(1, "A", {"proxies": []})
+    second = materialization(2, "B", {"proxies": []})
+    state = DesiredForwarderState(
+        rules=({"match": "MATCH", "target": "BLOCK"},),
+        transport_materializations=(first, second),
+        transport_references=(TransportMaterializationReference(1, "A", 1, "cache/1"),) * 2,
+    )
+    with pytest.raises(MihomoProjectionError, match="DUPLICATE_TRANSPORT_REFERENCE"):
+        compose_mihomo_document(state)
+
+
+def test_materialized_content_is_rendered_into_candidate() -> None:
+    document, _ = compose_mihomo_document(snapshot())
+    assert {item["name"] for item in document["proxies"]} >= {"materialized-a"}
+
+
+@pytest.mark.parametrize(
+    "rules, expected",
+    [
+        (({"match": "MATCH", "target": "DIRECT"},), "DIRECT_FALLBACK"),
+        ((), "FALLBACK_RULE_INVALID"),
+        (
+            ({"match": "MATCH", "target": "BLOCK"}, {"match": "MATCH", "target": "BLOCK"}),
+            "FALLBACK_RULE_INVALID",
+        ),
+    ],
+)
+def test_fallback_policy_is_fail_closed(
+    rules: tuple[dict[str, object], ...], expected: str
+) -> None:
+    with pytest.raises(MihomoProjectionError, match=expected):
+        compose_mihomo_document(
+            DesiredForwarderState(
+                rules=rules,
+                transport_materializations=(materialization(1, "A", {"proxies": []}),),
+                transport_references=(TransportMaterializationReference(1, "A", 1, "cache/1"),),
+            )
+        )
+
+
+def test_snapshot_repr_redacts_nested_content() -> None:
+    state = DesiredForwarderState(proxies=({"password": "S04A_SECRET_SENTINEL_DO_NOT_LEAK"},))
+    assert "S04A_SECRET_SENTINEL_DO_NOT_LEAK" not in repr(state)
 
 
 def test_snapshot_defensively_freezes_nested_input() -> None:
@@ -112,9 +164,8 @@ def test_snapshot_defensively_freezes_nested_input() -> None:
 def test_deleted_desired_entries_are_not_retained() -> None:
     document, _ = compose_mihomo_document(snapshot())
     assert document["listeners"] == [{"name": "listener-a", "listen": "127.0.0.1:10001"}]
-    empty, _ = compose_mihomo_document(DesiredForwarderState())
-    assert empty["listeners"] == []
-    assert empty["proxies"] == []
+    with pytest.raises(MihomoProjectionError, match="FALLBACK_RULE_INVALID"):
+        compose_mihomo_document(DesiredForwarderState())
 
 
 @pytest.mark.parametrize(
