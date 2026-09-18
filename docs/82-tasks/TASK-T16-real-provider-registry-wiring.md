@@ -2810,3 +2810,13 @@ separately gated.
 本阶段仅更新架构文档：不修改 provider、registry、base contract、schema/migration、workflow、deploy，不执行真实 Mihomo install/reload/health，不使用真实 credentials，不做 VPS、Docker、deployment 或 production side effect。
 
 后续 S02/S03 实现必须先补齐：完整 section ownership、fresh snapshot revision/fingerprint、transport-cache freshness proof、唯一 named lock、exact A backup/verified restore、post-reload health + exact projection verification、durable pending/finalization/crash recovery，以及并发、stale snapshot/cache、各 runtime failure、rollback failure、downstream failure、second-commit ACK-loss、process-crash 和 writer-blocking 测试。缺任一项时，`FORWARDER_PROVIDER=mihomo` 必须保持 fail-closed/mock。
+
+## S04-A — Mihomo projection foundation
+
+S04-A is a separate projection-foundation task based on ADR-023. It consumes
+fresh immutable desired state and verified transport materialization metadata to
+produce one deterministic full Mihomo document. It does not activate Mihomo,
+wire `FORWARDER_PROVIDER=mihomo` into the production registry, deploy, or grant
+real-provider production authorization. Durable pending/finalization,
+single-writer locking, crash recovery, and production registry wiring remain
+later S04-B/S04-C scope.

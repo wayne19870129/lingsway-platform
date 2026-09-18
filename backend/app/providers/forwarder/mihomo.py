@@ -23,6 +23,7 @@ from backend.app.providers.base import (
     ForwarderProvider,
     HealthReport,
 )
+from backend.app.providers.forwarder.mihomo_projection import compose_mihomo_document
 
 
 class MihomoRuntimeError(RuntimeError):
@@ -120,17 +121,14 @@ class MihomoForwarderProvider(ForwarderProvider):
         self._runtime = runtime
 
     def render(self, desired: DesiredForwarderState) -> CandidateConfig:
-        del desired
-        document = self._render_document()
+        document_data, version = compose_mihomo_document(desired)
+        document = yaml.safe_dump(document_data, sort_keys=False).encode()
         try:
             parsed = yaml.safe_load(document)
         except yaml.YAMLError as exc:
             raise MihomoRuntimeError("rendered Mihomo document is invalid YAML") from exc
         if not isinstance(parsed, Mapping):
             raise MihomoRuntimeError("rendered Mihomo document is not a mapping")
-        import hashlib
-
-        version = hashlib.sha256(document).hexdigest()
         return CandidateConfig(dict(parsed), version)
 
     def apply(self, candidate: CandidateConfig) -> ApplyResult:

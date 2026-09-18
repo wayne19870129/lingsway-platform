@@ -225,6 +225,15 @@ class DesiredRoutingState:
 @dataclass(frozen=True, slots=True)
 class DesiredForwarderState:
     listeners: Mapping[str, str] = field(default_factory=dict)
+    # Provider-neutral full-projection inputs.  Mihomo-specific validation and
+    # composition live at the forwarder boundary, never in the domain.
+    proxies: tuple[Mapping[str, object], ...] = ()
+    proxy_groups: tuple[Mapping[str, object], ...] = ()
+    rules: tuple[Mapping[str, object], ...] = ()
+    dns: Mapping[str, object] = field(default_factory=dict)
+    policy: Mapping[str, object] = field(default_factory=dict)
+    transport_materializations: tuple[object, ...] = ()
+    deployment_constants: Mapping[str, object] = field(default_factory=dict)
 
 
 class CandidateConfig:
