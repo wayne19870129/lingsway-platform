@@ -83,7 +83,7 @@ class Resolver:
 def candidate(provider: MihomoForwarderProvider) -> MihomoCandidateConfig:
     template = provider.render(
         DesiredForwarderState(
-            listener_specs=(ForwarderListenerDTO("listener", "socks", "127.0.0.1", 7890, "BLOCK"),),
+            listener_specs=(ForwarderListenerDTO("listener", "socks", "127.0.0.1", 7891, "BLOCK"),),
             rules=({"match": "MATCH", "target": "BLOCK"},),
             deployment_constants={"api-secret-ref": "mihomo/api-secret", "api-secret-revision": 1},
         )

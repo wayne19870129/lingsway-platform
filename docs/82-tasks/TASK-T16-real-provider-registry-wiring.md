@@ -2827,6 +2827,17 @@ later S04-B/S04-C scope.
 
 ### S04-A ownership matrix
 
+S04-A keeps `BLOCK` as the provider-neutral logical safety policy. At the
+Mihomo projection boundary it is serialized as Mihomo's built-in `REJECT`
+outbound (`MATCH,REJECT` and listener target `REJECT`). `DIRECT` remains
+forbidden as the unmatched fallback. Mihomo built-in identities
+(`DIRECT`, `REJECT`, `REJECT-DROP`, `PASS`, `PASS-RULE`, `COMPATIBLE`) and the
+logical `BLOCK` identity are reserved and may not be shadowed by desired or
+materialized proxy/group names. The controller-secret contract remains that
+opaque ref plus non-sensitive revision are fingerprint identity inputs, while
+plaintext is never a fingerprint input and ref/revision never enter runtime
+YAML.
+
 | Mihomo section | Owner/source | Required validation | Secret handling |
 |---|---|---|---|
 | core constants | deployment constants | allowlisted values only | no plaintext secret |
@@ -2836,5 +2847,5 @@ later S04-B/S04-C scope.
 | proxy-providers | explicitly unsupported in S04-A | omitted, never emitted as an empty placeholder | n/a |
 | proxies | verified transport materialization plus desired non-conflicting entries | identity, type, and cross-reference validation | materialized content is hash-verified |
 | proxy-groups | desired snapshot | every proxy reference must resolve | no credential-bearing repr |
-| listeners | immutable `listener_specs` snapshot values | name/type/address/port/target uniqueness and range checks | no secret values |
-| rules | desired snapshot | canonical Mihomo serialization; final `MATCH,BLOCK` required | no secret values |
+| listeners | immutable `listener_specs` snapshot values | name/type/address/port/target uniqueness and range checks; logical `BLOCK` renders as `REJECT` | no secret values |
+| rules | desired snapshot | canonical Mihomo serialization; provider-neutral final `MATCH,BLOCK` renders as runtime `MATCH,REJECT` | no secret values |

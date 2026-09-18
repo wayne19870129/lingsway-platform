@@ -110,22 +110,24 @@ def test_canonical_mihomo_document_contract() -> None:
     }
     assert "api-secret-ref" not in document
     assert "secret-ref" not in document
-    assert document["rules"] == ["MATCH,BLOCK"]
+    assert document["mode"] == "rule"
+    assert document["rules"] == ["MATCH,REJECT"]
     listeners = cast(list[dict[str, object]], document["listeners"])
     assert listeners[0]["port"] == 10001
+    assert listeners[0]["proxy"] == "REJECT"
 
 
 @pytest.mark.parametrize(
     ("kind", "value", "expected"),
     [
-        ("DOMAIN", "example.com", "DOMAIN,example.com,BLOCK"),
-        ("DOMAIN-SUFFIX", "example.com", "DOMAIN-SUFFIX,example.com,BLOCK"),
-        ("IP-CIDR", "192.0.2.0/24", "IP-CIDR,192.0.2.0/24,BLOCK"),
+        ("DOMAIN", "example.com", "DOMAIN,example.com,REJECT"),
+        ("DOMAIN-SUFFIX", "example.com", "DOMAIN-SUFFIX,example.com,REJECT"),
+        ("IP-CIDR", "192.0.2.0/24", "IP-CIDR,192.0.2.0/24,REJECT"),
     ],
 )
 def test_supported_rule_kinds_serialize_canonically(kind: str, value: str, expected: str) -> None:
     state = DesiredForwarderState(
-        listener_specs=(ForwarderListenerDTO("listener", "socks", "127.0.0.1", 7890, "BLOCK"),),
+        listener_specs=(ForwarderListenerDTO("listener", "socks", "127.0.0.1", 7891, "BLOCK"),),
         rules=(
             {"match": kind, "value": value, "target": "BLOCK"},
             {"match": "MATCH", "target": "BLOCK"},
@@ -133,12 +135,12 @@ def test_supported_rule_kinds_serialize_canonically(kind: str, value: str, expec
         deployment_constants={"api-secret-ref": "mihomo/api-secret", "api-secret-revision": 1},
     )
     document, _ = compose_mihomo_document(state)
-    assert document["rules"] == [expected, "MATCH,BLOCK"]
+    assert document["rules"] == [expected, "MATCH,REJECT"]
 
 
 def test_unsupported_rule_kind_fails_closed() -> None:
     state = DesiredForwarderState(
-        listener_specs=(ForwarderListenerDTO("listener", "socks", "127.0.0.1", 7890, "BLOCK"),),
+        listener_specs=(ForwarderListenerDTO("listener", "socks", "127.0.0.1", 7891, "BLOCK"),),
         rules=({"match": "TYPO", "value": "x", "target": "BLOCK"},),
         deployment_constants={"api-secret-ref": "mihomo/api-secret", "api-secret-revision": 1},
     )
@@ -158,7 +160,7 @@ def test_unsupported_rule_kind_fails_closed() -> None:
 )
 def test_malformed_rule_values_fail_closed(kind: str, value: str) -> None:
     state = DesiredForwarderState(
-        listener_specs=(ForwarderListenerDTO("listener", "socks", "127.0.0.1", 7890, "BLOCK"),),
+        listener_specs=(ForwarderListenerDTO("listener", "socks", "127.0.0.1", 7891, "BLOCK"),),
         rules=(
             {"match": kind, "value": value, "target": "BLOCK"},
             {"match": "MATCH", "target": "BLOCK"},
@@ -189,6 +191,179 @@ def test_controller_identity_is_required_by_composer() -> None:
         )
         with pytest.raises(MihomoProjectionError):
             compose_mihomo_document(invalid)
+
+
+@pytest.mark.parametrize(
+    ("target", "expected"),
+    [
+        ("block", "BLOCK_TARGET_INVALID"),
+        ("Block", "BLOCK_TARGET_INVALID"),
+        (" BLOCK ", "BLOCK_TARGET_INVALID"),
+    ],
+)
+def test_logical_block_requires_exact_canonical_spelling(target: str, expected: str) -> None:
+    invalid = DesiredForwarderState(
+        listener_specs=(ForwarderListenerDTO("listener", "socks", "127.0.0.1", 10001, target),),
+        rules=({"match": "MATCH", "target": target},),
+        deployment_constants={"api-secret-ref": "mihomo/api-secret", "api-secret-revision": 1},
+    )
+    with pytest.raises(MihomoProjectionError, match=expected):
+        compose_mihomo_document(invalid)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "DIRECT",
+        "direct",
+        "REJECT",
+        "REJECT-DROP",
+        "PASS",
+        "PASS-RULE",
+        "COMPATIBLE",
+        "BLOCK",
+        "block",
+    ],
+)
+def test_mihomo_builtin_and_logical_identities_are_reserved(name: str) -> None:
+    with pytest.raises(MihomoProjectionError, match="RESERVED_TARGET_IDENTITY") as error:
+        compose_mihomo_document(
+            DesiredForwarderState(
+                listener_specs=(
+                    ForwarderListenerDTO("listener", "socks", "127.0.0.1", 10001, "BLOCK"),
+                ),
+                proxies=({"name": name, "type": "ss"},),
+                rules=({"match": "MATCH", "target": "BLOCK"},),
+                deployment_constants={
+                    "api-secret-ref": "mihomo/api-secret",
+                    "api-secret-revision": 1,
+                },
+            )
+        )
+    assert name not in str(error.value)
+
+
+@pytest.mark.parametrize("name", ["REJECT", "block"])
+def test_mihomo_builtin_identity_is_reserved_for_groups(name: str) -> None:
+    with pytest.raises(MihomoProjectionError, match="RESERVED_TARGET_IDENTITY"):
+        compose_mihomo_document(
+            DesiredForwarderState(
+                listener_specs=(
+                    ForwarderListenerDTO("listener", "socks", "127.0.0.1", 10001, "BLOCK"),
+                ),
+                proxies=({"name": "proxy", "type": "ss"},),
+                proxy_groups=({"name": name, "type": "select", "proxies": ("proxy",)},),
+                rules=({"match": "MATCH", "target": "BLOCK"},),
+                deployment_constants={
+                    "api-secret-ref": "mihomo/api-secret",
+                    "api-secret-revision": 1,
+                },
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("constants", "expected"),
+    [
+        ({"mode": "direct"}, "MODE_INVALID"),
+        ({"mode": "global"}, "MODE_INVALID"),
+        ({"mode": "unexpected"}, "MODE_INVALID"),
+        ({"mixed-port": 0}, "MIXED_PORT_INVALID"),
+        ({"mixed-port": True}, "MIXED_PORT_INVALID"),
+        ({"mixed-port": 65536}, "MIXED_PORT_INVALID"),
+        ({"allow-lan": "true"}, "ALLOW_LAN_INVALID"),
+        ({"log-level": "trace"}, "LOG_LEVEL_INVALID"),
+    ],
+)
+def test_deployment_constants_are_validated_fail_closed(
+    constants: dict[str, object], expected: str
+) -> None:
+    state = snapshot()
+    invalid = DesiredForwarderState(
+        listener_specs=state.listener_specs,
+        proxies=state.proxies,
+        proxy_groups=state.proxy_groups,
+        rules=state.rules,
+        dns=state.dns,
+        transport_materializations=state.transport_materializations,
+        transport_references=state.transport_references,
+        deployment_constants={
+            **dict(state.deployment_constants),
+            **constants,
+        },
+    )
+    with pytest.raises(MihomoProjectionError, match=expected):
+        compose_mihomo_document(invalid)
+
+
+def test_mixed_port_listener_collision_fails_closed() -> None:
+    state = snapshot()
+    invalid = DesiredForwarderState(
+        listener_specs=state.listener_specs,
+        proxies=state.proxies,
+        proxy_groups=state.proxy_groups,
+        rules=state.rules,
+        dns=state.dns,
+        transport_materializations=state.transport_materializations,
+        transport_references=state.transport_references,
+        deployment_constants={
+            **dict(state.deployment_constants),
+            "mixed-port": 10001,
+        },
+    )
+    with pytest.raises(MihomoProjectionError, match="LISTENER_PORT_COLLISION"):
+        compose_mihomo_document(invalid)
+
+
+@pytest.mark.parametrize("ref", [" mihomo/api-secret", "mihomo/api-secret ", "mihomo/secret\nref"])
+def test_controller_secret_ref_must_be_canonical(ref: str) -> None:
+    state = snapshot()
+    invalid = DesiredForwarderState(
+        listener_specs=state.listener_specs,
+        proxies=state.proxies,
+        proxy_groups=state.proxy_groups,
+        rules=state.rules,
+        dns=state.dns,
+        transport_materializations=state.transport_materializations,
+        transport_references=state.transport_references,
+        deployment_constants={"api-secret-ref": ref, "api-secret-revision": 1},
+    )
+    with pytest.raises(MihomoProjectionError, match="CONTROLLER_SECRET_REF_INVALID"):
+        compose_mihomo_document(invalid)
+
+
+@pytest.mark.parametrize(
+    "domain",
+    [
+        "münich.example",
+        "a" * 64 + ".example",
+        ".".join(["a" * 63] * 5),
+    ],
+)
+def test_domain_canonicalization_is_ascii_and_bounded(domain: str) -> None:
+    state = DesiredForwarderState(
+        listener_specs=(ForwarderListenerDTO("listener", "socks", "127.0.0.1", 10001, "BLOCK"),),
+        rules=(
+            {"match": "DOMAIN", "value": domain, "target": "BLOCK"},
+            {"match": "MATCH", "target": "BLOCK"},
+        ),
+        deployment_constants={"api-secret-ref": "mihomo/api-secret", "api-secret-revision": 1},
+    )
+    with pytest.raises(MihomoProjectionError, match="RULE_VALUE_INVALID"):
+        compose_mihomo_document(state)
+
+
+def test_ascii_domain_is_lowercased_deterministically() -> None:
+    state = DesiredForwarderState(
+        listener_specs=(ForwarderListenerDTO("listener", "socks", "127.0.0.1", 10001, "BLOCK"),),
+        rules=(
+            {"match": "DOMAIN", "value": "EXAMPLE.COM", "target": "BLOCK"},
+            {"match": "MATCH", "target": "BLOCK"},
+        ),
+        deployment_constants={"api-secret-ref": "mihomo/api-secret", "api-secret-revision": 1},
+    )
+    document, _ = compose_mihomo_document(state)
+    assert document["rules"] == ["DOMAIN,example.com,REJECT", "MATCH,REJECT"]
 
 
 def test_transport_proof_changes_projection_identity() -> None:
@@ -236,7 +411,7 @@ def test_proxy_and_group_identity_is_unambiguous(
     expected: str,
 ) -> None:
     state = DesiredForwarderState(
-        listener_specs=(ForwarderListenerDTO("listener", "socks", "127.0.0.1", 7890, "BLOCK"),),
+        listener_specs=(ForwarderListenerDTO("listener", "socks", "127.0.0.1", 7891, "BLOCK"),),
         proxies=proxies,
         proxy_groups=groups,
         rules=({"match": "MATCH", "target": "BLOCK"},),
@@ -299,11 +474,15 @@ def test_fallback_policy_is_fail_closed(
         compose_mihomo_document(
             DesiredForwarderState(
                 listener_specs=(
-                    ForwarderListenerDTO("listener", "socks", "127.0.0.1", 7890, "BLOCK"),
+                    ForwarderListenerDTO("listener", "socks", "127.0.0.1", 7891, "BLOCK"),
                 ),
                 rules=rules,
                 transport_materializations=(materialization(1, "A", {"proxies": []}),),
                 transport_references=(TransportMaterializationReference(1, "A", 1, "cache/1"),),
+                deployment_constants={
+                    "api-secret-ref": "mihomo/api-secret",
+                    "api-secret-revision": 1,
+                },
             )
         )
 
@@ -332,12 +511,19 @@ def test_deleted_desired_entries_are_not_retained() -> None:
             "name": "listener-a",
             "type": "socks",
             "port": 10001,
-            "proxy": "BLOCK",
+            "proxy": "REJECT",
             "listen": "127.0.0.1",
         }
     ]
     with pytest.raises(MihomoProjectionError, match="LISTENER_SPEC_REQUIRED"):
-        compose_mihomo_document(DesiredForwarderState())
+        compose_mihomo_document(
+            DesiredForwarderState(
+                deployment_constants={
+                    "api-secret-ref": "mihomo/api-secret",
+                    "api-secret-revision": 1,
+                }
+            )
+        )
 
 
 @pytest.mark.parametrize(
@@ -426,7 +612,7 @@ def test_finalization_identity_and_blank_secret_fail_closed() -> None:
 def test_missing_secret_revision_fails_closed() -> None:
     provider = MihomoForwarderProvider(runtime=cast(MihomoRuntime, object()))
     state = DesiredForwarderState(
-        listener_specs=(ForwarderListenerDTO("listener", "socks", "127.0.0.1", 7890, "BLOCK"),),
+        listener_specs=(ForwarderListenerDTO("listener", "socks", "127.0.0.1", 7891, "BLOCK"),),
         rules=({"match": "MATCH", "target": "BLOCK"},),
         deployment_constants={"api-secret-ref": "mihomo/api-secret"},
     )
