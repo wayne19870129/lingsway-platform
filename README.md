@@ -78,6 +78,11 @@ configured.
 
 - Referral rewards, ticketing, wallet balances, and online customer-service plugins
 - Payment webhooks; payment remains manually confirmed
+- **Any currency other than CNY** — no USD, no USDT or other crypto, no
+  multi-currency, no exchange rates (ADR-028)
+- **Any payment rail other than WeChat Pay and Alipay** — no Stripe, PayPal,
+  or other overseas processors (ADR-028)
+- **Internationalization** — the product targets mainland China only (ADR-028)
 - Xray gRPC runtime additions
 - Full provisioning state machine and automatic retries
 - Concurrent-claim load testing

@@ -61,7 +61,12 @@ class Plan(Base):
     traffic_limit_bytes: Mapped[int] = mapped_column(BigInteger)
     duration_days: Mapped[int]
     price: Mapped[Decimal] = mapped_column(Numeric(12, 2))
-    currency: Mapped[str] = mapped_column(String(3), default="USD")
+    # ADR-028: CNY is the only currency this system has. Migration 0001 gives
+    # this column no server_default, so this Python-side default is the only
+    # source -- and the frontend renders "{price} {currency}", so a wrong
+    # default shows customers "30 USD" for a 30 yuan plan and carries into
+    # Order.currency from there.
+    currency: Mapped[str] = mapped_column(String(3), default="CNY")
     route_group_code: Mapped[str] = mapped_column(String(64))
     status: Mapped[PlanStatus] = mapped_column(Enum(PlanStatus), default=PlanStatus.ACTIVE)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
