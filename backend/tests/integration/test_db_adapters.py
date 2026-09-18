@@ -393,6 +393,10 @@ class FailingMihomoRuntime:
     events: list[str] = field(default_factory=list)
     fail_reload_count: int = 1
     health_values: list[bool] = field(default_factory=lambda: [True])
+    api_secret: str = "test-api-secret"
+
+    def controller_secret_matches(self, secret: str) -> bool:
+        return secret == self.api_secret
 
     def backup(self) -> Path:
         backup = self.path.with_suffix(".before-test")
@@ -467,7 +471,11 @@ def test_mihomo_render_failure_restores_exact_pre_operation_state(
         DesiredForwarderState(
             listener_specs=(ForwarderListenerDTO("listener", "socks", "127.0.0.1", 7891, "BLOCK"),),
             rules=({"match": "MATCH", "target": "BLOCK"},),
-            deployment_constants={"api-secret-ref": "mihomo/api-secret", "api-secret-revision": 1},
+            deployment_constants={
+                "external-controller": "172.30.0.10:9090",
+                "api-secret-ref": "mihomo/api-secret",
+                "api-secret-revision": 1,
+            },
         )
     )
 
@@ -536,7 +544,11 @@ def test_mihomo_unhealthy_post_reload_restores_exact_pre_operation_state(
         DesiredForwarderState(
             listener_specs=(ForwarderListenerDTO("listener", "socks", "127.0.0.1", 7891, "BLOCK"),),
             rules=({"match": "MATCH", "target": "BLOCK"},),
-            deployment_constants={"api-secret-ref": "mihomo/api-secret", "api-secret-revision": 1},
+            deployment_constants={
+                "external-controller": "172.30.0.10:9090",
+                "api-secret-ref": "mihomo/api-secret",
+                "api-secret-revision": 1,
+            },
         )
     )
 

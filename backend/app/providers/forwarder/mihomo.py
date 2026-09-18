@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import shutil
@@ -92,6 +93,8 @@ def _plain(value: object) -> object:
 class MihomoRuntime(Protocol):
     """Filesystem/runtime boundary kept injectable for deterministic tests."""
 
+    def controller_secret_matches(self, secret: str) -> bool: ...
+
     def backup(self) -> Path: ...
 
     def install(self, document: bytes) -> None: ...
@@ -110,6 +113,9 @@ class LocalMihomoRuntime:
     api_url: str
     api_secret: str
     runtime_config_path: str | None = None
+
+    def controller_secret_matches(self, secret: str) -> bool:
+        return hmac.compare_digest(self.api_secret, secret)
 
     def backup(self) -> Path:
         if not self.config_path.exists():
@@ -229,6 +235,14 @@ class MihomoForwarderProvider(ForwarderProvider):
             for key in ("api-secret-ref", "secret-ref", "api-secret-revision")
         ):
             raise MihomoRuntimeError("Mihomo candidate contains internal metadata")
+        try:
+            secret_matches = self._runtime.controller_secret_matches(secret)
+        except Exception as exc:
+            raise MihomoRuntimeError(
+                "MIHOMO_CONTROLLER_SECRET_ROTATION_UNSUPPORTED"
+            ) from exc
+        if not secret_matches:
+            raise MihomoRuntimeError("MIHOMO_CONTROLLER_SECRET_ROTATION_UNSUPPORTED")
         backup = self._runtime.backup()
         document = yaml.safe_dump(_plain(candidate.content), sort_keys=False).encode()
 

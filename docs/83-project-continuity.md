@@ -68,7 +68,9 @@ materialization is restricted input, not Mihomo activation.
   Mihomo, wire `FORWARDER_PROVIDER=mihomo` into production, deploy, or authorize
   real-provider production use. Durable pending/finalization, single-writer
   locking, crash recovery, and production registry wiring remain later S04-B/C
-  work.
+  work. S04-A guarantees canonical mapping/value ownership for DNS only; full
+  Mihomo DNS field/type validation remains a later candidate-schema/runtime
+  validation gate before production activation.
 
 ## 6. Current blockers and carry-over
 

@@ -121,12 +121,41 @@ def _validate_materialization(item: object) -> TransportMaterialization:
     return item
 
 
-def _validate_deployment_constants(constants: Mapping[str, object]) -> int:
+def _validate_controller_address(value: object) -> str:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise MihomoProjectionError("MIHOMO_CONTROLLER_ADDRESS_INVALID")
+    if any(char.isspace() or ord(char) < 32 for char in value):
+        raise MihomoProjectionError("MIHOMO_CONTROLLER_ADDRESS_INVALID")
+    host, separator, port_text = value.rpartition(":")
+    if not separator or not host or not port_text:
+        raise MihomoProjectionError("MIHOMO_CONTROLLER_ADDRESS_INVALID")
+    if host.startswith("[") or host.endswith("]"):
+        if not (host.startswith("[") and host.endswith("]")):
+            raise MihomoProjectionError("MIHOMO_CONTROLLER_ADDRESS_INVALID")
+        host = host[1:-1]
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError as exc:
+        raise MihomoProjectionError("MIHOMO_CONTROLLER_ADDRESS_INVALID") from exc
+    if address.is_loopback or address.is_unspecified:
+        raise MihomoProjectionError("MIHOMO_CONTROLLER_ADDRESS_INVALID")
+    if not port_text.isascii() or not port_text.isdecimal():
+        raise MihomoProjectionError("MIHOMO_CONTROLLER_ADDRESS_INVALID")
+    port = int(port_text)
+    if not 1 <= port <= 65535:
+        raise MihomoProjectionError("MIHOMO_CONTROLLER_ADDRESS_INVALID")
+    if address.version == 6 and not value.startswith("["):
+        raise MihomoProjectionError("MIHOMO_CONTROLLER_ADDRESS_INVALID")
+    return value
+
+
+def _validate_deployment_constants(constants: Mapping[str, object]) -> tuple[int, str]:
     allowed = {
         "mode",
         "mixed-port",
         "allow-lan",
         "log-level",
+        "external-controller",
         "api-secret-ref",
         "api-secret-revision",
     }
@@ -152,11 +181,12 @@ def _validate_deployment_constants(constants: Mapping[str, object]) -> int:
     log_level = constants.get("log-level", "warning")
     if not isinstance(log_level, str) or log_level not in _SUPPORTED_LOG_LEVELS:
         raise MihomoProjectionError("MIHOMO_LOG_LEVEL_INVALID")
-    return mixed_port
+    controller = _validate_controller_address(constants.get("external-controller"))
+    return mixed_port, controller
 
 
 def _validate_sections(desired: DesiredForwarderState) -> None:
-    mixed_port = _validate_deployment_constants(desired.deployment_constants)
+    mixed_port, _ = _validate_deployment_constants(desired.deployment_constants)
     if desired.listeners:
         raise MihomoProjectionError("MIHOMO_LEGACY_LISTENERS_UNSUPPORTED")
     if desired.policy:
@@ -408,7 +438,9 @@ def compose_mihomo_document(desired: DesiredForwarderState) -> tuple[dict[str, o
         "bind-address": "127.0.0.1",
         "mode": "rule",
         "log-level": "warning",
-        "external-controller": "127.0.0.1:9090",
+        "external-controller": _validate_deployment_constants(
+            desired.deployment_constants
+        )[1],
         **dict(desired.deployment_constants),
     }
 

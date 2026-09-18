@@ -40,6 +40,12 @@ class Runtime:
     reload_calls: int = 0
     installed: bytes | None = None
     restored: bool = False
+    api_secret: str = "test-secret"
+    secret_match_calls: int = 0
+
+    def controller_secret_matches(self, secret: str) -> bool:
+        self.secret_match_calls += 1
+        return secret == self.api_secret
 
     def backup(self) -> Path:
         self.events.append("backup")
@@ -85,7 +91,11 @@ def candidate(provider: MihomoForwarderProvider) -> MihomoCandidateConfig:
         DesiredForwarderState(
             listener_specs=(ForwarderListenerDTO("listener", "socks", "127.0.0.1", 7891, "BLOCK"),),
             rules=({"match": "MATCH", "target": "BLOCK"},),
-            deployment_constants={"api-secret-ref": "mihomo/api-secret", "api-secret-revision": 1},
+            deployment_constants={
+                "external-controller": "172.30.0.10:9090",
+                "api-secret-ref": "mihomo/api-secret",
+                "api-secret-revision": 1,
+            },
         )
     )
     return provider.finalize(template, Resolver())
@@ -99,7 +109,22 @@ def test_successful_apply_verifies_health_after_reload() -> None:
 
     assert result.applied is True
     assert result.version
+    assert runtime.secret_match_calls == 1
     assert runtime.events == ["backup", "install", "reload:1", "health"]
+
+
+def test_controller_secret_mismatch_fails_before_backup() -> None:
+    runtime = Runtime(api_secret="configured-secret")
+    provider = MihomoForwarderProvider(runtime)
+    candidate_value = candidate(provider)
+
+    with pytest.raises(MihomoRuntimeError, match="ROTATION_UNSUPPORTED") as error:
+        provider.apply(candidate_value)
+
+    assert runtime.events == []
+    assert runtime.secret_match_calls == 1
+    assert "configured-secret" not in str(error.value)
+    assert "test-secret" not in str(error.value)
 
 
 def test_install_exception_triggers_rollback_and_fails_closed() -> None:

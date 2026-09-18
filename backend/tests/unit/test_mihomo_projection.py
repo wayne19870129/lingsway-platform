@@ -71,10 +71,20 @@ def snapshot() -> DesiredForwarderState:
         transport_references=(TransportMaterializationReference(1, "A", 1, "cache/1"),),
         deployment_constants={
             "mode": "rule",
+            "external-controller": "172.30.0.10:9090",
             "api-secret-ref": "mihomo/api-secret",
             "api-secret-revision": 1,
         },
     )
+
+
+def mihomo_constants(**overrides: object) -> dict[str, object]:
+    return {
+        "external-controller": "172.30.0.10:9090",
+        "api-secret-ref": "mihomo/api-secret",
+        "api-secret-revision": 1,
+        **overrides,
+    }
 
 
 def test_same_snapshot_is_deterministic_and_secret_neutral() -> None:
@@ -111,6 +121,7 @@ def test_canonical_mihomo_document_contract() -> None:
     assert "api-secret-ref" not in document
     assert "secret-ref" not in document
     assert document["mode"] == "rule"
+    assert document["external-controller"] == "172.30.0.10:9090"
     assert document["rules"] == ["MATCH,REJECT"]
     listeners = cast(list[dict[str, object]], document["listeners"])
     assert listeners[0]["port"] == 10001
@@ -132,7 +143,7 @@ def test_supported_rule_kinds_serialize_canonically(kind: str, value: str, expec
             {"match": kind, "value": value, "target": "BLOCK"},
             {"match": "MATCH", "target": "BLOCK"},
         ),
-        deployment_constants={"api-secret-ref": "mihomo/api-secret", "api-secret-revision": 1},
+        deployment_constants=mihomo_constants(),
     )
     document, _ = compose_mihomo_document(state)
     assert document["rules"] == [expected, "MATCH,REJECT"]
@@ -142,7 +153,7 @@ def test_unsupported_rule_kind_fails_closed() -> None:
     state = DesiredForwarderState(
         listener_specs=(ForwarderListenerDTO("listener", "socks", "127.0.0.1", 7891, "BLOCK"),),
         rules=({"match": "TYPO", "value": "x", "target": "BLOCK"},),
-        deployment_constants={"api-secret-ref": "mihomo/api-secret", "api-secret-revision": 1},
+        deployment_constants=mihomo_constants(),
     )
     with pytest.raises(MihomoProjectionError, match="RULE_TYPE_UNSUPPORTED"):
         compose_mihomo_document(state)
@@ -165,7 +176,7 @@ def test_malformed_rule_values_fail_closed(kind: str, value: str) -> None:
             {"match": kind, "value": value, "target": "BLOCK"},
             {"match": "MATCH", "target": "BLOCK"},
         ),
-        deployment_constants={"api-secret-ref": "mihomo/api-secret", "api-secret-revision": 1},
+        deployment_constants=mihomo_constants(),
     )
     with pytest.raises(MihomoProjectionError, match="RULE_VALUE_INVALID"):
         compose_mihomo_document(state)
@@ -187,7 +198,7 @@ def test_controller_identity_is_required_by_composer() -> None:
             dns=state.dns,
             transport_materializations=state.transport_materializations,
             transport_references=state.transport_references,
-            deployment_constants=constants,
+            deployment_constants={"external-controller": "172.30.0.10:9090", **constants},
         )
         with pytest.raises(MihomoProjectionError):
             compose_mihomo_document(invalid)
@@ -205,7 +216,7 @@ def test_logical_block_requires_exact_canonical_spelling(target: str, expected: 
     invalid = DesiredForwarderState(
         listener_specs=(ForwarderListenerDTO("listener", "socks", "127.0.0.1", 10001, target),),
         rules=({"match": "MATCH", "target": target},),
-        deployment_constants={"api-secret-ref": "mihomo/api-secret", "api-secret-revision": 1},
+        deployment_constants=mihomo_constants(),
     )
     with pytest.raises(MihomoProjectionError, match=expected):
         compose_mihomo_document(invalid)
@@ -235,6 +246,7 @@ def test_mihomo_builtin_and_logical_identities_are_reserved(name: str) -> None:
                 proxies=({"name": name, "type": "ss"},),
                 rules=({"match": "MATCH", "target": "BLOCK"},),
                 deployment_constants={
+                    "external-controller": "172.30.0.10:9090",
                     "api-secret-ref": "mihomo/api-secret",
                     "api-secret-revision": 1,
                 },
@@ -255,6 +267,7 @@ def test_mihomo_builtin_identity_is_reserved_for_groups(name: str) -> None:
                 proxy_groups=({"name": name, "type": "select", "proxies": ("proxy",)},),
                 rules=({"match": "MATCH", "target": "BLOCK"},),
                 deployment_constants={
+                    "external-controller": "172.30.0.10:9090",
                     "api-secret-ref": "mihomo/api-secret",
                     "api-secret-revision": 1,
                 },
@@ -326,7 +339,11 @@ def test_controller_secret_ref_must_be_canonical(ref: str) -> None:
         dns=state.dns,
         transport_materializations=state.transport_materializations,
         transport_references=state.transport_references,
-        deployment_constants={"api-secret-ref": ref, "api-secret-revision": 1},
+        deployment_constants={
+            "external-controller": "172.30.0.10:9090",
+            "api-secret-ref": ref,
+            "api-secret-revision": 1,
+        },
     )
     with pytest.raises(MihomoProjectionError, match="CONTROLLER_SECRET_REF_INVALID"):
         compose_mihomo_document(invalid)
@@ -347,7 +364,7 @@ def test_domain_canonicalization_is_ascii_and_bounded(domain: str) -> None:
             {"match": "DOMAIN", "value": domain, "target": "BLOCK"},
             {"match": "MATCH", "target": "BLOCK"},
         ),
-        deployment_constants={"api-secret-ref": "mihomo/api-secret", "api-secret-revision": 1},
+        deployment_constants=mihomo_constants(),
     )
     with pytest.raises(MihomoProjectionError, match="RULE_VALUE_INVALID"):
         compose_mihomo_document(state)
@@ -360,10 +377,60 @@ def test_ascii_domain_is_lowercased_deterministically() -> None:
             {"match": "DOMAIN", "value": "EXAMPLE.COM", "target": "BLOCK"},
             {"match": "MATCH", "target": "BLOCK"},
         ),
-        deployment_constants={"api-secret-ref": "mihomo/api-secret", "api-secret-revision": 1},
+        deployment_constants=mihomo_constants(),
     )
     document, _ = compose_mihomo_document(state)
     assert document["rules"] == ["DOMAIN,example.com,REJECT", "MATCH,REJECT"]
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        "127.0.0.1:9090",
+        "0.0.0.0:9090",
+        "mihomo:9090",
+        "172.30.0.10:0",
+        "172.30.0.10:65536",
+        " 172.30.0.10:9090",
+        "172.30.0.10:9090 ",
+        "172.30.0.10:90\n90",
+    ],
+)
+def test_controller_address_is_reachable_and_canonical(address: str) -> None:
+    state = snapshot()
+    invalid = DesiredForwarderState(
+        listener_specs=state.listener_specs,
+        proxies=state.proxies,
+        proxy_groups=state.proxy_groups,
+        rules=state.rules,
+        dns=state.dns,
+        transport_materializations=state.transport_materializations,
+        transport_references=state.transport_references,
+        deployment_constants={
+            **dict(state.deployment_constants),
+            "external-controller": address,
+        },
+    )
+    with pytest.raises(MihomoProjectionError, match="CONTROLLER_ADDRESS_INVALID"):
+        compose_mihomo_document(invalid)
+
+
+def test_controller_address_is_required() -> None:
+    state = snapshot()
+    invalid_constants = dict(state.deployment_constants)
+    invalid_constants.pop("external-controller")
+    invalid = DesiredForwarderState(
+        listener_specs=state.listener_specs,
+        proxies=state.proxies,
+        proxy_groups=state.proxy_groups,
+        rules=state.rules,
+        dns=state.dns,
+        transport_materializations=state.transport_materializations,
+        transport_references=state.transport_references,
+        deployment_constants=invalid_constants,
+    )
+    with pytest.raises(MihomoProjectionError, match="CONTROLLER_ADDRESS_INVALID"):
+        compose_mihomo_document(invalid)
 
 
 def test_transport_proof_changes_projection_identity() -> None:
@@ -415,7 +482,7 @@ def test_proxy_and_group_identity_is_unambiguous(
         proxies=proxies,
         proxy_groups=groups,
         rules=({"match": "MATCH", "target": "BLOCK"},),
-        deployment_constants={"api-secret-ref": "mihomo/api-secret", "api-secret-revision": 1},
+        deployment_constants=mihomo_constants(),
     )
     with pytest.raises(MihomoProjectionError, match=expected):
         compose_mihomo_document(state)
@@ -480,6 +547,7 @@ def test_fallback_policy_is_fail_closed(
                 transport_materializations=(materialization(1, "A", {"proxies": []}),),
                 transport_references=(TransportMaterializationReference(1, "A", 1, "cache/1"),),
                 deployment_constants={
+                    "external-controller": "172.30.0.10:9090",
                     "api-secret-ref": "mihomo/api-secret",
                     "api-secret-revision": 1,
                 },
@@ -519,6 +587,7 @@ def test_deleted_desired_entries_are_not_retained() -> None:
         compose_mihomo_document(
             DesiredForwarderState(
                 deployment_constants={
+                    "external-controller": "172.30.0.10:9090",
                     "api-secret-ref": "mihomo/api-secret",
                     "api-secret-revision": 1,
                 }
@@ -614,7 +683,10 @@ def test_missing_secret_revision_fails_closed() -> None:
     state = DesiredForwarderState(
         listener_specs=(ForwarderListenerDTO("listener", "socks", "127.0.0.1", 7891, "BLOCK"),),
         rules=({"match": "MATCH", "target": "BLOCK"},),
-        deployment_constants={"api-secret-ref": "mihomo/api-secret"},
+        deployment_constants={
+            "external-controller": "172.30.0.10:9090",
+            "api-secret-ref": "mihomo/api-secret",
+        },
     )
     with pytest.raises(MihomoProjectionError, match="SECRET_REVISION_INVALID"):
         provider.render(state)
@@ -633,6 +705,9 @@ def test_finalized_candidate_content_is_immutable() -> None:
 
 def test_generic_candidate_and_template_cannot_be_applied() -> None:
     class Runtime:
+        def controller_secret_matches(self, secret: str) -> bool:
+            return False
+
         def backup(self) -> object:
             raise AssertionError("backup must not run")
 

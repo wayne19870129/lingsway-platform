@@ -2841,11 +2841,24 @@ YAML.
 | Mihomo section | Owner/source | Required validation | Secret handling |
 |---|---|---|---|
 | core constants | deployment constants | allowlisted values only | no plaintext secret |
-| dns | desired snapshot | mapping/schema validation | no secret values |
-| controller | deployment constants | fixed canonical address shape | operation input only |
+| dns | desired snapshot | canonical mapping/value ownership only; full Mihomo DNS field/type validation is later candidate-schema/runtime validation before production activation | no secret values |
+| controller | deployment constants | controller bind is deployment-owned and must be backend-net reachable; current canonical address is `172.30.0.10:9090`, with valid non-loopback/non-wildcard IP:port shape; no host port publication | operation input only; controller secret remains required |
 | controller secret | `DesiredForwarderState` opaque `api-secret-ref` + explicit revision; `ProjectionTemplate` binds both into identity; `ControllerSecretResolver.resolve(exact_ref)` returns `(ref, revision, plaintext)`; `finalize()` creates provenance-bound `MihomoCandidateConfig` | exact ref/revision match, non-blank plaintext, generic/template candidates rejected by apply | only final runtime `secret` contains plaintext; ref/revision stay out of YAML, repr, logs, and docs; opaque ref and non-sensitive revision are included in projection identity, while plaintext is excluded from fingerprints |
 | proxy-providers | explicitly unsupported in S04-A | omitted, never emitted as an empty placeholder | n/a |
 | proxies | verified transport materialization plus desired non-conflicting entries | identity, type, and cross-reference validation | materialized content is hash-verified |
 | proxy-groups | desired snapshot | every proxy reference must resolve | no credential-bearing repr |
 | listeners | immutable `listener_specs` snapshot values | name/type/address/port/target uniqueness and range checks; logical `BLOCK` renders as `REJECT` | no secret values |
 | rules | desired snapshot | canonical Mihomo serialization; provider-neutral final `MATCH,BLOCK` renders as runtime `MATCH,REJECT` | no secret values |
+
+The checked-in container topology makes loopback-only controller configuration
+invalid: backend-api and traffic-attribution reach Mihomo through the internal
+`mihomo:9090` service while Mihomo binds its backend-net address. S04-A does
+not change Docker networking or claim full DNS schema validation; both remain
+explicit later activation/runtime-validation gates.
+
+S04-A supports only an unchanged controller secret. If the finalized
+candidate secret matches the currently configured runtime API secret, the
+apply path may proceed. If it differs, apply fails closed before backup,
+install, or reload with no runtime mutation. Safe old-secret-to-new-secret
+transition, including rollback authentication, is later controlled
+S04-B/S04-C work and is not claimed here.
