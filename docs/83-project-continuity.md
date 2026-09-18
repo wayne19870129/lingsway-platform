@@ -57,9 +57,9 @@ materialization is restricted input, not Mihomo activation.
   secret revision/snapshot boundary, lazy registry ownership, isolated cache
   identity, and scheduler record isolation. It must not invent DB-aware generic
   provider contracts, plaintext URL configuration, mutable current-provider
-  state, mock fallback, or Mihomo activation. Merge/readiness still depends on
-  exact-head review and green checks; after merge, subscription registry wiring
-  is implemented, but this does not authorize Mihomo activation or production
+  state, mock fallback, or Mihomo activation. Its exact-head review and check
+  requirements were satisfied before merge; subscription registry wiring is
+  implemented. This does not authorize Mihomo activation or production
   deployment.
 - **S04-A:** ACTIVE on the projection-foundation branch. It establishes the
   ADR-023 immutable/versioned desired snapshot, deterministic full-document

@@ -276,13 +276,16 @@ class DesiredForwarderState:
 class CandidateConfig:
     """Immutable candidate whose generic dataclass serialization is unavailable."""
 
-    __slots__ = ("_content", "_version")
+    __slots__ = ("_content", "_version", "_finalized")
     _content: Mapping[str, object]
     _version: str
 
-    def __init__(self, content: Mapping[str, object], version: str) -> None:
+    def __init__(
+        self, content: Mapping[str, object], version: str, *, finalized: bool = True
+    ) -> None:
         object.__setattr__(self, "_content", content)
         object.__setattr__(self, "_version", version)
+        object.__setattr__(self, "_finalized", finalized)
 
     @property
     def content(self) -> Mapping[str, object]:
@@ -292,11 +295,22 @@ class CandidateConfig:
     def version(self) -> str:
         return self._version
 
+    @property
+    def finalized(self) -> bool:
+        return self._finalized
+
     def __setattr__(self, name: str, value: object) -> None:
         raise AttributeError(f"{type(self).__name__} is immutable")
 
     def __repr__(self) -> str:
         return f"CandidateConfig(version={self.version!r}, content=<redacted>)"
+
+
+class ProjectionTemplate(CandidateConfig):
+    """Secret-free, non-installable projection awaiting operation finalization."""
+
+    def __init__(self, content: Mapping[str, object], version: str) -> None:
+        super().__init__(content, version, finalized=False)
 
     def __eq__(self, other: object) -> bool:
         return (

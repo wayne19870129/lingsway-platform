@@ -113,6 +113,10 @@ def _validate_materialization(item: object) -> TransportMaterialization:
 
 
 def _validate_sections(desired: DesiredForwarderState) -> None:
+    if desired.listeners:
+        raise MihomoProjectionError("MIHOMO_LEGACY_LISTENERS_UNSUPPORTED")
+    if desired.policy:
+        raise MihomoProjectionError("MIHOMO_POLICY_UNSUPPORTED")
     if not desired.listener_specs:
         raise MihomoProjectionError("MIHOMO_LISTENER_SPEC_REQUIRED")
     listener_names: set[str] = set()
@@ -126,7 +130,12 @@ def _validate_sections(desired: DesiredForwarderState) -> None:
             item.get("port"),
             item.get("proxy"),
         )
-        if not all(isinstance(value, str) for value in (name, kind, address, target)):
+        if not (
+            isinstance(name, str)
+            and isinstance(kind, str)
+            and isinstance(address, str)
+            and isinstance(target, str)
+        ):
             raise MihomoProjectionError("MIHOMO_LISTENER_INVALID")
         if (
             kind not in {"socks", "http", "mixed"}
@@ -160,12 +169,19 @@ def _validate_sections(desired: DesiredForwarderState) -> None:
         if listener.get("proxy") not in allowed_targets:
             raise MihomoProjectionError("MIHOMO_LISTENER_TARGET_INVALID")
     fallback_rules: list[Mapping[str, object]] = []
+    supported_rules = {"DOMAIN", "DOMAIN-SUFFIX", "IP-CIDR"}
     for rule in desired.rules:
         rule = _mapping(rule, "MIHOMO_RULE_INVALID")
         match = rule.get("match")
         target = rule.get("target")
         if not isinstance(match, str) or not isinstance(target, str):
             raise MihomoProjectionError("MIHOMO_RULE_INVALID")
+        if match.upper() != "MATCH":
+            value = rule.get("value")
+            if match.upper() not in supported_rules or not isinstance(value, str) or not value:
+                raise MihomoProjectionError("MIHOMO_RULE_TYPE_UNSUPPORTED")
+        elif rule.get("value") not in (None, ""):
+            raise MihomoProjectionError("MIHOMO_MATCH_VALUE_INVALID")
         if match.upper() == "MATCH":
             fallback_rules.append(rule)
         if match.upper() == "MATCH" and target.upper() == "DIRECT":
@@ -258,19 +274,25 @@ def compose_mihomo_document(desired: DesiredForwarderState) -> tuple[dict[str, o
         "external-controller": "127.0.0.1:9090",
         **dict(desired.deployment_constants),
     }
+
+    def serialize_rule(rule: Mapping[str, object]) -> str:
+        match = rule.get("match")
+        target = rule.get("target")
+        if not isinstance(match, str) or not isinstance(target, str):
+            raise MihomoProjectionError("MIHOMO_RULE_INVALID")
+        if match.upper() == "MATCH":
+            return f"MATCH,{target}"
+        value = rule.get("value")
+        if not isinstance(value, str) or not value:
+            raise MihomoProjectionError("MIHOMO_RULE_INVALID")
+        return f"{match.upper()},{value},{target}"
+
     raw_document: dict[str, object] = {
         **constants,
         "listeners": list(desired.listener_specs),
         "proxies": list(effective_proxies),
         "proxy-groups": list(desired.proxy_groups),
-        "rules": [
-            (
-                f"{rule['match']},{rule['target']}"
-                if str(rule["match"]).upper() == "MATCH"
-                else f"{rule['match']},{rule.get('value')},{rule['target']}"
-            )
-            for rule in desired.rules
-        ],
+        "rules": [serialize_rule(rule) for rule in desired.rules],
         "dns": dict(desired.dns),
     }
     secret_ref = desired.deployment_constants.get("api-secret-ref")

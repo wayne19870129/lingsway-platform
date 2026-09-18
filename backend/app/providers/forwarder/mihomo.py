@@ -22,6 +22,7 @@ from backend.app.providers.base import (
     DesiredForwarderState,
     ForwarderProvider,
     HealthReport,
+    ProjectionTemplate,
 )
 from backend.app.providers.forwarder.mihomo_projection import compose_mihomo_document
 
@@ -71,9 +72,7 @@ class LocalMihomoRuntime:
 
     def reload(self) -> None:
         api = self.api_url.rstrip("/") + "/configs?" + urlencode({"force": "true"})
-        payload = json.dumps(
-            {"path": self.runtime_config_path or str(self.config_path)}
-        ).encode()
+        payload = json.dumps({"path": self.runtime_config_path or str(self.config_path)}).encode()
         request = Request(
             api,
             data=payload,
@@ -116,7 +115,7 @@ class MihomoForwarderProvider(ForwarderProvider):
     def __init__(self, runtime: MihomoRuntime) -> None:
         self._runtime = runtime
 
-    def render(self, desired: DesiredForwarderState) -> CandidateConfig:
+    def render(self, desired: DesiredForwarderState) -> ProjectionTemplate:
         document_data, version = compose_mihomo_document(desired)
         document = yaml.safe_dump(document_data, sort_keys=False).encode()
         try:
@@ -125,9 +124,20 @@ class MihomoForwarderProvider(ForwarderProvider):
             raise MihomoRuntimeError("rendered Mihomo document is invalid YAML") from exc
         if not isinstance(parsed, Mapping):
             raise MihomoRuntimeError("rendered Mihomo document is not a mapping")
-        return CandidateConfig(dict(parsed), version)
+        return ProjectionTemplate(dict(parsed), version)
+
+    def finalize(self, template: ProjectionTemplate, controller_secret: str) -> CandidateConfig:
+        if not isinstance(template, ProjectionTemplate) or template.finalized:
+            raise MihomoRuntimeError("invalid Mihomo projection template")
+        if not controller_secret:
+            raise MihomoRuntimeError("Mihomo controller secret resolution failed")
+        content = dict(template.content)
+        content["secret"] = controller_secret
+        return CandidateConfig(content, template.version, finalized=True)
 
     def apply(self, candidate: CandidateConfig) -> ApplyResult:
+        if not candidate.finalized:
+            raise MihomoRuntimeError("cannot install non-finalized Mihomo projection")
         backup = self._runtime.backup()
         document = yaml.safe_dump(candidate.content, sort_keys=False).encode()
 
@@ -152,9 +162,7 @@ class MihomoForwarderProvider(ForwarderProvider):
 
         return ApplyResult(True, candidate.version)
 
-    def _rollback(
-        self, backup: Path, *, failure_summary: str, cause: Exception | None
-    ) -> NoReturn:
+    def _rollback(self, backup: Path, *, failure_summary: str, cause: Exception | None) -> NoReturn:
         """Restore the previous config and re-verify health; always raises.
 
         A restored file plus a reload command that returns cleanly is not
@@ -168,8 +176,7 @@ class MihomoForwarderProvider(ForwarderProvider):
             rollback_report = self._runtime.health()
         except Exception as rollback_exc:
             raise MihomoRuntimeError(
-                f"{failure_summary} and rollback failed; configuration "
-                "state is unknown"
+                f"{failure_summary} and rollback failed; configuration state is unknown"
             ) from rollback_exc
         if not rollback_report.healthy:
             raise MihomoRuntimeError(
@@ -184,9 +191,7 @@ class MihomoForwarderProvider(ForwarderProvider):
 
 def local_runtime_from_env() -> LocalMihomoRuntime:
     target = Path(os.environ.get("MIHOMO_CONFIG_PATH", "data/mihomo/config.yaml")).resolve()
-    backup_dir = Path(
-        os.environ.get("MIHOMO_BACKUP_DIR", str(target.parent / "backups"))
-    ).resolve()
+    backup_dir = Path(os.environ.get("MIHOMO_BACKUP_DIR", str(target.parent / "backups"))).resolve()
     api_secret = os.environ.get("MIHOMO_API_SECRET", "").strip()
     if not api_secret:
         raise MihomoRuntimeError("MIHOMO_API_SECRET is required")

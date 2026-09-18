@@ -35,7 +35,6 @@ def materialization(owner: int, code: str, content: dict[str, object]) -> Transp
 
 def snapshot() -> DesiredForwarderState:
     return DesiredForwarderState(
-        listeners={"listener-a": "127.0.0.1:10001"},
         listener_specs=(
             {
                 "name": "listener-a",
@@ -49,7 +48,6 @@ def snapshot() -> DesiredForwarderState:
         proxy_groups=({"name": "AUTO", "type": "select", "proxies": ["proxy-a"]},),
         rules=({"match": "MATCH", "target": "BLOCK"},),
         dns={"enable": True},
-        policy={"mode": "strict"},
         transport_materializations=(
             materialization(
                 1,
@@ -99,18 +97,63 @@ def test_canonical_mihomo_document_contract() -> None:
     assert document["listeners"][0]["port"] == 10001
 
 
+@pytest.mark.parametrize(
+    ("kind", "value", "expected"),
+    [
+        ("DOMAIN", "example.com", "DOMAIN,example.com,BLOCK"),
+        ("DOMAIN-SUFFIX", "example.com", "DOMAIN-SUFFIX,example.com,BLOCK"),
+        ("IP-CIDR", "192.0.2.0/24", "IP-CIDR,192.0.2.0/24,BLOCK"),
+    ],
+)
+def test_supported_rule_kinds_serialize_canonically(kind: str, value: str, expected: str) -> None:
+    state = DesiredForwarderState(
+        listener_specs=(
+            {
+                "name": "listener",
+                "type": "socks",
+                "listen": "127.0.0.1",
+                "port": 7890,
+                "proxy": "BLOCK",
+            },
+        ),
+        rules=(
+            {"match": kind, "value": value, "target": "BLOCK"},
+            {"match": "MATCH", "target": "BLOCK"},
+        ),
+        deployment_constants={"api-secret-ref": "mihomo/api-secret"},
+    )
+    document, _ = compose_mihomo_document(state)
+    assert document["rules"] == [expected, "MATCH,BLOCK"]
+
+
+def test_unsupported_rule_kind_fails_closed() -> None:
+    state = DesiredForwarderState(
+        listener_specs=(
+            {
+                "name": "listener",
+                "type": "socks",
+                "listen": "127.0.0.1",
+                "port": 7890,
+                "proxy": "BLOCK",
+            },
+        ),
+        rules=({"match": "TYPO", "value": "x", "target": "BLOCK"},),
+        deployment_constants={"api-secret-ref": "mihomo/api-secret"},
+    )
+    with pytest.raises(MihomoProjectionError, match="RULE_TYPE_UNSUPPORTED"):
+        compose_mihomo_document(state)
+
+
 def test_transport_proof_changes_projection_identity() -> None:
     state = snapshot()
     _, baseline = compose_mihomo_document(state)
     changed_hash = materialization(1, "A", {"proxies": [{"name": "changed", "type": "ss"}]})
     changed = DesiredForwarderState(
-        listeners=state.listeners,
         listener_specs=state.listener_specs,
         proxies=state.proxies,
         proxy_groups=state.proxy_groups,
         rules=state.rules,
         dns=state.dns,
-        policy=state.policy,
         transport_materializations=(changed_hash,),
         transport_references=state.transport_references,
         deployment_constants=state.deployment_constants,
@@ -124,13 +167,11 @@ def test_transport_proof_changes_projection_identity() -> None:
 def test_transport_reference_must_match_materialization_exactly() -> None:
     state = snapshot()
     mismatched = DesiredForwarderState(
-        listeners=state.listeners,
         listener_specs=state.listener_specs,
         proxies=state.proxies,
         proxy_groups=state.proxy_groups,
         rules=state.rules,
         dns=state.dns,
-        policy=state.policy,
         transport_materializations=state.transport_materializations,
         transport_references=(TransportMaterializationReference(9, "A", 1, "cache/1"),),
     )

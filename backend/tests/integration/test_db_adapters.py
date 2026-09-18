@@ -453,9 +453,8 @@ def test_mihomo_render_failure_restores_exact_pre_operation_state(
     config_path.write_bytes(original)
     runtime = FailingMihomoRuntime(config_path)
     provider = MihomoForwarderProvider(runtime)
-    candidate = provider.render(
+    template = provider.render(
         DesiredForwarderState(
-            listeners={"listener": "127.0.0.1"},
             listener_specs=(
                 {
                     "name": "listener",
@@ -470,6 +469,7 @@ def test_mihomo_render_failure_restores_exact_pre_operation_state(
         )
     )
 
+    candidate = provider.finalize(template, "test-api-secret")
     with pytest.raises(MihomoRuntimeError):
         provider.apply(candidate)
 
@@ -530,9 +530,8 @@ def test_mihomo_unhealthy_post_reload_restores_exact_pre_operation_state(
     config_path.write_bytes(original)
     runtime = FailingMihomoRuntime(config_path, fail_reload_count=0, health_values=[False, True])
     provider = MihomoForwarderProvider(runtime)
-    candidate = provider.render(
+    template = provider.render(
         DesiredForwarderState(
-            listeners={"listener": "127.0.0.1"},
             listener_specs=(
                 {
                     "name": "listener",
@@ -547,6 +546,7 @@ def test_mihomo_unhealthy_post_reload_restores_exact_pre_operation_state(
         )
     )
 
+    candidate = provider.finalize(template, "test-api-secret")
     with pytest.raises(MihomoRuntimeError, match="unhealthy"):
         provider.apply(candidate)
 
