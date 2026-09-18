@@ -155,8 +155,8 @@ Claude 的产出形态是：ADR、TASK 文件、`docs/81-reviews/REVIEW-*.md`、
 
 ### 代码健康度
 
-`ruff`（含 `ops/` 与 `infrastructure/`）、`mypy --strict`、588 个
-unit+guard 测试全绿。23 个 Alembic migration 单根单头无分叉。`domain/` 层
+`ruff`（含 `ops/` 与 `infrastructure/`）、`mypy --strict`、596 个
+unit+guard 测试全绿；前端 `tsc` / `eslint` / `next build` 全绿。23 个 Alembic migration 单根单头无分叉。`domain/` 层
 零外部依赖。**代码质量是好的。**
 
 ### provider 接线矩阵
