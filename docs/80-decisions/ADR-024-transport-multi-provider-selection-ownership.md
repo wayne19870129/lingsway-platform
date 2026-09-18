@@ -167,23 +167,33 @@ material.
 Secret resolution is completed in its own short DB transaction/lock scope.
 `SELECT ... FOR UPDATE` may protect the purpose-bound read, but the transaction
 and row lock must be released before `sync_nodes()` begins its external HTTP
-request. The plaintext URL exists only in the narrow operation-scoped provider
-construction/sync lifetime and is never placed in the descriptor, logs, reprs,
-exceptions, docs, commits, or PR text. A secret update racing with resolution
-is handled by the next sync/revision check; no DB lock is held across network
-I/O.
+request. The chosen lifetime model matches the current provider: the resolved
+plaintext URL may be retained privately in memory by that owned provider for
+the provider's process lifetime. It is never placed in Settings, the
+descriptor, DB plaintext, cache metadata, reprs, logs, exceptions, docs,
+commits, or PR text. A changed revision fails closed before any further
+`sync_nodes()` call using the old provider; controlled restart is required
+before the new secret becomes active. No automatic hot replacement is part of
+S03-B, and normal ProviderRegistry shutdown still closes the retained provider
+and client. A secret update racing with resolution is handled by the next
+sync/revision check; no DB lock is held across network I/O.
 
 ### 7. Scheduler contract and failure isolation
 
-For each enabled subscription record, the scheduler must resolve the concrete
-provider using that record's exact code, then call:
+For each enabled subscription record, the scheduler must build and pass the
+full immutable `TransportProviderDescriptor`. The resolver validates the full
+descriptor identity, with `code` as one identity component rather than a
+code-only lookup key or fallback, and returns a provider verified as bound to
+the descriptor's `record_id` and `code`. The scheduler then calls:
 
 ```text
 refresh_provider_inventory(db, record, resolved_provider)
 ```
 
-The resolver must guarantee that the provider's bound code and cache identity
-match the record before this call. Since the refresh function writes only under
+The resolver must guarantee that the provider's bound record identity, code,
+and cache identity match the descriptor and record before this call. Unknown,
+duplicate, ambiguous, or mismatched descriptors fail closed; there is no
+code-only or mock fallback. Since the refresh function writes only under
 the record argument, this establishes the invariant that record A cannot be
 refreshed using record B's endpoints or capacity. The scheduler catches
 resolution and sync failures per record, rolls back only that record's failed
