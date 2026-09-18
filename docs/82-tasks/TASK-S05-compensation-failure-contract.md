@@ -1,6 +1,6 @@
 # TASK-S05-补偿动作失败的所有权契约
 
-> **状态：已实现**（2026-09-18，与 ADR-025 同一 PR）。ADR-025 已由 User 确认
+> **状态：已实现**（2026-09-18，与 ADR-026 同一 PR）。ADR-026 已由 User 确认
 > 为「已接受」，本任务据此实现。验收结果见文末「实际交付」。
 
 ## 目标
@@ -10,7 +10,7 @@
 `backend/app/domain/provisioning.py` 的另外三处补偿路径，并补齐当前完全缺失
 的测试覆盖。
 
-架构依据：**ADR-025**（须先由 User 确认为「已接受」后再动
+架构依据：**ADR-026**（须先由 User 确认为「已接受」后再动
 `backend/app/domain/`，见 `AGENTS.md` 铁律第 5 条）。
 
 交付后必须成立的可验证结果：
@@ -22,7 +22,7 @@
    - 控制流**一定**走到一个明确终态，绝不因补偿异常穿透而把 run 留在
      `RUNNING`；
    - 结果是 `PENDING_MANUAL`，不是 `FAILED`（因此按既有约定**不**回滚 DB、
-     **不**在本方法内写终态——见 ADR-025「决策」第 4 条）。
+     **不**在本方法内写终态——见 ADR-026「决策」第 4 条）。
 2. 新增 `PendingManualReason.FORWARDER_COMPENSATION_FAILED` 与
    `.GATEWAY_COMPENSATION_FAILED`，且二者在
    `PENDING_MANUAL_BUSINESS_MESSAGES` 中各有一条固定、安全的业务文案。
@@ -32,7 +32,7 @@
 
 ## 约束
 
-- **改动 `backend/app/domain/` 之前必须先有已接受的 ADR-025**（铁律 5）。
+- **改动 `backend/app/domain/` 之前必须先有已接受的 ADR-026**（铁律 5）。
   ADR 仍是「提议中」时不得开始实现。
 - 不得引入自动重试或完整开通状态机——`ARCHITECTURE.md` §13 明确列为不做项。
 - 不得改变 ADR-017 的相位切分与 run 终态持久化顺序（调用方在自己的业务提交
@@ -51,7 +51,7 @@
 backend/app/domain/provisioning.py
 backend/app/services.py
 backend/tests/unit/test_domain.py
-docs/80-decisions/ADR-025-compensation-failure-ownership.md   # 仅状态改为「已接受」
+docs/80-decisions/ADR-026-compensation-failure-ownership.md   # 仅状态改为「已接受」
 docs/83-project-continuity.md                                  # 仅更新 §8 第 1 条
 ```
 
@@ -64,7 +64,7 @@ make lint     # ruff check backend ops infrastructure scripts + mypy + 前端
 python -m pytest backend/tests/unit backend/tests/guards
 ```
 
-新增测试必须覆盖 ADR-025「验证要求」一节列出的全部四种情形：
+新增测试必须覆盖 ADR-026「验证要求」一节列出的全部四种情形：
 
 1. 步骤 5 失败 + 补偿 apply **成功** → `FAILED`，抛出原始异常，DB 已回滚。
 2. 步骤 5 失败 + 补偿 apply **也失败** → `PENDING_MANUAL`
@@ -118,9 +118,9 @@ FAILED test_provision_never_marks_a_pending_manual_phase_b_run_succeeded
 FAILED test_lock_acquisition_compensation_failure_is_pending_manual
 ```
 
-与 ADR-025 原稿的**一处修正**：原稿「验证要求」写的是补偿失败时"DB 已回滚、
+与 ADR-026 原稿的**一处修正**：原稿「验证要求」写的是补偿失败时"DB 已回滚、
 run 终态已写"。实现时核对既有三条 `PENDING_MANUAL` 路径
 （`CREATE_TENANT`、`ACCOUNTING_CREATE_AMBIGUOUS`、
 `ACCOUNTING_COMPENSATION_FAILED`）后确认约定恰好相反——`PENDING_MANUAL`
 **刻意保留**部分 DB 状态供人工核查，终态由调用方在自己的业务提交之后才写
-（ADR-017）。ADR-025 已按实现更正，理由见其「决策」第 4 条。
+（ADR-017）。ADR-026 已按实现更正，理由见其「决策」第 4 条。

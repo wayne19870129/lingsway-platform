@@ -75,7 +75,7 @@ class PendingManualReason(StrEnum):
     EXTERNAL_TENANT_CREATION = "EXTERNAL_TENANT_CREATION"
     ACCOUNTING_CREATE_AMBIGUOUS = "ACCOUNTING_CREATE_AMBIGUOUS"
     ACCOUNTING_COMPENSATION_FAILED = "ACCOUNTING_COMPENSATION_FAILED"
-    # ADR-025: the two compensation actions outside CREATE_ACCOUNTING_USER
+    # ADR-026: the two compensation actions outside CREATE_ACCOUNTING_USER
     # that can themselves fail, leaving a real external side effect that
     # nothing has undone. Reported as PENDING_MANUAL for the same reason
     # ACCOUNTING_COMPENSATION_FAILED is -- a plain FAILED would claim the
@@ -321,7 +321,7 @@ class ProvisioningService:
             return prepared
         outcome = self.provision_apply_gateway(prepared, request)
         if outcome.status is ProvisionStatus.PENDING_MANUAL:
-            # ADR-025: phase B can now also end PENDING_MANUAL (gateway
+            # ADR-026: phase B can now also end PENDING_MANUAL (gateway
             # compensation failed). That is not a success, so it must never
             # be marked SUCCEEDED.
             self.mark_run_pending_manual(outcome.run_id, outcome.pending_manual_error)
@@ -434,7 +434,7 @@ class ProvisioningService:
             try:
                 self.forwarder.apply(self.forwarder.render(previous_forwarder))
             except Exception as restore_exc:
-                # ADR-025: the compensating restore itself failed, so the
+                # ADR-026: the compensating restore itself failed, so the
                 # forwarder's runtime configuration is in an unknown state
                 # -- this can never be reported as a plain, fully-compensated
                 # FAILED. Same shape as CREATE_ACCOUNTING_USER's
@@ -578,7 +578,7 @@ class ProvisioningService:
             try:
                 self.accounting.disable_user(request.username)
             except Exception as disable_exc:
-                # ADR-025: the accounting user created in phase A may still
+                # ADR-026: the accounting user created in phase A may still
                 # be enabled. Never a plain FAILED -- identical treatment to
                 # CREATE_ACCOUNTING_USER's compensation-failed branch
                 # (ADR-018): no rollback, no internal mark_status(), and
@@ -734,7 +734,7 @@ class ProvisioningService:
         call order: rollback, then this method, then the business-side
         ``fail_paid_purchase()``.
 
-        ADR-025: returns ``None`` when compensation succeeded (the run is
+        ADR-026: returns ``None`` when compensation succeeded (the run is
         durably ``FAILED`` and the caller should continue its own failure
         path), or a ``PENDING_MANUAL`` :class:`ProvisionOutcome` when
         ``disable_user()`` itself failed -- keeping this path semantically

@@ -394,7 +394,7 @@ def confirm_payment_and_provision(
         # provision_prepare() itself. mark_run_pending_manual() is
         # best-effort (never raises), so a Job-write hiccup at this point
         # cannot turn this already-committed, legitimate manual-review
-        # business state into anything else. ADR-025 added
+        # business state into anything else. ADR-026 added
         # FORWARDER_COMPENSATION_FAILED as a fourth phase-A source; it
         # needs no special handling here because the reason -> message
         # lookup below is generic.
@@ -442,7 +442,7 @@ def confirm_payment_and_provision(
                 raise
 
             if outcome.status is ProvisionStatus.PENDING_MANUAL:
-                # ADR-025: APPLY_GATEWAY failed *and* its compensation
+                # ADR-026: APPLY_GATEWAY failed *and* its compensation
                 # (disable_user) also failed, so the accounting user may
                 # still be enabled and the gateway was never applied. This
                 # must never reach activate_paid_purchase() -- activating
@@ -485,7 +485,7 @@ def confirm_payment_and_provision(
         state.rollback_database()
         pending = provisioning.fail_apply_gateway_lock_acquisition(prepared, request, lock_exc)
         if pending is not None:
-            # ADR-025: disabling the phase-A accounting user itself failed,
+            # ADR-026: disabling the phase-A accounting user itself failed,
             # so it may still be enabled. Reporting this as a plain
             # fail_paid_purchase() would claim a compensation that did not
             # happen -- record manual review instead, exactly as the

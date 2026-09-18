@@ -2862,3 +2862,70 @@ apply path may proceed. If it differs, apply fails closed before backup,
 install, or reload with no runtime mutation. Safe old-secret-to-new-secret
 transition, including rollback authentication, is later controlled
 S04-B/S04-C work and is not claimed here.
+
+## S04-B2 — Real Mihomo runtime reconciliation inputs (moved out of this TASK)
+
+> **This TASK is no longer the execution vehicle for S04-B2 or S04-C.**
+> Review 5250709934 (Major 3) established that S04-B2-B will touch
+> `backend/app/models/`, `backend/app/infra/`, and
+> `infrastructure/alembic/versions/` — none of which this file's own
+> 「允许修改的文件」 section authorizes (it covers only
+> `backend/app/providers/**`, `backend/app/core/config.py`,
+> `backend/tests/**`, and two docs paths). The current convention also
+> forbids opening new T-series numbers.
+>
+> **Execution TASK: [`TASK-S04-mihomo-activation.md`](TASK-S04-mihomo-activation.md)**
+> — it carries the 目标 / 约束 / 允许修改的文件 / 验收标准 for
+> S04-B2-A, S04-B2-B, and S04-C.
+>
+> The section below is retained as **historical provider-wiring context**
+> only. Where it and TASK-S04 disagree about scope or allowed paths,
+> TASK-S04 wins.
+
+S04-B1 is COMPLETE / merged.
+
+Merge commit:
+`c494ade7d40419afd1a812c8b5ddefb154b1c14c`
+
+S04-B2 owns:
+
+- real committed-DB full `DesiredForwarderState` assembler;
+- real transport materialization wiring;
+- real SQL-backed controller-secret resolver;
+- exact Mihomo runtime projection readback verifier;
+- candidate/runtime validation required before S04-C;
+- controlled reconciliation/recovery service boundary;
+- controlled release-blocker recovery where certainty is provable;
+- lifecycle/factory boundary needed by later S04-C.
+
+S04-B2 does NOT own:
+
+- registry `FORWARDER_PROVIDER=mihomo` selection;
+- production activation or deployment;
+- customer-facing success;
+- real production credentials.
+
+S04-B2-A is ACTIVE and architecture-only: it defines ADR-025, the global
+projection-generation authority **and the durable transport materialization
+receipt** that together unblock later implementation.
+
+S04-B2-B is NOT STARTED. It may begin only after **both** ADR-025 reaches
+`Accepted` (PR #128 merged) **and** `TASK-S04-mihomo-activation.md` is merged.
+See that TASK for the authorized file list — this file does not authorize it.
+
+### S04-B2 preflight architecture blocker
+
+Before ADR-025, implementation was intentionally stopped before business-code
+changes. The current accepted S04-A schema does not provide a durable monotonic revision
+for the complete Mihomo desired snapshot. `DesiredForwarderState.snapshot_revision`
+is a caller-supplied/default value, while `TransportVersion` and
+`EgressVersion` are separate domain versions and cannot represent one global
+complete Mihomo snapshot revision. No dedicated committed snapshot revision
+or equivalent durable record exists on `main`.
+
+S04-B2 must not derive this revision from process counters, current time,
+runtime state, cache metadata, random identifiers, or an in-memory hash. A
+schema/ADR decision and an additive migration (if accepted) are required
+before the real loader, freshness proof, and recovery service can be
+implemented. Until that blocker is resolved, `FORWARDER_PROVIDER=mihomo`
+remains non-selectable and no real Mihomo runtime I/O is authorized.

@@ -340,9 +340,9 @@ def test_step_6_created_disable_failure_uses_correct_pending_reason() -> None:
     assert accounting.delete_calls == []
 
 
-# --- ADR-025: compensation-action failures ---------------------------------
+# --- ADR-026: compensation-action failures ---------------------------------
 #
-# Before ADR-025 all four cases below shared one defect: the compensating
+# Before ADR-026 all four cases below shared one defect: the compensating
 # action was a bare call, so when it raised, the compensation exception
 # replaced the original failure, state.rollback_database() and the terminal
 # run status were both skipped, and the run stayed at RUNNING forever while a
@@ -401,7 +401,7 @@ def test_step_5_failure_with_successful_restore_stays_failed() -> None:
 
 
 def test_step_5_failure_with_failing_restore_is_pending_manual() -> None:
-    """ADR-025: the restore itself failed, so forwarder runtime state is
+    """ADR-026: the restore itself failed, so forwarder runtime state is
     unknown. The original failure must not be masked, and this must never be
     reported as a fully-compensated FAILED."""
     forwarder = _ForwarderFailsOnApply(restore_raises=True)
@@ -458,7 +458,7 @@ def test_step_7_failure_with_successful_disable_stays_failed() -> None:
 
 
 def test_step_7_failure_with_failing_disable_is_pending_manual() -> None:
-    """ADR-025: the accounting user may still be enabled, so this must be
+    """ADR-026: the accounting user may still be enabled, so this must be
     PENDING_MANUAL rather than a FAILED that claims full compensation."""
     accounting = _DisableFailsAccounting()
     state, runs = FakeState(), FakeRuns()
@@ -483,7 +483,7 @@ def test_step_7_failure_with_failing_disable_is_pending_manual() -> None:
 
 
 def test_provision_never_marks_a_pending_manual_phase_b_run_succeeded() -> None:
-    """ADR-025: provision()'s composition must branch on the new phase-B
+    """ADR-026: provision()'s composition must branch on the new phase-B
     PENDING_MANUAL outcome -- marking it SUCCEEDED would durably claim a
     provisioning that never applied its gateway configuration."""
     runs = FakeRuns()
@@ -497,7 +497,7 @@ def test_provision_never_marks_a_pending_manual_phase_b_run_succeeded() -> None:
 
 def test_lock_acquisition_compensation_failure_is_pending_manual() -> None:
     """ADR-017 requires the lock-acquisition failure path and APPLY_GATEWAY's
-    own handler not to drift apart semantically; ADR-025 extends that to the
+    own handler not to drift apart semantically; ADR-026 extends that to the
     compensation-failed case."""
     accounting = _DisableFailsAccounting()
     runs = FakeRuns()

@@ -31,7 +31,7 @@
    同步调用。后者现在只在 mock/测试替身下走到。
 2. **`PENDING_MANUAL` 有多个来源。** 原始表只在步骤 3 标注了
    `PENDING_MANUAL`；ADR-018 之后步骤 6 新增了两个来源（ambiguous create、
-   disable 补偿失败），ADR-025 提议再新增两个（步骤 5、步骤 7 的补偿失败）。
+   disable 补偿失败），ADR-026 提议再新增两个（步骤 5、步骤 7 的补偿失败）。
 
 撰写本文件时应同时核对 `docs/83-project-continuity.md` §8 的未决缺陷清单，
 避免把当前行为写成"设计如此"。
