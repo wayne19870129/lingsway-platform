@@ -3,9 +3,8 @@
 > 触发 `AGENTS.md` 的 TASK 文件门槛：触及 `backend/app/domain/`、
 > `infrastructure/alembic/versions/`，且涉及支付与计费。
 >
-> 架构依据：**ADR-027**（订单队列计费模型）。**ADR-027 必须先由 User 确认
-> 为「已接受」**（尤其是其中第 7 条 `RENEWAL`/`ADDON` 合并需要单独点头），
-> 之后才可开始实现——铁律 5。
+> 架构依据：**ADR-027**（订单队列计费模型），**状态已是「已接受」**，
+> 因此本任务**可以开工**。
 >
 > 复用：**ADR-026**（补偿动作失败所有权）、**ADR-018**
 > （`AccountingCreateEffect`）、**ADR-017**（相位切分与终态持久化顺序）。
@@ -35,10 +34,24 @@
    `UsagePeriod.active_subscription_id` 唯一约束。
 7. **账务写失败 ⇒ `PENDING_MANUAL`**（ADR-026），账务用户**永不 DELETE**。
 8. `apply_paid_billing_change()` 对 `ADDON` / `UPGRADE` **fail closed**。
+9. **修掉已可达的缺陷（ADR-027 §7.3）**：`admin_confirm_payment`
+   （`api/admin.py:687-689`）当前在入口就拒绝一切非 `PURCHASE` 订单，而
+   `/subscriptions/{id}/renew` 却能正常创建 `RENEWAL` 订单——**客户今天就能
+   点出一个永远无法被确认收款的续费订单**。必须把 `RENEWAL` 路由到
+   `apply_paid_billing_change()`，而不是一刀切拒绝。
+10. **解除档位锁（ADR-027 §7.2）**：`/subscriptions/{id}/renew`
+    （`api/subscription.py:55-84`）当前把档位硬锁成
+    `subscription.plan_id`，调用方无法选档。改为从四档中由调用方选择。
+    **这是对已上线端点的行为变更，PR 描述必须写明。**
 
 ## 约束
 
-- **ADR-027 未转为「已接受」前不得开始实现**（铁律 5）。
+- **不得给 `RENEWAL` 加回档位锁。** ADR-027 §7.1 已写明 `RENEWAL` 现在的
+  语义是"已有订阅上的后续订单、档位自选"，**不是**"按原档位续费"。名字
+  与语义有偏差是刻意接受的债务，不要按字面理解去"修正"它。
+- **不得为区分"续费/加购"新增分支。** 若要记录客户动机，只能是**纯记录性
+  标签**（ADR-027 §7.4），不得成为任何条件判断——否则等于把合并掉的路径
+  又长回来。
 - **铁律 4**：账务用户只 disable / 改额度，**永不 DELETE**。滚动只调
   `set_quota()` + `set_expire()`，不重建用户。
 - **铁律 7**：新增迁移必须**幂等**，不得改写任何历史 revision。

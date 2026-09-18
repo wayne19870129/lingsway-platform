@@ -1,7 +1,9 @@
 # ADR-027: 订单队列计费模型（单一价目表 + 先到先算）
 
-- 状态: **提议中（Proposed）**
-- 日期: 2026-09-18
+- 状态: **已接受（Accepted）**
+- 日期: 2026-09-18（同日接受。User 就套餐档位与加购语义拍板后，将第 7 条
+  `RENEWAL`/`ADDON` 是否合并的判断全权授权给 Claude Code；核对代码后按
+  下方 7.1–7.4 作出决定，并附带发现了 7.3 那条已可达的缺陷。）
 - 决策范围: `backend/app/domain/ordering.py` 的
   `BillingOrderType` / `apply_renewal` / `apply_upgrade` / `apply_addon`、
   `UsagePeriod` 的生命周期与滚动、以及每次滚动对账务 provider 的写入。
@@ -110,23 +112,79 @@
 自行刷新即可拿到新周期。这一点现有数据模型已经成立，本 ADR 只是确认它是
 刻意的契约，后续实现不得把 token 下放到订单或周期层。
 
-### 7. `RENEWAL` 与 `ADDON` 合并为同一个操作
+### 7. `RENEWAL` / `ADDON` / `UPGRADE` 收敛为同一个操作
 
-> ⚠️ **这一条需要 User 确认后本 ADR 才能转为「已接受」。**
+在"单一价目表 + 订单排队 + 先到先算"之下，"续费""加购""升级"是**字面意义上
+同一个操作**：从同一张表买一档，排进队列，等当前单结束后顶上。三者的差别
+只在客户的动机（快到期 / 快用完 / 想换档），而动机不产生任何技术或计费差异。
+保留三条行为相同的代码路径，唯一确定的结果是它们迟早会漂移——其中一条拿到
+bug 修复，另外两条没有。
 
-在"单一价目表 + 订单排队 + 先到先算"之下，"续费"和"加购"是**字面意义上
-同一个操作**：从同一张表买一档，排进队列，等当前单结束后顶上。二者唯一的
-差别是客户的动机（快到期 vs 快用完），而动机不产生任何技术或计费差异。
-
-因此 `BillingOrderType` 收敛为：
+因此 `BillingOrderType` 收敛为两个**有效**类型：
 
 | 类型 | 含义 |
 |---|---|
 | `PURCHASE` | 首单。创建 `Subscription` + 首个 `UsagePeriod` + 账务用户 + token |
-| `RENEWAL` | 后续单。在**已有**订阅上追加一个排队周期，不动 token、不新建账务用户 |
+| `RENEWAL` | 后续单。在**已有**订阅上追加一个排队周期，**档位可以是四档中任意一档**，不动 token、不新建账务用户 |
 
 `ADDON` 与 `UPGRADE` 不再使用。枚举成员**保留不删**（历史订单行可能已经
 写入这些值），但 `apply_paid_billing_change()` 对它们 fail closed。
+
+#### 7.1 `RENEWAL` 这个名字保留，但语义被重新定义
+
+`orders.order_type` 是 `String(32)`，直接存枚举的字符串值。把它改名成更中性的
+名字（例如 `ADDITIONAL`）需要对存量行做数据迁移，而收益纯粹是命名上的，
+因此**不改**。
+
+代价是名字与语义有偏差：`RENEWAL` 现在的含义是**"已有订阅上的后续订单"**，
+而**不是**"按原档位续费"。这是刻意接受的债务，在此写明以免后来的实现者
+按字面理解加回档位锁。
+
+#### 7.2 必须解除现有 `renew` 端点的档位锁
+
+核对当前 `main`：`POST /subscriptions/{id}/renew`
+（`backend/app/api/subscription.py:55-84`）**已经存在**并创建 `RENEWAL` 订单，
+但它把档位硬锁成订阅当前的 `plan_id`（`current_plan = db.get(Plan, subscription.plan_id)`），
+调用方无法选档。该端点的 docstring 自陈是
+"Create only the renewal order branch from the legacy billing behavior"——
+这是**从旧系统原样搬来的行为，不是本项目设计的决定**。
+
+档位锁与本 ADR 冲突：单一价目表之下，客户用完 50GB 后想直接上 200GB，
+应该就是买一单 200GB、排队、下一周期生效。这同时也是"升级"的全部含义，
+`UPGRADE` 因此不再需要独立存在。
+
+**S04-B2-B 以外的实现任务（TASK-S07）必须解除这个锁**，让调用方从四档里选。
+这是对一个已上线端点的行为变更，PR 描述里必须明确写出。
+
+#### 7.3 已发现的真实缺陷：续费订单当前无法被收款确认
+
+`admin_confirm_payment`（`backend/app/api/admin.py:687-689`）在进入任何计费
+逻辑之前就拒绝一切非 `PURCHASE` 订单：
+
+```python
+order_type = BillingOrderType(str(order.order_type))
+if order_type is not BillingOrderType.PURCHASE:
+    raise ValueError("Only purchase orders are handled by provisioning")
+```
+
+而 `/subscriptions/{id}/renew` 却可以正常创建 `RENEWAL` 订单。两者结合的结果是：
+**客户今天就能点出一个永远无法被确认收款的续费订单。** 这不是"功能没做完"，
+是一条已经可达的死路——订单会停在 `PENDING`/`UNPAID`，管理员在后台确认时
+收到 `ValueError`。
+
+TASK-S07 必须同时修掉这个缺口：`admin_confirm_payment` 要把 `RENEWAL` 路由到
+`apply_paid_billing_change()`（它本来就支持非 `PURCHASE` 分支），而不是在入口
+一刀切。
+
+#### 7.4 被放弃的信息，以及补回来的成本
+
+合并之后，系统不再记录客户**为什么**再买一单（快到期 vs 快用完）。这个信号
+是有业务价值的：如果绝大多数后续订单发生在额度耗尽时，说明档位偏小。
+
+本 ADR **不**为此新增字段，因为它与计费行为无关，属于分析需求。若将来要补，
+成本很低且不破坏本模型：在入队时，根据当前周期的 `used_bytes / quota_bytes`
+与剩余天数计算一个**纯记录性**的标签存进订单行即可——它**不得**成为任何
+分支条件，否则就等于把合并掉的两条路径又长回来。
 
 ### 8. 每次滚动都是一次账务外部写，复用 ADR-026 的补偿契约
 
@@ -190,8 +248,9 @@
   结论失效，需重新评估是否给排队订单独立计时。
 - 若客户反馈强烈要求流量结转，第 5 条需要重新评估——那会改变周期的额度
   语义，不是一个可以顺手加的开关。
-- 若将来确实需要区分"续费"与"加购"（例如续费锁定原档位、加购允许换档），
-  第 7 条的合并需要撤销，并重新引入独立的 order type。
+- 若将来确实需要让"续费"与"加购"产生**不同的计费行为**（不只是不同的
+  统计标签），第 7 条的合并需要撤销，并重新引入独立的 order type。
+  仅仅想知道"客户为什么买"不构成撤销理由——那用 7.4 的记录性标签解决。
 
 ## 验证要求
 

@@ -245,29 +245,23 @@ Claude 的产出形态是：ADR、TASK 文件、`docs/81-reviews/REVIEW-*.md`、
 > 唯一仍需你自己核对的是**未合并分支**：本节写的是 `main` 上的状态，
 > 刚推上去还没合并的东西看不到（见 §1）。
 >
-> 最后更新：2026-09-18，由 ADR-027 / TASK-S07 那一轮更新。
+> 最后更新：2026-09-18，ADR-027 接受 + S07 移入可派发队列。
 
 ### 5.1 可以立刻派给 Codex
 
 | # | 任务 | TASK 文件 | 闸门状态 |
 |---|---|---|---|
-| 1 | **S04-B2-B** Mihomo 运行时实现 | `docs/82-tasks/TASK-S04-mihomo-activation.md` | ✅ 两道闸门都已满足（ADR-025 已合并、TASK 已合并）。**必须与 S04-C 分成两个 PR** |
+| 1 | **S07** 订单队列计费（续费/加购） | `docs/82-tasks/TASK-S07-order-queue-billing.md` | ✅ ADR-027 **已接受**。**内含一条已可达的线上缺陷，见下** |
+| 2 | **S04-B2-B** Mihomo 运行时实现 | `docs/82-tasks/TASK-S04-mihomo-activation.md` | ✅ 两道闸门都已满足（ADR-025 已合并、TASK 已合并）。**必须与 S04-C 分成两个 PR** |
 
-派活时提醒 Codex：B2-B 结束时要有测试证明 `FORWARDER_PROVIDER=mihomo`
-**仍然**被 `build_registry()` 拒绝——防止"接线"顺手变成"激活"。
+派 S04-B2-B 时提醒 Codex：B2-B 结束时要有测试证明
+`FORWARDER_PROVIDER=mihomo` **仍然**被 `build_registry()` 拒绝——防止
+"接线"顺手变成"激活"。
 
-### 5.2 架构已就绪，但在等 User 拍板
-
-| # | 任务 | TASK 文件 | 卡在哪 |
-|---|---|---|---|
-| 2 | **S07** 订单队列计费（续费/加购） | `docs/82-tasks/TASK-S07-order-queue-billing.md` | ⏸ **ADR-027 仍是 `Proposed`**。需 User 确认其中第 7 条：`RENEWAL` 与 `ADDON` 合并为同一操作。确认前不得开工 |
-
-**不要因为 TASK 文件已经存在就派活。** TASK 自己的「约束」第一条就写着
-ADR 未「已接受」不得开始——Codex 如果照做会正确地停下来，但那是浪费一轮。
+**S07 优先于 S04-B2-B**，因为它包含一条**客户今天就能踩到**的缺陷
+（见下方速览末尾）。
 
 #### S07 计费模型速览（权威在 ADR-027，这里是让你拆任务用的）
-
-User 已拍板，模型本身不再变动，只等第 7 条的形式确认：
 
 - **只有一张价目表**：四档（50GB/¥30、100GB/¥50、200GB/¥80、500GB/¥120，
   30 天，CNY）。**没有独立加购 SKU，也没有加购价格。**"加购"就是再买一单。
@@ -284,10 +278,32 @@ User 已拍板，模型本身不再变动，只等第 7 条的形式确认：
 - 每次滚动都要写账务 provider（`set_quota` + `set_expire`），
   **复用 ADR-026 的补偿契约**：补偿失败 ⇒ `PENDING_MANUAL`，账务用户永不 DELETE。
 
+- **`RENEWAL` / `ADDON` / `UPGRADE` 收敛为一个操作**（ADR-027 §7）：
+  有效类型只剩 `PURCHASE`（首单）和 `RENEWAL`（后续单，**档位自选**）。
+  `RENEWAL` 这个名字保留但语义被重新定义为"已有订阅上的后续订单"，
+  **不是**"按原档位续费"——别让 Codex 按字面把档位锁加回去。
+
 派活时要让 Codex 知道的现状：`apply_renewal` / `apply_upgrade` /
 `apply_addon` **三个全是 stub**（`api/admin.py:159-169`），
 **周期滚动代码零行**（`apply_expiry_policy()` 自己的 docstring 就写着
 不碰周期边界）。这是从零做，不是改现有逻辑。
+
+##### ⚠️ S07 里有一条已经可达的缺陷，这是它优先的原因
+
+`POST /subscriptions/{id}/renew`（`api/subscription.py:55-84`）**已经上线**，
+能正常创建 `RENEWAL` 订单；但 `admin_confirm_payment`
+（`api/admin.py:687-689`）在进入任何计费逻辑之前就拒绝一切非 `PURCHASE`
+订单。两者组合的结果是：**客户现在就能点出一个永远无法被确认收款的续费
+订单**——订单卡在 `PENDING`/`UNPAID`，管理员后台确认时收到 `ValueError`。
+
+这不是"功能没做完"，是一条已经能走到的死路。TASK-S07 的验收标准第 9、10
+条专门覆盖它（路由 `RENEWAL` 到 `apply_paid_billing_change()`，以及解除
+renew 端点的档位锁）。
+
+### 5.2 架构已就绪，等 User 拍板
+
+**当前为空。** S07 的最后一个待决项（`RENEWAL`/`ADDON` 是否合并）已由
+User 全权授权 Claude 决定，结论写在 ADR-027 §7.1–7.4。
 
 ### 5.3 还缺 TASK 文件，派活前要先补
 
@@ -325,7 +341,8 @@ User 已拍板，模型本身不再变动，只等第 7 条的形式确认：
 
 ### 5.6 需要 User 决定的事（不解决就会一直卡着）
 
-1. **ADR-027 第 7 条**：`RENEWAL` 与 `ADDON` 合并。卡住 S07。
+1. ~~**ADR-027 第 7 条**：`RENEWAL` 与 `ADDON` 合并~~ —— **已决**
+   （User 全权授权，结论见 ADR-027 §7.1–7.4）。不再卡住 S07。
 2. **「未用完额度作废」的对客文案**：这是条款不是实现细节，上线前要定。
 3. **`plans` 表的四行要人工核对** —— 仓库里没有任何代码创建 `Plan` 行
    （`60_seed.sh` 刻意拒绝隐式种子数据），所以 `catalog.py` 定的价格只是
