@@ -38,6 +38,23 @@ first.
    目标 / 约束 / 允许修改的文件 / 验收标准 — see `TASK-TEMPLATE.md`).
 6. `README.md`'s "Explicitly out of scope" and risk-classification tables.
 
+### Keeping the dispatch queue current
+
+`docs/85-agent-operating-model.md` §5 is the **dispatch queue** ChatGPT reads
+before assigning work to Codex. It is Claude's responsibility, not a snapshot:
+
+**Any PR that lands a new ADR or TASK, changes a gate, or answers a question
+that was blocking one, must update §5 in that same PR.** Move the item between
+5.1 (dispatchable now) / 5.2 (waiting on the User) / 5.3 (needs a TASK first),
+update its gate status, and refresh the "最后更新" line and the next free
+ADR/TASK number in 5.8.
+
+The point is that nobody has to relay architecture changes by hand. If §5 is
+stale, ChatGPT dispatches against an architecture that no longer exists — which
+is the same two-sources-of-truth failure this repository has already been bitten
+by more than once. Writing the queue into a chat message instead of into §5 is
+exactly the mistake, no matter how convenient it looks in the moment.
+
 ### Keeping the continuity document current
 
 If a PR materially changes any of the following, update

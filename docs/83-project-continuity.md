@@ -291,10 +291,19 @@ later session does not have to rediscover it.
    sign-off first, because it means this repository would start writing
    business data during deployment.
 
-   Also still open: `Settings.addon_20gb_price` / `addon_50gb_price` /
-   `addon_100gb_price` remain dead config. ADDON orders are driven by
-   `addon_bytes`, not by a `Plan` row, so whether add-on traffic is sold at
-   all — and at what price — is an unanswered product question.
+   **Add-on pricing: answered 2026-09-18.** There is exactly one price list —
+   the four tiers. Buying more traffic means buying another order from that
+   same list; there is no add-on SKU and no add-on price, so
+   `addon_20gb_price` / `addon_50gb_price` / `addon_100gb_price` were deleted
+   along with their `.env.example` entries. The billing model this implies
+   (orders queue on one subscription; a period ends on quota exhaustion **or**
+   expiry, whichever comes first; the subscription link never changes) is
+   **ADR-027**, implemented by **`TASK-S07-order-queue-billing.md`**.
+
+   Note that `RENEWAL`, `UPGRADE` and `ADDON` are all still unimplemented
+   stubs in `api/admin.py:159-169`, and there is **no usage-period rollover
+   code at all** — `apply_expiry_policy()`'s own docstring says it does not
+   touch period boundaries. ADR-027 + TASK-S07 are what close that.
 
 5. **`.env.example` omitted `XRAY_CONFIG_PATH`, `XRAY_BACKUP_DIR`, and
    `XRAY_LOG_LEVEL`** — real `Settings` fields consumed by the now-wired
