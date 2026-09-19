@@ -105,9 +105,10 @@ def refresh_provider_inventory(
             raise RuntimeError("Transport materialization source secret is unavailable")
         cache_identity, content_hash = proof
         receipt = db.scalar(
-            select(MihomoTransportMaterialization).where(
-                MihomoTransportMaterialization.owner_record_id == provider_record.id
-            )
+            select(MihomoTransportMaterialization)
+            .where(MihomoTransportMaterialization.owner_record_id == provider_record.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
         deadline = (
             capacity.expire_at

@@ -8,6 +8,7 @@ from sqlalchemy import (
     DateTime,
     Enum,
     ForeignKey,
+    Integer,
     String,
     Text,
     UniqueConstraint,
@@ -180,7 +181,11 @@ class Tutorial(Base):
 
 class MihomoProjectionGeneration(Base):
     __tablename__ = "mihomo_projection_generations"
-    revision: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    revision: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
     manifest_version: Mapped[str] = mapped_column(String(32))
     desired_fingerprint: Mapped[str] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(PRECISE_DATETIME, default=utcnow)

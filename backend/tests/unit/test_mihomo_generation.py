@@ -1,9 +1,99 @@
+from dataclasses import replace
+from datetime import UTC, datetime
+from types import SimpleNamespace
+from typing import cast
+
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
 
 from backend.app.core.config import Settings
+from backend.app.core.database import Base
+from backend.app.infra import credential_resolver
+from backend.app.infra.mihomo_generation import (
+    allocate_generation,
+    build_projection_source_manifest,
+    manifest_fingerprint,
+)
+from backend.app.providers.base import DesiredForwarderState
+from backend.app.providers.forwarder.mihomo_projection import TransportMaterialization
 from backend.app.providers.registry import ProviderConfigurationError, build_registry
 
 
 def test_mihomo_forwarder_is_still_rejected() -> None:
     with pytest.raises(ProviderConfigurationError, match="FORWARDER_PROVIDER"):
         build_registry(Settings(forwarder_provider="mihomo"))
+
+
+def _generation_session() -> Session:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.tables["mihomo_projection_generations"].create(engine)
+    return Session(engine)
+
+
+def _desired(marker: str = "A") -> DesiredForwarderState:
+    return DesiredForwarderState(
+        proxies=({"name": marker, "type": "mock"},),
+        deployment_constants={"external-controller": "192.0.2.1:9090", "api-secret-ref": "ref"},
+        snapshot_revision=1,
+        snapshot_identity="input",
+    )
+
+
+def test_generation_reuses_only_exact_latest_manifest() -> None:
+    with _generation_session() as db:
+        manifest = build_projection_source_manifest(_desired())
+        first = allocate_generation(db, manifest)
+        same = allocate_generation(db, manifest)
+        assert same.revision == first.revision
+        different = allocate_generation(db, build_projection_source_manifest(_desired("B")))
+        assert different.revision > first.revision
+
+
+def test_generation_a_b_a_allocates_new_revision() -> None:
+    with _generation_session() as db:
+        a = allocate_generation(db, build_projection_source_manifest(_desired("A")))
+        b = allocate_generation(db, build_projection_source_manifest(_desired("B")))
+        again = allocate_generation(db, build_projection_source_manifest(_desired("A")))
+        assert a.revision < b.revision < again.revision
+        assert again.revision != a.revision
+
+
+def test_manifest_excludes_materialized_raw_content_and_plaintext_secret() -> None:
+    material = TransportMaterialization(
+        1,
+        "provider",
+        2,
+        "cache-id",
+        "a" * 64,
+        datetime.now(UTC),
+        {"proxies": [{"password": "SENTINEL"}]},
+    )
+    desired = _desired()
+    desired = replace(desired, transport_materializations=(material,))
+    manifest = build_projection_source_manifest(desired)
+    encoded = str(manifest)
+    assert "SENTINEL" not in encoded
+    assert "plaintext" not in encoded
+
+
+def test_manifest_datetime_and_order_are_canonical() -> None:
+    first = build_projection_source_manifest(_desired())
+    second = build_projection_source_manifest(_desired())
+    assert manifest_fingerprint(first) == manifest_fingerprint(second)
+
+
+def test_sql_controller_secret_resolver_requires_exact_purpose_and_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        credential_resolver,
+        "reveal_secret_snapshot_for_purpose",
+        lambda db, ref, purpose: SimpleNamespace(value="secret", revision=7),
+    )
+    resolver = credential_resolver.SqlMihomoControllerSecretResolver(
+        cast(Session, SimpleNamespace())
+    )
+    result = resolver.resolve("controller-ref")
+    assert result.ref == "controller-ref"
+    assert result.revision == 7
