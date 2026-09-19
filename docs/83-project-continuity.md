@@ -11,9 +11,21 @@ state, reviews, and checks. Do not rely on an older chat or SHA snapshot.
 
 ## 2. Roles and workflow
 
-> The operating model — ChatGPT directs, Codex/LUNA implements, Claude Code
-> writes the rules and audits on a schedule, a GitHub workflow merges — is
-> written out in two standing instruction files, both subordinate to
+> **ADR-030 (2026-09-19) changed who directs.** The operating model is now:
+> **Claude Code designs the architecture, writes the ADRs/TASKs, dispatches
+> Codex, supervises periodically, and can halt the pipeline**; Codex/LUNA
+> implements; **ChatGPT's role narrowed to independent exact-head-SHA
+> review**; a GitHub workflow merges.
+>
+> That change removed ADR-029's own recorded objection #1 — the reviewer was
+> reviewing code built to its own spec. Specifier and reviewer are now
+> different agents. Two further properties not to re-derive: **supervision is
+> deliberately periodic, never real-time** (ADR-030 §4), and **Claude can
+> stop the pipeline alone but cannot restart it alone** (§5a) — restoring the
+> breaker is a user-merged PR. Automation that can switch itself back on has
+> no breaker.
+>
+> It is written out in two standing instruction files, both subordinate to
 > `AGENTS.md`:
 >
 > - [`85-agent-operating-model.md`](85-agent-operating-model.md) — ChatGPT's,
@@ -410,9 +422,23 @@ Two things a fresh session should know rather than re-derive:
    Criticals mean read-only review plus after-the-fact detection is not an
    adequate substitute for the manual gate it replaced.
 
-**Unverified as of 2026-09-19:** the Routine that fires this audit
-(`43 */6 * * *`) was created from a session holding no connector grants, so the
-fired session may have no GitHub tools and no repository source — in which case
-it cannot open its audit PR. If this table is still empty after several
-6-hour windows, that is the reason; the remedy is recreating the Routine from
-the claude.ai Routines UI so it inherits the GitHub connector.
+**Confirmed broken, 2026-09-19 — and superseded.** The claude.ai Routine that
+was supposed to fire this audit (`43 */6 * * *`) **did fire** at 00:43:05
+(session `cse_01CvtKzoF3Tp3mauatU85GQP`) and produced nothing: 45 minutes
+later its `last_run.status` was still `PENDING`, no `claude/audit-*` branch
+existed, and no PR was opened. It should not have skipped — its own prompt
+treats an absent audit record as "never audited" and requires the full pass —
+so this was a hang, not a quiet no-op. Cause: the Routine was created from a
+session with no connector grants, so the fired session had no
+`mcp__github__*` tools and no repository source.
+
+**ADR-030 §3 replaces the mechanism rather than patching that one Routine.**
+The lesson is architectural: *any carrier of scheduled automation whose
+credentials and repository access are not version-controlled and inspectable
+in the repo cannot be trusted to carry a safety mechanism.* Supervision moves
+to `.github/workflows/` — a machine-generated health digest
+(`TASK-S10-pipeline-health-digest.md`, no LLM, `GITHUB_TOKEN` only) that
+Claude reads on a low cadence. Related finding: `claude.yml` has 247 runs and
+every recent one is `conclusion: skipped` (its `if` needs `@claude` in the
+comment), so **there is no evidence `CLAUDE_CODE_OAUTH_TOKEN` is configured
+and working** — nothing safety-critical may depend on it until that is proven.
