@@ -48,6 +48,7 @@ class ReconcileState(str, enum.Enum):
 
 class UsagePeriodStatus(str, enum.Enum):
     ACTIVE = "ACTIVE"
+    QUEUED = "QUEUED"
     CLOSED = "CLOSED"
 
 
@@ -127,6 +128,7 @@ class UsagePeriod(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     subscription_id: Mapped[int] = mapped_column(ForeignKey("subscriptions.id"), index=True)
+    plan_id: Mapped[int | None] = mapped_column(ForeignKey("plans.id"), index=True)
     period_start: Mapped[datetime] = mapped_column(PRECISE_DATETIME)
     period_end: Mapped[datetime] = mapped_column(PRECISE_DATETIME)
     used_bytes: Mapped[int] = mapped_column(BigInteger, default=0)

@@ -38,7 +38,7 @@ function Orders() {
   async function confirm(order: AdminOrder) {
     const reference = window.prompt("请输入付款登记号", `MANUAL-${order.order_no}`);
     if (!reference?.trim()) return;
-    if (!window.confirm(`确认已收到 ${order.amount} ${order.currency}，并开始开通 ${order.order_no}？`)) return;
+    if (!window.confirm(`确认已收到 ¥${order.amount}，并开始开通 ${order.order_no}？`)) return;
     setBusy(order.id); setMessage(""); setError("");
     try {
       const response = await request(`/admin/orders/${order.id}/confirm-payment`, {

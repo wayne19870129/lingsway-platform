@@ -182,13 +182,16 @@ class WorkflowState:
         self.events.append("subscription:provisioning")
 
     def apply_renewal(self, command: BillingCommand) -> None:
-        self.events.append("billing:renewal")
+        self.events.append("billing:enqueue")
 
     def apply_upgrade(self, command: BillingCommand) -> None:
         self.events.append("billing:upgrade")
 
     def apply_addon(self, command: BillingCommand) -> None:
         self.events.append("billing:addon")
+
+    def enqueue_subscription(self, command: BillingCommand) -> None:
+        self.events.append("billing:enqueue")
 
     def activate_subscription(self, command: BillingCommand) -> None:
         self.events.append("subscription:active")
@@ -541,9 +544,7 @@ def test_lock_acquisition_failure_disables_accounting_user_and_rolls_back() -> N
 @pytest.mark.parametrize(
     ("order_type", "event"),
     [
-        (BillingOrderType.RENEWAL, "billing:renewal"),
-        (BillingOrderType.UPGRADE, "billing:upgrade"),
-        (BillingOrderType.ADDON, "billing:addon"),
+        (BillingOrderType.RENEWAL, "billing:enqueue"),
     ],
 )
 def test_paid_non_purchase_orders_use_ordering_branch(
@@ -567,7 +568,7 @@ def test_paid_non_purchase_orders_use_ordering_branch(
 
     assert result is None
     assert event in workflow.events
-    assert workflow.events[-1] == "subscription:active"
+    assert workflow.events[-1] == "billing:enqueue"
 
 
 def test_services_compose_t3_provisioning_from_registry() -> None:

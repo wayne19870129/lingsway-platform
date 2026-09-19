@@ -134,6 +134,7 @@ class _SqlAlchemyOrderState:
             self.db.flush()
             period = UsagePeriod(
                 subscription_id=subscription.id,
+                plan_id=plan.id,
                 period_start=now,
                 period_end=subscription.service_expire_at,
                 used_bytes=0,
@@ -157,16 +158,36 @@ class _SqlAlchemyOrderState:
         return subscription
 
     def apply_renewal(self, command: BillingCommand) -> None:
-        del command
-        raise ValueError("Non-purchase billing is not handled by provisioning")
+        self.enqueue_subscription(command)
 
     def apply_upgrade(self, command: BillingCommand) -> None:
-        del command
-        raise ValueError("Non-purchase billing is not handled by provisioning")
+        self.enqueue_subscription(command)
 
     def apply_addon(self, command: BillingCommand) -> None:
-        del command
-        raise ValueError("Non-purchase billing is not handled by provisioning")
+        self.enqueue_subscription(command)
+
+    def enqueue_subscription(self, command: BillingCommand) -> None:
+        subscription = self._subscription(command)
+        order = self._order(command.order_id)
+        plan = self.db.get(Plan, order.plan_id)
+        if plan is None:
+            raise ValueError("Order plan is not available")
+        if subscription.current_period_id is None:
+            raise ValueError("Subscription has no current usage period")
+        now = datetime.now(UTC)
+        self.db.add(
+            UsagePeriod(
+                subscription_id=subscription.id,
+                plan_id=plan.id,
+                period_start=now,
+                period_end=now + timedelta(days=plan.duration_days),
+                used_bytes=0,
+                quota_bytes=plan.traffic_limit_bytes,
+                status=UsagePeriodStatus.QUEUED,
+            )
+        )
+        order.status = OrderStatus.ACTIVATED
+        order.activated_at = order.activated_at or now
 
     def activate_subscription(self, command: BillingCommand) -> None:
         subscription = self._subscription(command)
@@ -685,7 +706,39 @@ def admin_confirm_payment(
     try:
         order_type = BillingOrderType(str(order.order_type))
         if order_type is not BillingOrderType.PURCHASE:
-            raise ValueError("Only purchase orders are handled by provisioning")
+            subscription = db.get(Subscription, order.target_subscription_id)
+            if subscription is None:
+                raise ValueError("Target subscription is not available")
+            command = BillingCommand(
+                order_id=str(order.id),
+                subscription_id=str(subscription.id),
+                order_type=order_type,
+                plan_id=str(order.plan_id),
+            )
+            outcome = confirm_payment_and_provision(
+                command,
+                ProvisionRequest(
+                    order_id=str(order.id),
+                    customer_id=str(order.customer_id),
+                    username="",
+                    quota_gb=Decimal(0),
+                    thread_limit=1,
+                    expire_at=datetime.now(UTC),
+                    subscription_domain=get_settings().subscription_domain
+                    or get_settings().subscription_base_url,
+                ),
+                order,
+                _OrderProvisioningState(db, order_id),
+                _SqlAlchemyProvisionRuns(db),
+                _SqlAlchemyOrderState(db),
+                data.payment_reference,
+                providers=registry,
+                credential_resolver=SqlAlchemyCredentialResolver(db),
+            )
+            db.refresh(order)
+            return ProvisionResult.model_validate(
+                {"order": order, "subscription": subscription, "subscription_url": None}
+            )
         plan = db.get(Plan, order.plan_id)
         if plan is None:
             raise ValueError("Order plan is not available")
