@@ -165,18 +165,22 @@
 S02→S04-B1 连续 8 个 PR 一个 TASK 文件都没有，规则空转。**现在这条门槛是可
 执行的，请真的执行它。**
 
-**Issue 现在是触发器，TASK 仍然是权威**（ADR-029 §2，2026-09-18 修订）。
+**派活指令是触发器，TASK 才是权威。**
 
-你用 Issue `@codex` 派活，但 **Issue 里只写一句触发指令，不得重写 TASK
-内容**：
+> **2026-09-19 更正：本段原文写的是「你用 Issue `@codex` 派活」，并给了一个
+> `@codex 请执行 …` 的例子。那条路径已经不存在**——`@codex` 在 Issue 上实测
+> 不触发任何东西，模板也已删除（见 §2）。**不要建 Issue。**
+
+派活指令写好之后**交给 User，由 User 粘进 Codex 桌面版**，格式见 §2.3。
+指令**只写一句指向 TASK 文件的触发语，不得重写 TASK 内容**：
 
 ```
-@codex 请执行 docs/82-tasks/TASK-S07-order-queue-billing.md，
+请执行 docs/82-tasks/TASK-S07-order-queue-billing.md，
 严格按仓库 AGENTS.md 与 docs/85-agent-operating-model.md §2.3 执行。
 ```
 
 需求与验收标准的唯一记录载体仍然是 `docs/82-tasks/TASK-*.md`。把 TASK 内容
-抄进 Issue 会立刻产生两份互相漂移的需求——这个仓库已经因为两份真相源吃过
+抄进派活指令会立刻产生两份互相漂移的需求——这个仓库已经因为两份真相源吃过
 好几次亏。
 
 **TASK 文件由 Claude Code 写，不是你写。** 缺 TASK 时提出需求让 Claude 写，
@@ -319,7 +323,8 @@ Reviewed at head SHA <完整 40 位 SHA>
 
 ---
 
-@codex 按以下逐条修改，**不要做列表之外的任何改动**：
+给 Codex 的指令卡（**由 User 粘进 Codex 桌面版**）——按以下逐条修改，
+**不要做列表之外的任何改动**：
 
 1. `path/to/file.py`（第 N 行附近）：<改成什么，一句话说清为什么>
 2. `path/to/other.py`：<...>
