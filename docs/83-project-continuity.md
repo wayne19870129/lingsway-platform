@@ -63,7 +63,7 @@ state, reviews, and checks. Do not rely on an older chat or SHA snapshot.
 > | The decision itself (a pure function) | `scripts/automerge_gate.py` |
 > | The eight-case truth table, run in CI | `backend/tests/guards/test_automerge_gate.py` |
 > | Circuit breaker | `.github/automerge-enabled` (`true` = on) |
-> | Dispatch issue template | `.github/ISSUE_TEMPLATE/codex-dispatch.md` |
+> | ~~Dispatch issue template~~ | **Removed 2026-09-19** — see below |
 >
 > Two properties worth not re-deriving: the workflow deliberately has **no
 > `pull_request` trigger**, so a PR cannot rewrite its own gate — every
@@ -198,9 +198,12 @@ named one as the sole record carrier. Three things changed on 2026-09-18:
   The working method is manual copy-paste between ChatGPT and Codex; nothing
   is dispatched through Issues and the repository has none open. A `TASK-*.md`
   file lives in the repo, is reviewed alongside the PR, and is readable by
-  every executing agent, so it was already the better source of truth. The
-  `.github/ISSUE_TEMPLATE/` files are unaffected — incident write-ups and
-  external-fact verification are records, not task dispatch.
+  every executing agent, so it was already the better source of truth.
+  **`codex-dispatch.md` was deleted on 2026-09-19** (ADR-032 §6b) — it was
+  the one template that served dispatch rather than recording, and `@codex`
+  on an Issue was measured to trigger nothing. The two that remain,
+  `incident.md` and `external-fact.md`, are unaffected: incident write-ups
+  and external-fact verification are records, not task dispatch.
 
 **ADR numbering:** ADR-010 does not exist and is not referenced anywhere. The
 sequence runs 001–009, 011–026. This is a numbering hole, not a missing document

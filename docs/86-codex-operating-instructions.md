@@ -34,8 +34,12 @@ PR，GitHub workflow 机械合并，**你写代码**。
 3. `CLAUDE.md` —— PR 流程与验证要求。
 4. TASK 里引用的 ADR。
 
-**Issue 里的文字只是触发器，不是需求。** 如果 Issue 内容和 TASK 文件不一致，
+**User 粘给你的那段派活指令只是触发器，不是需求。** 如果它和 TASK 文件不一致，
 **以 TASK 文件为准**，并在 PR 里指出这个不一致。
+
+> **2026-09-19：派活不再经过 GitHub Issue。** 那个 `codex-dispatch.md`
+> 模板已删除（`@codex` 在 Issue 上实测不触发任何东西）。你收到的任务来自
+> User 的复制粘贴，唯一权威仍然是 `docs/82-tasks/` 下那个 TASK 文件。
 
 ## 2. 三条最容易违反的硬规则
 
