@@ -47,6 +47,28 @@ state, reviews, and checks. Do not rely on an older chat or SHA snapshot.
 > (ADR-033 §3), and stops being tolerable the moment the workflow starts
 > merging PRs the user has not seen (ADR-033 §8).
 >
+> **ADR-034 (same day) went one step further and is the current rule:** the
+> three remaining mandatory audit triggers are gone too, so **an audit happens
+> only when the user asks**, and the user's stated plan is to let ChatGPT and
+> Codex run for a long stretch before asking. Two things not to misread.
+> **First, what was removed is "Claude must look", not "a human must
+> approve"**: `AGENTS.md`'s 禁止自主执行 table still requires human
+> confirmation for every production-destructive action, and deploys are still
+> manual (ADR-034 §2). **Second, the cost is real and specific** (ADR-034 §3):
+> drift that lands early gets built on by everything after it, so a bigger
+> batch makes the eventual fix proportionally more expensive. The compensation
+> that survives is cheap and passive — the digest keeps collecting, and §10's
+> table records each audit's starting SHA so the next one has a span rather
+> than a blank page.
+>
+> **One unresolved tension, recorded rather than smoothed over** (ADR-034 §5a):
+> `AGENTS.md` calls the breaker *and* the independent audit joint
+> preconditions for auto-merge, "not optional decoration". The audit is now
+> gone. It is accepted only on a countable fact — **the workflow has never
+> merged a single PR**; #135 through #153 were all merged by hand. If that ever
+> changes, either the audit comes back or auto-merge goes off; keeping
+> `.github/automerge-enabled` at `false` is the cheap equivalent.
+>
 > One ADR-030 property survives both pivots unchanged: **Claude can stop the
 > pipeline alone but cannot restart it alone** (§5a) — restoring the breaker is
 > a user-merged PR. Automation that can switch itself back on has no breaker.
@@ -459,12 +481,32 @@ requirements, and §8 deployment acceptance list **do** still hold and are
 actively enforced by tests — the drift is in the file tree and task sequence,
 not the invariants.
 
-## 10. Most recent scheduled architecture audit
+## 10. Architecture audits (now user-triggered only)
 
-ADR-029 §6 requires the scheduled audit (every 6 hours) to append its result
-here every time it runs: **date, the `main` SHA audited, what was actually run,
-what was found, and whether the breaker was pulled.** An audit that only reads
-code and does not run `ruff` / `mypy` / the test suite does not satisfy §6.
+> **2026-09-19 (ADR-034): there is no scheduled audit, and no event that
+> forces one.** Periodic supervision went in ADR-033; the three remaining
+> mandatory triggers — before wiring a real external system, before a
+> production deploy, after a workstream completes — went in ADR-034. An audit
+> happens when, and only when, the user asks for one. Nobody is expected to
+> notice that one is due.
+>
+> **The table below is kept, and its purpose changed.** It is no longer
+> evidence that a cron ran; it is **where the next audit finds its starting
+> point**. The user's plan is to accumulate a large batch of implementation
+> work before calling for a review, so the further apart the rows, the more
+> this matters.
+
+Every audit appends a row: **date, the `main` SHA audited, what was actually
+run, what was found, whether the breaker was pulled.** An audit that only
+reads code without running `ruff` / `mypy` / the test suite does not count —
+that requirement comes from ADR-029 §6's behavioral contract, which ADR-034
+kept.
+
+**How to start a user-triggered audit** (ADR-034 §4.3): read the last row
+below for the previously audited SHA, then `git log <that SHA>..main`, then
+the digests on the `pipeline-health` branch covering that span — *then* start
+reading code. Reconstructing the span from scratch is the expensive part, and
+this table is what makes it cheap.
 
 | Date (UTC) | `main` SHA | Ran | Findings | Breaker pulled? |
 |---|---|---|---|---|
