@@ -114,7 +114,7 @@ ADR-029 §6 的审计原本由一个 claude.ai Routine（`43 */6 * * *`）触发
 | `main` 上 CI 变红 | **立即拉闸**（`main` 是所有 PR 的基线，红的基线会污染后续全部判断） |
 | ChatGPT 给了 PASS，但监督在同一个 SHA 上发现 Critical | **拉闸** + 触发 ADR-029「重新评估条件」 |
 | 同一个 finding 连续两次修复失败 | 给该 PR 打 `no-automerge`，重新规划这一项 |
-| 单个 PR 返工到 5 轮 | 给该 PR 打 `no-automerge`，交给 User |
+| 单个 PR 返工到 **3** 轮（ADR-031 §6 收紧） | 给该 PR 打 `no-automerge`，交给 User |
 | 连续 3 个 PR 自动合并且 User 全程未参与 | 暂停派发，出一份进度汇报（`docs/85` §6.2 格式） |
 | 某 PR 开着超过 12 小时、无新提交、仍有未解决 findings | 视为卡住：诊断根因、改 TASK、重新派发 |
 
