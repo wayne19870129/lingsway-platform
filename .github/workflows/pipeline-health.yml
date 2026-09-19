@@ -1,0 +1,209 @@
+name: Pipeline health
+
+# ADR-030 §3 / TASK-S10. This workflow is the COLLECTION layer of supervision:
+# it compresses pipeline state into docs/87-pipeline-health.json so that Claude
+# can decide whether to intervene by reading one small file instead of crawling
+# the repository. The judgement itself is deliberately NOT here.
+#
+# Three constraints, all from TASK-S10, all load-bearing:
+#   * No LLM, and no Claude credential of any kind. Not because one is
+#     unavailable -- the Claude action has worked in this repository before --
+#     but because this is the judgement layer's only input, and its availability
+#     must not depend on a rotatable secret that cannot be inspected from the
+#     repository. Calling a model every two hours to conclude "no change" would
+#     also defeat the token budget this whole design exists to protect.
+#   * `contents: write` only. This workflow observes; it must not be able to
+#     label, close, comment on, or merge a pull request.
+#   * It commits ONLY when the digest changed apart from the clock. Note that
+#     `age_hours` and `hours_since_last_commit` are derived from the timestamp,
+#     so the comparison strips those too -- stripping `generated_at` alone still
+#     produced a no-op commit every run.
+
+on:
+  schedule:
+    - cron: "7 */2 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: pipeline-health
+  cancel-in-progress: false
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Collect pipeline facts
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const fs = require('fs');
+            const { owner, repo } = context.repo;
+            const base = context.payload.repository.default_branch;
+
+            // --- default branch: HEAD and the CI verdict on it ---
+            const { data: branch } = await github.rest.repos.getBranch({ owner, repo, branch: base });
+            const mainSha = branch.commit.sha;
+
+            const mainRuns = await github.paginate(github.rest.actions.listWorkflowRunsForRepo, {
+              owner, repo, head_sha: mainSha, per_page: 100,
+            }, response => response.data);
+            const relevant = mainRuns.filter(run => ['CI', 'Security', 'Risk classification'].includes(run.name));
+            let mainCi = 'pending';
+            if (relevant.length && relevant.every(run => run.status === 'completed')) {
+              mainCi = relevant.every(run => run.conclusion === 'success') ? 'success' : 'failure';
+            }
+
+            // --- the circuit breaker, read from the default branch ---
+            let breaker = null;
+            try {
+              const { data: file } = await github.rest.repos.getContent({
+                owner, repo, path: '.github/automerge-enabled', ref: base,
+              });
+              breaker = Buffer.from(file.content, file.encoding).toString('utf8');
+            } catch (error) {
+              if (error.status !== 404) { throw error; }
+            }
+
+            // --- how many merges landed with no user commit since ---
+            // A proxy for "running unattended": consecutive merge commits whose
+            // pull request was not merged by the repository owner.
+            const merges = await github.paginate(github.rest.pulls.list, {
+              owner, repo, state: 'closed', base, sort: 'updated', direction: 'desc', per_page: 50,
+            });
+            let streak = 0;
+            for (const pr of merges.filter(p => p.merged_at).sort((a, b) => new Date(b.merged_at) - new Date(a.merged_at))) {
+              if (pr.merged_by && pr.merged_by.type === 'Bot') { streak += 1; } else { break; }
+            }
+
+            // --- open pull requests ---
+            const open = await github.paginate(github.rest.pulls.list, {
+              owner, repo, state: 'open', per_page: 100,
+            });
+            const prs = [];
+            for (const pr of open) {
+              const commits = await github.paginate(github.rest.pulls.listCommits, {
+                owner, repo, pull_number: pr.number, per_page: 100,
+              });
+              const lastCommitAt = commits.length
+                ? commits[commits.length - 1].commit.committer.date
+                : pr.created_at;
+
+              const runs = await github.paginate(github.rest.actions.listWorkflowRunsForRepo, {
+                owner, repo, head_sha: pr.head.sha, per_page: 100,
+              }, response => response.data);
+              const checks = runs.filter(run => ['CI', 'Security', 'Risk classification'].includes(run.name));
+              let ci = 'pending';
+              if (checks.length && checks.every(run => run.status === 'completed')) {
+                ci = checks.every(run => run.conclusion === 'success') ? 'success' : 'failure';
+              }
+
+              const files = await github.paginate(github.rest.pulls.listFiles, {
+                owner, repo, pull_number: pr.number, per_page: 100,
+              });
+
+              const reviews = [];
+              for (const review of await github.paginate(github.rest.pulls.listReviews, {
+                owner, repo, pull_number: pr.number, per_page: 100,
+              })) {
+                reviews.push({
+                  author_association: review.author_association,
+                  submitted_at: review.submitted_at,
+                  body: review.body || '',
+                });
+              }
+              for (const comment of await github.paginate(github.rest.issues.listComments, {
+                owner, repo, issue_number: pr.number, per_page: 100,
+              })) {
+                reviews.push({
+                  author_association: comment.author_association,
+                  submitted_at: comment.updated_at || comment.created_at,
+                  body: comment.body || '',
+                });
+              }
+
+              // A round is "review received -> new commit pushed" (CLAUDE.md's
+              // definition). Count verdict-bearing comments that a later commit
+              // followed.
+              const verdictTimes = reviews
+                .filter(r => /Verdict\s*[:：]/.test(r.body))
+                .map(r => new Date(r.submitted_at))
+                .sort((a, b) => a - b);
+              const commitTimes = commits.map(c => new Date(c.commit.committer.date));
+              const rounds = verdictTimes.filter(t => commitTimes.some(c => c > t)).length;
+
+              prs.push({
+                number: pr.number,
+                head_sha: pr.head.sha,
+                created_at: pr.created_at,
+                last_commit_at: lastCommitAt,
+                ci,
+                review_rounds: rounds,
+                labels: pr.labels.map(l => l.name),
+                changed_files: files.map(f => f.filename),
+                mergeable: pr.mergeable,
+                reviews,
+              });
+            }
+
+            const facts = {
+              generated_at: new Date().toISOString(),
+              main: {
+                sha: mainSha,
+                ci_conclusion: mainCi,
+                commits_since_last_digest: 0,
+              },
+              breaker,
+              merged_without_user_since_breaker_on: streak,
+              prs,
+            };
+            fs.writeFileSync('facts.json', JSON.stringify(facts));
+            // Review bodies are untrusted external text and are never echoed.
+            core.info(`collected ${prs.length} open PRs; main ci=${mainCi}`);
+
+      - name: Build the digest
+        id: digest
+        run: |
+          set -euo pipefail
+          python scripts/pipeline_health.py \
+            --facts facts.json \
+            --previous docs/87-pipeline-health.json \
+            --output /tmp/digest.json \
+            --changed-output /tmp/changed.txt | tee /tmp/render.txt
+          echo "changed=$(cat /tmp/changed.txt)" >> "$GITHUB_OUTPUT"
+
+      - name: Summarize
+        run: |
+          set -euo pipefail
+          {
+            echo '### Pipeline health'
+            echo ''
+            echo '```'
+            cat /tmp/render.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Record the digest when it actually changed
+        if: steps.digest.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          cp /tmp/digest.json docs/87-pipeline-health.json
+          git config user.name  'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add docs/87-pipeline-health.json
+          # AGENTS.md iron rule 8 carries a narrow exception for exactly this
+          # path, this committer and this message prefix -- a machine-generated
+          # run-state record with no business semantics.
+          git commit -m 'chore(health): refresh pipeline health digest'
+          git push

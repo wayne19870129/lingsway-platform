@@ -1,0 +1,20 @@
+{
+  "alerts": [
+    "BREAKER_OFF"
+  ],
+  "automerge": {
+    "breaker": "absent",
+    "merged_without_user_since_breaker_on": 0
+  },
+  "generated_at": "1970-01-01T00:00:00+00:00",
+  "judgement_only_signals": [
+    "SAME_FINDING_FAILED_TWICE",
+    "PASS_BUT_CRITICAL"
+  ],
+  "main": {
+    "ci_conclusion": "pending",
+    "commits_since_last_digest": 0,
+    "sha": ""
+  },
+  "open_prs": []
+}
