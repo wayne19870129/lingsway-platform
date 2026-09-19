@@ -102,6 +102,7 @@ backend/tests/unit/test_services_wiring.py
 backend/tests/integration/test_db_adapters.py
 backend/tests/integration/test_models.py
 backend/tests/integration/test_provisioning_phase_boundary.py
+backend/tests/integration/test_gateway_route_binding_lock.py
 frontend/app/(customer)/subscriptions/page.tsx
 frontend/app/(customer)/subscriptions/[id]/page.tsx
 frontend/app/(customer)/orders/new/page.tsx
@@ -147,12 +148,80 @@ Codex 桌面版在开工前按规则停住并上报：**目标第 10 条点名�
 - `backend/app/domain/provisioning.py` —— `PENDING_MANUAL` 的枚举与文案在这里，
   但目标 7 的要求是**复用** ADR-026 的语义、**不得重新发明**，只读不改。
 - `backend/app/catalog.py` —— 约束已写明四档价目表是唯一事实源且不新增 SKU，不改。
-- `backend/tests/integration/test_gateway_route_binding_lock.py` —— 虽然引用了
+- ~~`backend/tests/integration/test_gateway_route_binding_lock.py` —— 虽然引用了
   `confirm_payment_and_provision`，但**没有** `OrderWorkflowState` 的假实现，
-  不受 Protocol 变更影响。
+  不受 Protocol 变更影响。~~
+  **⚠️ 这条判断是错的，2026-09-19 已被 MySQL 8.4 CI 推翻。见下一节。**
 
 **如果开工后发现还有清单外的必需文件：按 `docs/86` §7 停下来上报，不要自行扩大范围。**
 这次补漏的方式（先用代码证明必需，再改 TASK）就是标准动作。
+
+### 2026-09-19 第二次范围闭包补充：`UsagePeriod.order_id NOT NULL`
+
+PR #152（head `8e63680dd19b434664475703225f2a33d7ba85bb`）在 MySQL 8.4 上跑出
+**`1 failed, 802 passed`**，唯一失败：
+
+```
+backend/tests/integration/test_gateway_route_binding_lock.py
+  ::test_sync_subscription_usage_expiry_persists_when_no_active_egress_binding
+Column 'order_id' cannot be null
+```
+
+**补入：`backend/tests/integration/test_gateway_route_binding_lock.py`。**
+
+#### 为什么第一次闭包检查漏了它
+
+**上面那张"查过、明确不加"的表里，点名不加的就是这个文件。** 当时给的理由
+（"它没有 `OrderWorkflowState` 的假实现"）**本身没错，但只覆盖了一条轴**：
+
+| 影响轴 | 第一次检查 | 该文件的实际情况 |
+|---|---|---|
+| `OrderWorkflowState` Protocol 新增方法 | ✅ 查了，四个落点全找齐 | 确实不受影响 |
+| **`UsagePeriod` schema 新增必填列** | ❌ **根本没查这条轴** | 第 1005 行直接构造 `UsagePeriod(...)` |
+
+**一个文件可以从多个方向被同一个 TASK 影响。只沿一条轴做闭包，得到的是
+"这条轴上闭合"，不是"闭合"。** 这条教训比"漏了一个文件"重要——它会在任何
+一次"顺着某个符号找引用"的检查里重演。
+
+**做闭包检查时，至少要分别沿这几条轴各走一遍**：被改的**函数/协议**、被改的
+**数据库列**、被改的**API 契约**、被改的**渲染字段**。
+
+#### 本次沿 schema 轴做的闭包检查（逐条可复核）
+
+S07 按 ADR-027 把 `UsagePeriod.order_id` 实现为
+`Mapped[int] = mapped_column(ForeignKey("orders.id"), unique=True)`
+——**NOT NULL + FK + UNIQUE**（`models/subscription.py:132`，PR #152 head 实测）。
+凡是直接构造 `UsagePeriod(...)` 却不传 `order_id` 的地方都必挂。
+
+全仓库构造点（`git grep "UsagePeriod(" 8e63680`，共四处）：
+
+| 位置 | 是否在允许清单 |
+|---|---|
+| `backend/app/api/admin.py:135` | ✅ 已在 |
+| `backend/app/api/admin.py:180` | ✅ 已在 |
+| `backend/tests/unit/test_order_subscription_api.py:336` | ✅ 已在 |
+| `backend/tests/integration/test_gateway_route_binding_lock.py:1005` | ❌ **本次补入** |
+
+又排查了间接路径（工厂函数、fixture、原始 SQL）：
+`git grep -l "usage_period\|UsagePeriod" -- backend/tests/` **只命中上面那两个
+测试文件**；`backend/tests/*/conftest.py` **完全不碰** `UsagePeriod`。
+
+**未发现其他因 `order_id NOT NULL` 必须新增的清单外文件。**
+
+这个结论有两重支撑：上面的静态搜索，**以及一次真实的全量 MySQL 8.4 运行**
+——803 条里恰好只有这一条失败。
+
+#### 修法：改测试的 fixture，不是松生产 schema
+
+**正确修复**：该测试创建 `UsagePeriod` 时关联一个已存在的 `Order.id`
+（同文件内已有创建 `Order` 的代码可直接复用）。
+
+**绝对不许**：把 `order_id` 改回 nullable 来让 CI 变绿。
+NOT NULL + UNIQUE 是 **ADR-027 的业务决定**——一个周期对应一张订单，
+这是整个队列模型的核心约束。**为了绿一条测试去松生产约束，等于用 schema
+掩盖测试没跟上**，属于 `docs/86` §3「不得把失败的测试改成通过」的同一类。
+
+**本次只补范围，不动那条测试的代码**——修它是 Codex 在 PR #152 里的活。
 
 > **2026-09-19 更正：编号从 `0026` 改为 `0024`。**
 > 原文预留 0026，理由是"S04-B2-B 会占用 0024/0025"——那是按 S04 先做写的。
