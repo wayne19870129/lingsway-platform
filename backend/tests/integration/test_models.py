@@ -8,7 +8,7 @@ from backend.app.core.database import Base
 
 
 def test_split_models_register_the_complete_legacy_metadata() -> None:
-    assert len(Base.metadata.tables) == 38
+    assert len(Base.metadata.tables) == 40
     assert {
         "customers",
         "orders",
