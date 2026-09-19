@@ -20,7 +20,10 @@ name: Pipeline health
 #     produced a no-op commit every run.
 #
 # The digest lives on its own `pipeline-health` branch, never on the default
-# branch. The first live run proved why: the default branch carries a ruleset
+# branch. The copy at docs/87-pipeline-health.json on the DEFAULT branch is a
+# frozen seed kept only as a schema reference (its `generated_at` is the epoch,
+# which is the giveaway) -- it is never updated and must never be read as
+# current state, including by this workflow's own comparison step. The first live run proved why: the default branch carries a ruleset
 # ("Changes must be made through a pull request", "9 of 9 required status
 # checks"), so the push was rejected outright. Routing machine output to a side
 # branch is the better answer anyway -- it needs no exception to any rule, and
@@ -178,6 +181,26 @@ jobs:
               prs,
             };
             fs.writeFileSync('facts.json', JSON.stringify(facts));
+
+            // The previous digest must come from the branch this workflow
+            // WRITES to, not from the checkout. The checkout is the default
+            // branch, whose copy is a frozen seed that never updates -- reading
+            // it would make every run differ from it, producing a commit every
+            // two hours even when nothing changed. That is exactly the no-op
+            // churn `has_changed` exists to prevent.
+            try {
+              const { data: previous } = await github.rest.repos.getContent({
+                owner, repo, path: 'docs/87-pipeline-health.json', ref: 'pipeline-health',
+              });
+              fs.writeFileSync(
+                'previous.json',
+                Buffer.from(previous.content, previous.encoding).toString('utf8'),
+              );
+            } catch (error) {
+              if (error.status !== 404) { throw error; }
+              core.info('no previous digest on pipeline-health; treating as changed');
+            }
+
             // Review bodies are untrusted external text and are never echoed.
             core.info(`collected ${prs.length} open PRs; main ci=${mainCi}`);
 
@@ -187,7 +210,7 @@ jobs:
           set -euo pipefail
           python scripts/pipeline_health.py \
             --facts facts.json \
-            --previous docs/87-pipeline-health.json \
+            --previous previous.json \
             --output /tmp/digest.json \
             --changed-output /tmp/changed.txt | tee /tmp/render.txt
           echo "changed=$(cat /tmp/changed.txt)" >> "$GITHUB_OUTPUT"

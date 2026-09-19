@@ -331,6 +331,27 @@ def test_workflow_cannot_touch_pull_requests() -> None:
         assert set(job.get("permissions") or {}) <= {"contents"}, job.get("permissions")
 
 
+def test_workflow_compares_against_the_branch_it_writes_to() -> None:
+    """Regression guard for a real bug caught in review.
+
+    The comparison must read the previous digest from the `pipeline-health`
+    branch. Reading `docs/87-pipeline-health.json` out of the checkout reads the
+    default branch's frozen seed instead, so every run would differ from it and
+    commit a timestamp-only change every two hours -- the exact churn
+    `has_changed` exists to prevent.
+    """
+    source = WORKFLOW_PATH.read_text(encoding="utf-8")
+    assert "--previous previous.json" in source
+    assert "--previous docs/87-pipeline-health.json" not in source
+    assert "ref: 'pipeline-health'" in source
+
+
+def test_the_committed_digest_is_a_frozen_seed_not_live_state() -> None:
+    """main's copy must stay obviously stale so nobody reads it as current."""
+    stored = json.loads(DIGEST_PATH.read_text(encoding="utf-8"))
+    assert stored["generated_at"].startswith("1970-01-01"), stored["generated_at"]
+
+
 def test_workflow_is_scheduled_and_dispatchable() -> None:
     parsed = yaml.safe_load(WORKFLOW_PATH.read_text(encoding="utf-8"))
     triggers = parsed[True] if True in parsed else parsed["on"]
