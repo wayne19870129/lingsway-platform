@@ -52,6 +52,264 @@ durable transport materialization receipt 的 producer/commit/crash 契约、
 8. Mihomo DNS 字段/类型的 candidate-schema 校验闸门（S04-A 只保证了
    canonical mapping/value ownership）。
 
+### S04-B2-B 的执行切分（**2026-09-19 重构：4 个 checkpoint**）
+
+> **为什么重构：连续两次同一组 finding 未能完成。** 按 `docs/85` §6.1 的熔断
+> 规则，同一 finding 连续 2 次修复失败后**不得原样再试**。
+>
+> **根因不是 Codex 不会写，是一次性要求的量与耦合度。** Round 1 的指令卡有
+> 8 条,同时要求 receipt 绑定、repr 脱敏、SQL secret resolver、manifest
+> builder、generation authority、concrete DB loader、preparation transaction、
+> recovery、DNS gate、runtime readback、exact verifier，外加 **8 个测试文件
+> ~25 个新测试** 与 2 条 MySQL 集成测试。**那不是一张指令卡，那是整个 B2-B。**
+> 其中 loader / preparation / recovery / freshness 四项**互相依赖**，任何一项
+> 没定下来，其余三项都无法收敛——这正是两次都停在同一处的原因。
+>
+> **本次只改执行粒度，不改架构结论，不降低任何最终验收要求，
+> 不把任何 B2-B 要求推迟到 S04-C。** 下面四个 checkpoint 的并集
+> **等于**原 B2-B 的交付项 1–8 与验收标准全集。
+
+#### 依赖关系（单向，不得回环）
+
+```
+B2-B1  receipt / secret resolver / manifest / allocator / DNS gate
+   │        ← 不依赖任何其它 checkpoint
+   ▼
+B2-B2  concrete DB desired loader + preparation transaction
+   │        ← ⛔ 被一个真实架构缺口阻塞，见「必须新增的 ADR」
+   ▼
+B2-B3  freshness 复核 / recovery / runtime exact readback
+   │
+   ▼
+B2-B4  完整 integration / guard / migration / concurrency 验收
+```
+
+**不得为了拆分制造任何过渡性不安全设计**：不得出现第二个 desired-state
+authority、第二个 writer、临时 runtime fallback、或"先用 runtime 兜底"。
+**每个 checkpoint 结束时，已接线的部分必须已经是 fail-closed 的终态**；
+未接线的部分保持 B1 的注入式边界（`reconcile_mihomo_job()` 的四个参数），
+**不得留下半接线状态**。
+
+---
+
+#### ⛔ 必须先补一条 ADR：deployment constants 的来源与所有权
+
+**B2-B2 在这一点上无法开工，而且这不是粒度问题，是 ADR 真的没写。**
+
+实测证据（`main` = `a10d237d`）：
+
+| 事实 | 位置 |
+|---|---|
+| `deployment_constants` 的白名单有 7 个 key，其中 6 个有默认值 | `mihomo_projection.py:152-183` |
+| **`external-controller` 没有默认值**，`_validate_controller_address(None)` 直接抛 `MIHOMO_CONTROLLER_ADDRESS_INVALID` | `mihomo_projection.py:124-126, 183` |
+| `backend/app/core/config.py` **零个 Mihomo 字段** | 实测 `grep -i mihomo` 无输出 |
+| **没有任何 deployment-constant 的 DB 表** | 模型清单里无对应表 |
+| `core/config.py` 属 **S04-C** 的允许清单，不在 B2-B | 本文件「允许修改的文件」 |
+| 现有测试把它**硬编码**成 `"172.30.0.10:9090"` | `test_mihomo_projection.py:74` |
+
+两条 ADR 都**提到**它却都**没定位**它：
+
+- **ADR-023 §2.2**：操作 transaction 要读「deployment constants 的**当前版本**」
+  ——"当前版本"暗示一个可 current-read 的版本化来源，但没说是什么；
+- **ADR-023 §1.2 / 行 24**：字段必须被归类为 deployment constant 等三选一，
+  但**归类之后存哪里没有规定**；
+- **ADR-025 §4**：manifest 必须覆盖 deployment constants，同样不说来源。
+
+**所以 concrete DB desired loader 造不出一个合法的 `DesiredForwarderState`**
+——这正是两次都卡在 loader 的可证明原因之一。
+
+**候选方案互斥且各有代价，不由本次 TASK 修正擅自选定：**
+
+1. **`Settings`（`core/config.py`）** —— 但该文件属 S04-C，会把 S04-C 的
+   范围提前拉进 B2-B，与"三阶段不得合并"冲突；
+2. **新建一张版本化的 deployment-constant DB 表** —— 最贴合 ADR-023 §2.2
+   的"当前版本"措辞，但需要第三条迁移，且要定义谁能写；
+3. **仓库自有的固定常量**（ADR-023 行 24 的"固定部署常量"字面读法）
+   —— `external-controller` 是环境相关的 host:port，写死不适合生产；
+   B2-B 不做生产激活，所以"B2-B 用固定值、S04-C 再迁移"在**本阶段**成立，
+   但那等于承认一个将来必须改的临时设计，需要明确记录而不是默认。
+
+> **需要的 ADR：`ADR-035 — Mihomo deployment constants 的来源与所有权边界`。**
+> 它必须唯一确定：存储位置、谁有写权限、如何做 current-read、
+> 如何进入 manifest、以及 S04-C 激活时是否改变来源。
+> **在 ADR-035 被接受之前，B2-B2 / B2-B3 / B2-B4 不得开工。**
+> **B2-B1 完全不受此阻塞**（它不构造 desired state，只消费传入的）。
+
+---
+
+#### 已由 ADR + 现有代码唯一确定的实现边界（**写死在这里，不要让执行者重新设计**）
+
+这些是两次卡住时被反复重新推导的东西。**它们都有唯一答案，照抄即可：**
+
+| 问题 | 唯一答案 | 依据 |
+|---|---|---|
+| **concrete loader 读哪些 DB 权威行** | 启用中的 `RouteGroup` / `RouteBinding` / `RouteEgressBinding`；`TrafficRule`；`EgressGroup` / `EgressEndpoint` / `EgressBinding`；`TransportProviderRecord` / `TransportEndpointRecord` / `EgressTransportAssignment`；`MihomoTransportMaterialization`（receipt）；`Secret`（仅 ref + revision） | ADR-025 §4 的清单逐项映射到仓库现有模型 |
+| **transport → receipt → cache 的确定性解析路径** | `cache_path = cache_root / f"{record_id}-{safe_code}-{sha256('record_id\|code\|kind\|implementation')[:16]}.yaml"`，即 `TransportProviderResolver._cache_path()` **是唯一权威**；`cache_identity` 必须由**同一个四元组**导出，**绝不**从 subscription URL/token 构造 | `providers/transport/resolver.py:58-64` |
+| **receipt 的精确绑定元组** | `(owner_record_id, provider_code, source_revision, cache_identity, content_hash, freshness_deadline)` 六项**全部**精确一致才放行 | ADR-025 §3a；`models/ops.py:189-200`；`mihomo_projection.py:403-405` 已用同样四元组做过比对 |
+| **generation 分配与 intent 入队的 transaction owner** | **`prepare_mihomo_reconciliation()` 唯一拥有**：在现有 `mihomo_projection_write(db)` 命名锁内，fresh-read → manifest → allocate/reuse → 调用现有 `enqueue_mihomo_reconciliation()`，**两者同一个 DB transaction 提交**；`enqueue_mihomo_reconciliation()` 的签名**不改**（它只 `db.add` + `flush`，不 commit，天然可被复用） | ADR-025 §5；`mihomo_reconciliation.py:154-195` |
+| **preparation 与 `reconcile_mihomo_job()` 的关系** | **完全分离，无调用关系。** preparation 是**生产者**（写 generation + intent）；`reconcile_mihomo_job()` 是**消费者**（`_claim()` 取 job 后执行）。两者只通过 `Job.payload_json` 的 `snapshot_revision` 相连 | `mihomo_reconciliation.py:550-590` |
+| **recovery 的唯一入口** | `recover_mihomo_projection()`，**唯一入口**，只从 fresh DB + committed receipts 重建；缺失/不匹配/过期一律 `MIHOMO_STALE_DESIRED_SNAPSHOT`；**绝不**从 runtime/current YAML/backup/cache 反向铸 desired state 或 receipt | ADR-023 §1.2 第三行（runtime 只读 evidence）+ ADR-025 §6 |
+| **apply 前与 finalization 前的 freshness 复核复用哪个 helper** | **新增一个** `confirm_fresh_generation(db, *, expected_revision) -> None`，**三处共用**：现有第一次 loader read 后的校验（`mihomo_reconciliation.py:588-590` 已存在，改为调用它）、`provider.apply()` 之前、写 `SUCCEEDED`/finalization_evidence 之前。三处**必须是同一个函数**，不得各写一份 | ADR-023 §3；ADR-025 §5 |
+| **exact readback verifier 的输入/输出边界** | 输入：`candidate` + `operation_id` + `snapshot_revision`（即现有 `ProjectionVerifier.verify()` 签名，**不改**）；输出：`ProjectionVerification`。runtime 读回只作为 **evidence**，**绝不**进入 loader 或 desired state；不一致时 fail-closed，交给现有 `MIHOMO_RUNTIME_UNKNOWN` 路径 | `mihomo_reconciliation.py:90-93`；ADR-023 §1.2 |
+| **`policy` 字段怎么办** | 现有 `_validate_sections()` 对非空 `policy` 直接抛 `MIHOMO_POLICY_UNSUPPORTED`（`mihomo_projection.py:191-192`）。因此 loader **必须**产出空 `policy`，manifest 以"空"覆盖它。**不要为了对齐 ADR-025 §4 的字面清单去实现 policy** | 现有代码 + ADR-023 行 24（无法表达 ownership 的字段必须归类，不得掩盖） |
+
+---
+
+#### B2-B1 —— receipt 绑定 / secret resolver / manifest + allocator / DNS gate
+
+**目标**：把"消费 receipt、解析 controller secret、从**给定的** `DesiredForwarderState`
+算出 canonical manifest 与 generation、以及 DNS candidate 校验"这四件**互不依赖**
+的事做完做透。**本 checkpoint 不构造 desired state**——它消费调用方传入的。
+
+**前置条件**：无（ADR-025 已 Accepted，TASK 已合并）。**不被 ADR-035 阻塞。**
+
+**必须完成的 production wiring**：
+- receipt **producer** 侧完成接线：`sync_nodes()` 对**传给 `write_provider_cache()`
+  的同一份 bytes** 在写盘前算 SHA-256；`workers/transport_sync.py` 在
+  endpoint inventory + provider status 的**同一 DB transaction** 内 upsert receipt，
+  全流程只有最后一个 `db.commit()`。
+- **consumer 侧**交付 `verify_materialization()` 与 `load_transport_materialization()`，
+  但**此时尚无生产调用点**（调用点在 B2-B2 的 loader）——这是**允许的**，
+  因为它们的正确性由本 checkpoint 的测试完整覆盖，且 B2-B2 会立即接上。
+- `SqlMihomoControllerSecretResolver` 交付并可被注入；**接线到
+  `reconcile_mihomo_job()` 的 `resolver` 参数在 B2-B2 完成**。
+- DNS candidate schema gate **立即生效**（它在 `_validate_sections()` 内，
+  是既有渲染路径的一部分）。
+
+**允许修改的文件**（均已在 B2-B 总清单内，无新增）：
+```
+backend/app/infra/mihomo_materialization.py
+backend/app/infra/mihomo_generation.py
+backend/app/infra/credential_resolver.py
+backend/app/models/ops.py
+backend/app/models/__init__.py
+backend/app/providers/transport/subscription.py
+backend/app/providers/forwarder/mihomo_projection.py     # 仅 DNS schema gate
+backend/app/workers/transport_sync.py
+infrastructure/alembic/versions/0025_mihomo_projection_generations.py
+infrastructure/alembic/versions/0026_mihomo_transport_materializations.py
+backend/tests/unit/test_mihomo_materialization.py
+backend/tests/unit/test_mihomo_generation.py
+backend/tests/unit/test_transport_provider.py
+backend/tests/unit/test_mihomo_projection.py
+backend/tests/guards/test_mihomo_reconciliation_safety.py
+backend/tests/guards/test_secret_leak.py
+backend/tests/integration/test_models.py
+```
+
+**必须新增/通过的测试**（名称照抄，不要改名）：
+- `test_mihomo_materialization.py`：`test_receipt_hash_mismatch_fails_closed_without_remint`、
+  `test_receipt_cache_identity_mismatch_fails_closed`、
+  `test_missing_or_expired_receipt_fails_closed`、
+  `test_source_revision_mismatch_fails_closed`、
+  `test_verified_materialization_repr_redacts_raw_content`
+  —— 每条都断言 receipt 行数与内容**未被 verifier 改写**。
+- `test_mihomo_generation.py`：保留 `test_mihomo_forwarder_is_still_rejected`；新增
+  `test_generation_reuses_only_exact_latest_manifest`、
+  `test_generation_a_b_a_allocates_new_revision`（三个 revision 严格递增且第三 ≠ 第一）、
+  `test_manifest_excludes_materialized_raw_content_and_plaintext_secret`、
+  `test_manifest_datetime_and_order_are_canonical`
+- `test_transport_provider.py`：`test_subscription_sync_hashes_exact_bytes_before_atomic_cache_write`
+  （monkeypatch `write_provider_cache` 捕获 bytes，断言 proof hash = 该 bytes 的 SHA-256）
+- `test_mihomo_projection.py`：DNS 类型失败用例，至少断言 `{"enable": "true"}` 被拒
+- `test_mihomo_reconciliation_safety.py`：producer-uniqueness guard
+  —— 除 `workers/transport_sync.py` 外任何路径不得创建/upsert `MihomoTransportMaterialization`
+- `test_secret_leak.py`：sentinel 放进 materialized YAML 与 controller secret，
+  断言 receipt / generation / verified materialization 的 `repr()`、错误文本、日志均不出现
+- `test_models.py`：表计数从 38 更新为 40（新增两表）
+- `SqlMihomoControllerSecretResolver` 的 purpose/revision 校验测试
+  —— 放 `test_mihomo_generation.py` 或新建，**测试名自定，但必须存在**
+
+**明确不做**：不写 concrete DB loader；不写 preparation/recovery；不改
+`mihomo_reconciliation.py`；不改 `mihomo.py`；不改 registry；不做 S04-C。
+
+---
+
+#### B2-B2 —— concrete DB desired loader + preparation transaction
+
+**⛔ 前置条件：ADR-035 已 Accepted**（deployment constants 来源）**且 B2-B1 已合并。**
+
+**目标**：`SqlMihomoDesiredSnapshotLoader` 从 DB 全量重建 `DesiredForwarderState`
+（铁律 1），`prepare_mihomo_reconciliation()` 在锁内把 generation 与
+identifier-only `MIHOMO_RECONCILE` intent 在**同一事务**提交。
+
+**必须完成的 production wiring**：loader 与 resolver **真正接到**
+`reconcile_mihomo_job()` 的参数上（替换注入式 fake）；preparation 成为
+generation + intent 的**唯一**生产者。
+
+**允许修改的文件**：`backend/app/infra/mihomo_reconciliation.py`、
+`backend/app/infra/credential_resolver.py`、
+`backend/tests/unit/test_mihomo_reconciliation.py`（均已在总清单内）。
+
+**必须新增的测试**：`test_prepare_generation_and_intent_commit_together`、
+`test_sql_controller_secret_resolver_requires_exact_purpose_and_revision`、
+loader 全量 DB 重建与稳定排序的覆盖。
+
+**明确不做**：不做 freshness 二次/三次复核；不做 recovery；不做 runtime readback；
+不改 `mihomo_projection_lock.py` / `mihomo_blocker.py` 的公开签名。
+
+---
+
+#### B2-B3 —— freshness 三点复核 / recovery / runtime exact readback
+
+**前置条件**：B2-B2 已合并。
+
+**目标**：`confirm_fresh_generation()` 一个 helper 用于三处（见上表）；
+`recover_mihomo_projection()` 唯一入口；`MihomoExactProjectionVerifier` 接到
+`verifier` 参数上；`MihomoRuntime` / `LocalMihomoRuntime` 增加只读 readback。
+
+**必须完成的 production wiring**：三处 freshness 复核全部生效；verifier 真正接线。
+
+**允许修改的文件**：`backend/app/infra/mihomo_reconciliation.py`、
+`backend/app/providers/forwarder/mihomo.py`、
+`backend/tests/unit/test_mihomo_reconciliation.py`（均已在总清单内）。
+
+**必须新增的测试**：`test_stale_snapshot_before_apply_causes_zero_runtime_mutation`、
+`test_desired_change_before_finalization_cannot_mark_succeeded`、
+`test_recovery_uses_fresh_db_and_never_runtime_as_desired_source`。
+
+**明确不做**：不放行 registry；不接真实 Mihomo；不部署。
+
+---
+
+#### B2-B4 —— 完整 integration / guard / migration / concurrency 验收
+
+**前置条件**：B2-B1–B3 全部合并。
+
+**目标**：在**真实 MySQL 8.4** 上证明前三个 checkpoint 的不变式。
+
+**允许修改的文件**：`backend/tests/integration/test_mihomo_reconciliation_mysql.py`、
+`backend/tests/integration/test_db_adapters.py`（均已在总清单内）。
+
+**必须新增的测试**：`test_mihomo_migrations_are_idempotent`（用 Alembic
+`MigrationContext + Operations` 对 0025/0026 的 `upgrade()` 调用两次）；
+真实 MySQL 上的 generation+intent 同事务、同 manifest 重用 latest、
+A→B→A 新 revision、**两个并发 writer 只有一个 runtime apply**。
+
+**明确不做**：不做 S04-C；不部署。
+
+---
+
+#### PR #156 应停在哪里
+
+**#156 落 B2-B1，到此为止。**
+
+- #156 当前 head `143c1e58f52f03967ece66e7ff56e2f01cb41127` 已经包含 B2-B1 的
+  大部分骨架（generation allocator、materialization verifier、两个 migration、
+  两个 ORM model、`test_models.py` 更新）；
+- Codex **本地未提交**的工作（receipt exact binding、repr 脱敏、SQL controller
+  secret resolver、canonical manifest、DNS validation、runtime readback 雏形）
+  **全部落在 B2-B1 范围内，唯一例外是 runtime readback 雏形（属 B2-B3）**。
+  **不要求丢弃任何本地修改**：readback 那部分**保留在工作树、暂不提交**，
+  等 B2-B3 再提交即可；其余按 B2-B1 的验收补齐后提交。
+- **安全切分点**：B2-B1 结束时系统处于一致状态——receipt producer 已完整接线，
+  consumer 与 resolver 已交付且被测试完整覆盖但尚无生产调用点，
+  `reconcile_mihomo_job()` 仍走 B1 的注入式边界，**没有半接线、没有临时 fallback、
+  `FORWARDER_PROVIDER=mihomo` 仍被拒绝**。
+- **B2-B2 起新开 PR**，因为它被 ADR-035 阻塞，不能让 #156 无限期挂着。
+
+---
+
 ### S04-C — 注册表放行与生产选择（NOT STARTED）
 
 `build_registry()` 接受 `FORWARDER_PROVIDER=mihomo`，

@@ -525,7 +525,38 @@ Claude 的产出形态是：ADR、TASK 文件、`docs/81-reviews/REVIEW-*.md`、
 
 | 任务 | 状态 |
 |---|---|
-| **S04-B2-B** Mihomo 运行时实现 | **下一个要派的任务**，派给 Codex 桌面版 |
+| **S04-B2-B1** receipt / secret resolver / manifest / allocator / DNS gate | **在途：PR #156**（`task/s04-b2-b-mihomo-runtime`），`no-automerge`、`risk:high`、由 User 人工合 |
+| **S04-B2-B2 / B3 / B4** | ⛔ **被 ADR-035 阻塞**（Mihomo deployment constants 的来源未定），见下 |
+
+> **2026-09-19 · S04-B2-B 已拆成 4 个 checkpoint（熔断后的重构）**
+>
+> Codex 连续两次未能完成同一组 Round 1 finding，触发 `docs/85` §6.1
+> 「同一 finding 连续 2 次修复失败」熔断，**不得原样再试**。
+>
+> **根因不是执行者。** Round 1 的指令卡有 8 条，同时要求 receipt 绑定、
+> repr 脱敏、SQL secret resolver、manifest builder、generation authority、
+> concrete DB loader、preparation transaction、recovery、DNS gate、
+> runtime readback、exact verifier，外加 **8 个测试文件约 25 个新测试**
+> 与 2 条 MySQL 集成测试。**那不是一张指令卡，那是整个 B2-B。**
+> 其中 loader / preparation / recovery / freshness **互相依赖**，
+> 任何一项没定下来其余三项都收敛不了——所以两次停在同一处。
+>
+> **给你的可操作教训（写指令卡时看这条）**：`docs/85` §3.1b 要求指令卡
+> "写到 Codex 不需要思考"，但**粒度细 ≠ 量可以无限**。一张卡如果包含
+> **互相依赖**的多个新抽象，细化每一条并不能让它可完成——**必须先切成
+> 有单向依赖的段落**。判断标准很简单：**这一轮能不能独立跑通验收并提交？**
+> 不能，就该切。
+>
+> **更要紧的是它暴露了一个真架构缺口**（不是粒度问题）：
+> `deployment_constants` 里的 **`external-controller` 没有任何来源**
+> ——无默认值、`core/config.py` 零个 Mihomo 字段且属 S04-C、没有对应 DB 表，
+> 而 ADR-023 §2.2 只说要读它的"当前版本"、从未说它存在哪里。
+> **concrete DB loader 因此造不出合法的 `DesiredForwarderState`。**
+> 需要 **ADR-035**（Claude 写），在它被接受前 B2-B2/B3/B4 不得开工。
+>
+> **B2-B1 不受阻塞**，PR #156 落到 B2-B1 为止；B2-B2 起新开 PR。
+> 逐条边界（loader 读哪些表、cache identity 怎么算、哪个函数拥有哪个事务、
+> freshness 复用哪个 helper）已全部写进 TASK，**不要让执行者重新设计**。
 
 > **2026-09-19：S07 已完成并合并（PR #152，`a9d5bd2`）。** 迁移
 > `0024_usage_period_queue.py` 已在 `main` 上。S07 从在途移出，见 §5.3b。
@@ -714,6 +745,9 @@ User 全权授权 Claude 决定，结论写在 ADR-027 §7.1–7.4。
 时，要对着当前 `main` 加上所有 open PR 一起查，不能只看 `main`。**
 
 当前已用到：**ADR-034**、**TASK-S11**。下一个分别是 **ADR-035**、**TASK-S12**。
+
+> **`ADR-035` 已被预定**：S04-B2-B 的 deployment-constant 来源缺口（见 §5.0）。
+> 认领 ADR 编号时请从 **ADR-036** 起。
 
 已用 TASK 编号：S04 / S05 / S06 / S07（订单队列计费）/ S08（自动合并流水线）
 / S09（备份恢复）/ S10（流水线健康摘要）/ S11（风险分类器路径表）。

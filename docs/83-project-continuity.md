@@ -320,11 +320,35 @@ different contents) and the PR #128 version won.
   (`ADR-025-mihomo-projection-generation-authority.md`) and the S-series
   implementation TASK (`TASK-S04-mihomo-activation.md`). Architecture and
   documentation only — no Python, no ORM, no migration, as specified.
-- **S04-B2-B:** **READY — next implementation task.** Both gates are now
-  satisfied: ADR-025's status line reads `Accepted` (flipped 2026-09-19 in
-  the spec-only preflight PR, per that ADR's own transition contract), **and**
+- **S04-B2-B:** **IN FLIGHT, split into four checkpoints (2026-09-19).** Both
+  original gates are satisfied: ADR-025 reads `Accepted` and
   `TASK-S04-mihomo-activation.md` is merged. **ADR-025's status is no longer
   a blocker; do not cite it as one.**
+
+  **B2-B1** (receipt binding, SQL controller-secret resolver, canonical
+  manifest + generation allocator, DNS candidate gate) is on **PR #156** and
+  depends on nothing else. **B2-B2 / B2-B3 / B2-B4 are blocked on a new ADR**
+  — see the next bullet. The four checkpoints' union equals the original
+  B2-B; nothing was deferred to S04-C and no acceptance criterion was
+  lowered. The split followed the §6.1 breaker: Codex failed the same Round 1
+  finding set twice, so retrying it unchanged was not allowed.
+
+- **⛔ S04-B2-B2 blocker — `ADR-035` is needed and does not exist yet:**
+  Mihomo's `deployment_constants` have **no defined source**. Measured on
+  `main` (`a10d237d`): `external-controller` is the one key with no default
+  (`_validate_controller_address(None)` raises), `backend/app/core/config.py`
+  has zero Mihomo fields **and belongs to S04-C**, and no deployment-constant
+  table exists. ADR-023 §2.2 says the operation transaction reads "the
+  current version of the deployment constants" without ever saying where they
+  live; ADR-025 §4 requires them in the manifest and is equally silent. **So
+  the concrete DB desired loader cannot construct a valid
+  `DesiredForwarderState`** — this is a genuine architecture gap, not a
+  granularity problem, and it is the provable reason the loader work stalled
+  twice. The three candidate resolutions (Settings, a versioned DB table,
+  repo-owned fixed constants) are mutually exclusive and are deliberately
+  **not** chosen in the TASK. ADR-035 must fix the store, the write
+  authority, the current-read path, the manifest representation, and whether
+  S04-C changes the source.
 
   Two things to carry in rather than re-derive. **Migration numbers moved**:
   S07 took `0024_usage_period_queue`, so B2-B's two migrations are
