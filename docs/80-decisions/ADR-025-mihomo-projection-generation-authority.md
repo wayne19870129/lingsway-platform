@@ -1,6 +1,6 @@
 # ADR-025: Mihomo Projection Generation Authority
 
-- Status: **Proposed**
+- Status: **Accepted**
 - Date: 2026-09-18
 - Scope: S04-B2 Mihomo projection-generation authority, transport
   materialization receipt authority, and freshness boundary
@@ -24,6 +24,18 @@ The transition is explicit and owned:
 S04-B2-B must not begin implementation while this line still reads
 `Proposed`. That is the merge gate, stated once here rather than repeated as
 a status string that can silently go stale.
+
+> **Transition recorded 2026-09-19: `Proposed` → `Accepted`.**
+> PR #128 is merged, so the condition in row 2 holds. The row assigned the
+> flip to "the first S04-B2-B PR … in its own first commit, before any
+> implementation commit"; it was done one step earlier still, in a
+> spec-only preflight PR that contains **no implementation at all**
+> (`claude/s04-b2-b-preflight`). That is stricter than the contract, not
+> looser: the gate is now already open when B2-B starts, so its first
+> commit cannot be the one that opens its own gate.
+>
+> **Both B2-B gates are now satisfied**: this line reads `Accepted`, and
+> `TASK-S04-mihomo-activation.md` is merged. S04-B2-B is clear to begin.
 
 ## Decision summary
 
