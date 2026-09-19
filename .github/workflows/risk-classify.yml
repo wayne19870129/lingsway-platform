@@ -13,6 +13,13 @@ jobs:
   classify:
     runs-on: ubuntu-latest
     steps:
+      # This job reads scripts/risk_classify_paths.js off disk, so the repo has
+      # to be checked out. It previously only called the API and had no
+      # checkout at all -- adding the require() without this step is what made
+      # PR #144 fail with MODULE_NOT_FOUND.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
@@ -24,7 +31,12 @@ jobs:
               pull_number: pullNumber,
               per_page: 100,
             });
-            const { classifyPath } = require('./scripts/risk_classify_paths.js');
+            // Absolute path: github-script resolves require() against the
+            // action's own directory, not the workspace, so a relative path
+            // fails even after a successful checkout.
+            const { classifyPath } = require(
+              `${process.env.GITHUB_WORKSPACE}/scripts/risk_classify_paths.js`
+            );
             const rank = { low: 1, medium: 2, migration: 3, high: 4 };
 
             const classified = files.map(file => ({ path: file.filename, risk: classifyPath(file.filename) }));
