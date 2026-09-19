@@ -74,6 +74,33 @@ state, reviews, and checks. Do not rely on an older chat or SHA snapshot.
 - Human merge-readiness requires CI, Security, and Risk all green on that same
   exact head SHA; review verdict and check status remain separate facts.
 
+### `main` is mechanically protected — corrected 2026-09-19
+
+`AGENTS.md` rule 8 and `CLAUDE.md` both used to state that branch protection on
+`main` was unavailable on this plan, so discipline was the only guardrail.
+**That was wrong, and it was wrong in the safe direction.** The first live run
+of `pipeline-health.yml` tried to push and was rejected:
+
+```
+remote: error: GH013: Repository rule violations found for refs/heads/main.
+remote: - Changes must be made through a pull request.
+remote: - 9 of 9 required status checks are expected.
+```
+
+`main` carries a ruleset, and the repository is public, so the "private
+personal plan" premise never held either. Two consequences a fresh session
+should not re-derive:
+
+1. **Any design that has a machine write to `main` directly will fail.** The
+   health digest therefore lives on its own `pipeline-health` branch, written
+   through the Contents API. No iron-rule exception is needed, and the one
+   briefly added for it has been removed — `main`'s protection stays absolute
+   rather than carrying a carve-out that would have to be trusted.
+2. **The discipline is not relaxed by this.** Who configured that ruleset and
+   when it might change are not under this repository's version control.
+   Resting the rule on a setting outside the repo is what rule 8 existed to
+   avoid; the backstop is a second line, not a replacement for the first.
+
 ## 3. Safety and production boundary
 
 Never place plaintext credentials, tokens, subscription URLs, or secret values

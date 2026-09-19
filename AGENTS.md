@@ -18,25 +18,31 @@
 6. 任何会重载 Xray 的改动,必须经过九步安全重载,不得直连重启
 7. Alembic 历史 revision 一律不得改写。schema 与代码不一致时,只能新增
    reconciliation migration 补救,且新增迁移必须幂等
-8. main 分支的机械保护当前不可用(私有个人仓库计划限制),Agent 必须自我约束:
+8. **main 分支有机械保护(2026-09-19 实测确认,此前本条写反了)。**
    任何情况下**不得直接 push 到 main,不得 force push**。违反视为严重事故。
 
-   **唯一的窄例外(2026-09-19 修订,依据 ADR-030 §3 / TASK-S10):**
-   `pipeline-health.yml` 这个 workflow 可以直接向 main 提交
-   **`docs/87-pipeline-health.json` 这一个文件**。三个条件必须同时成立,
-   缺一即视为违反本条:
+   **更正:本条此前写着「main 分支的机械保护当前不可用(私有个人仓库计划
+   限制)」——那是错的。** 2026-09-19 `pipeline-health.yml` 首次真实运行时,
+   向 main 的推送被远端拒绝,返回:
 
-   - 路径只能是 `docs/87-pipeline-health.json`;
-   - 提交者只能是该 workflow(`github-actions[bot]`);
-   - 提交信息前缀固定为 `chore(health):`。
+   ```
+   remote: error: GH013: Repository rule violations found for refs/heads/main.
+   remote: - Changes must be made through a pull request.
+   remote: - 9 of 9 required status checks are expected.
+   ```
 
-   理由:本条保护的对象是**业务变更**——需要被审查、可能引入缺陷的东西。
-   健康摘要是机器生成的运行状态记录,没有业务语义,内容完全由仓库自身的
-   状态决定,不经过任何人的判断。把它也走 PR 流程,等于每两小时制造一个
-   没人该审的 PR,那会淹没真正需要审查的 PR——**噪音本身就是安全风险**。
+   所以 main 上**存在 ruleset**:改动必须走 PR,且 9 个必需 check 全绿。
+   仓库当前是**公开**的,原文那条"私有个人仓库计划限制"的前提也已不成立。
 
-   **这个例外不得被推广。** 任何其他"机器生成、所以可以直接 push"的主张,
-   都必须先写进本条,不得类比援引。
+   **这不改变任何一条纪律,只改变它的性质**:自我约束现在有机械兜底,
+   而不是唯一防线。但**不得因此放松自我约束**——ruleset 是谁配置的、
+   何时可能被改动,都不在本仓库的版本控制里;把纪律建立在一个仓库外的
+   设置上,正是本条一开始要避免的。
+
+   **推论:任何"让机器直接写 main"的设计都是行不通的,不要再尝试。**
+   机器产出(例如流水线健康摘要)写到自己的分支,不写 main——见
+   `.github/workflows/pipeline-health.yml`。这条路已经走过一次并被远端
+   拒绝,不需要再验证一遍。
 
    **关于自动合并(2026-09-18 修订,依据 ADR-029):**
    曾经存在过一个有条件自动合并的例外

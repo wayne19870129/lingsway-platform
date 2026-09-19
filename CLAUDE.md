@@ -84,16 +84,22 @@ contradicting it — if not, leave the document alone.
 ### General
 
 - `main` must never receive direct commits carrying business changes.
-  This is a policy every agent self-enforces regardless of GitHub
-  configuration: `AGENTS.md` rule 8 states plainly that mechanical
-  branch protection on `main` is **currently unavailable** here (private
-  personal-repository plan limits), so there is no GitHub-side guardrail
-  to fall back on — an agent that skips this discipline because "GitHub
-  would have blocked it anyway" is wrong. `docs/10-deploy-new-server.md`
-  ("GitHub settings that require manual configuration" → "Protect main")
-  documents the manual steps to configure that protection when it
-  becomes available; do not assume those steps have been applied to any
-  given instance of this repository without checking.
+  **Corrected 2026-09-19:** this file and `AGENTS.md` rule 8 both used to
+  say mechanical branch protection was *unavailable* here. That was
+  wrong. A real push from `pipeline-health.yml` was rejected with
+  `GH013: Repository rule violations` — `main` carries a ruleset
+  requiring changes to go through a pull request with 9 required status
+  checks green, and the repository is public, so the "private personal
+  plan" premise never applied either.
+
+  This changes the nature of the rule, not the rule: self-enforcement now
+  has a mechanical backstop instead of being the only line of defence.
+  **Do not relax the discipline because of it** — who configured that
+  ruleset and when it might change are not under this repository's
+  version control, and resting the rule on a setting outside the repo is
+  exactly what rule 8 existed to avoid. A practical consequence worth not
+  re-deriving: **any design that has a machine write to `main` directly
+  will fail.** Machine output goes to its own branch.
 - Every feature, bug fix, or refactor goes through its own branch and its
   own Pull Request — one task, one PR, matching the existing "Tasks T0
   through T8 ... every task is submitted as a PR" convention in
