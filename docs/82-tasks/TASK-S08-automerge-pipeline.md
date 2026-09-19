@@ -16,8 +16,10 @@
    落在同一个 head SHA 上时执行合并，缺一不可。
 2. **`.github/automerge-enabled`** 存在，内容为 `true`。这是断路器：删除它
    或改成 `false`，自动合并立即停止。
-3. **`.github/ISSUE_TEMPLATE/codex-dispatch.md`** —— 派活用的 Issue 模板，
-   模板里只有一句指向 TASK 文件的触发指令，**不含任何需求正文**。
+3. ~~**`.github/ISSUE_TEMPLATE/codex-dispatch.md`** —— 派活用的 Issue 模板。~~
+   **2026-09-19 已删除**（ADR-032 §6b）：`@codex` 在 Issue 上实测不触发任何
+   东西，Cloud 已弃用，派活改为 ChatGPT 写指令、User 粘进 Codex 桌面版。
+   本条作为历史记录保留，**不要照它再建回那个模板**。
 4. 自动合并**不触碰生产部署**：`deploy-auto.yml` / `deploy-gateway.yml` /
    `deploy-migration.yml` 的 `DRY_RUN` 闸门与人工批准一行都不动。
 

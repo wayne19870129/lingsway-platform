@@ -63,7 +63,7 @@ state, reviews, and checks. Do not rely on an older chat or SHA snapshot.
 > | The decision itself (a pure function) | `scripts/automerge_gate.py` |
 > | The eight-case truth table, run in CI | `backend/tests/guards/test_automerge_gate.py` |
 > | Circuit breaker | `.github/automerge-enabled` (`true` = on) |
-> | Dispatch issue template | `.github/ISSUE_TEMPLATE/codex-dispatch.md` |
+> | ~~Dispatch issue template~~ | **Removed 2026-09-19** — see below |
 >
 > Two properties worth not re-deriving: the workflow deliberately has **no
 > `pull_request` trigger**, so a PR cannot rewrite its own gate — every
