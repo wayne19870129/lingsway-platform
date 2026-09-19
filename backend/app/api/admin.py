@@ -134,6 +134,7 @@ class _SqlAlchemyOrderState:
             self.db.flush()
             period = UsagePeriod(
                 subscription_id=subscription.id,
+                order_id=order.id,
                 plan_id=plan.id,
                 period_start=now,
                 period_end=subscription.service_expire_at,
@@ -178,6 +179,7 @@ class _SqlAlchemyOrderState:
         self.db.add(
             UsagePeriod(
                 subscription_id=subscription.id,
+                order_id=order.id,
                 plan_id=plan.id,
                 period_start=now,
                 period_end=now + timedelta(days=plan.duration_days),

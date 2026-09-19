@@ -19,6 +19,22 @@ def upgrade() -> None:
     bind = op.get_bind()
     inspector = sa.inspect(bind)
     columns = {column["name"] for column in inspector.get_columns("usage_periods")}
+    if "order_id" not in columns:
+        op.add_column("usage_periods", sa.Column("order_id", sa.Integer(), nullable=True))
+        op.execute(
+            "UPDATE usage_periods up JOIN subscriptions s "
+            "ON s.id = up.subscription_id SET up.order_id = s.order_id "
+            "WHERE up.order_id IS NULL"
+        )
+        op.alter_column("usage_periods", "order_id", nullable=False)
+    foreign_keys = {fk["name"] for fk in inspector.get_foreign_keys("usage_periods")}
+    if "fk_usage_periods_order_id" not in foreign_keys:
+        op.create_foreign_key(
+            "fk_usage_periods_order_id", "usage_periods", "orders", ["order_id"], ["id"]
+        )
+    unique_names = {constraint["name"] for constraint in inspector.get_unique_constraints("usage_periods")}
+    if "uq_usage_period_order_id" not in unique_names:
+        op.create_unique_constraint("uq_usage_period_order_id", "usage_periods", ["order_id"])
     if "plan_id" not in columns:
         op.add_column("usage_periods", sa.Column("plan_id", sa.Integer(), nullable=True))
         op.create_foreign_key(
@@ -29,12 +45,32 @@ def upgrade() -> None:
             "ALTER TABLE usage_periods MODIFY status "
             "ENUM('ACTIVE','QUEUED','CLOSED') NOT NULL"
         )
+        op.execute(
+            "ALTER TABLE subscriptions MODIFY reconcile_state "
+            "ENUM('SYNCED','PENDING','PENDING_MANUAL','FAILED') NOT NULL"
+        )
 
 
 def downgrade() -> None:
     bind = op.get_bind()
     inspector = sa.inspect(bind)
     columns = {column["name"] for column in inspector.get_columns("usage_periods")}
+    queued = bind.execute(sa.text("SELECT COUNT(*) FROM usage_periods WHERE status = 'QUEUED'"))
+    if queued.scalar_one() > 0:
+        raise RuntimeError("Cannot downgrade while QUEUED usage periods exist")
+    if bind.dialect.name == "mysql":
+        op.execute(
+            "ALTER TABLE usage_periods MODIFY status "
+            "ENUM('ACTIVE','CLOSED') NOT NULL"
+        )
+        op.execute(
+            "ALTER TABLE subscriptions MODIFY reconcile_state "
+            "ENUM('SYNCED','PENDING','FAILED') NOT NULL"
+        )
     if "plan_id" in columns:
         op.drop_constraint("fk_usage_periods_plan_id", "usage_periods", type_="foreignkey")
         op.drop_column("usage_periods", "plan_id")
+    if "order_id" in columns:
+        op.drop_constraint("uq_usage_period_order_id", "usage_periods", type_="unique")
+        op.drop_constraint("fk_usage_periods_order_id", "usage_periods", type_="foreignkey")
+        op.drop_column("usage_periods", "order_id")

@@ -161,13 +161,16 @@ def sync_subscription_usage(
     locked.last_usage_synced_at = now
     record_usage_alerts(db, locked, period)
     needs_reconcile = apply_expiry_policy(db, locked, now)
+    rolled_period = locked.current_period_id != period.id
     release_requested = locked.status == SubscriptionStatus.EXPIRED
     db.commit()
     if release_requested:
         release_egress(db, locked.id, now, gateway=gateway)
     if needs_reconcile:
         try:
-            reconcile_subscription(db, locked, provider)
+            reconcile_subscription(
+                db, locked, provider, pending_manual_on_failure=rolled_period
+            )
         except Exception:
             # The PENDING state was committed before the external write and is
             # intentionally left for the background retry loop.
@@ -205,6 +208,13 @@ def apply_expiry_policy(db: Session, subscription: Subscription, now: datetime) 
                 subscription.status = SubscriptionStatus.ACTIVE
                 subscription.reconcile_state = ReconcileState.PENDING
                 return True
+            period.status = UsagePeriodStatus.CLOSED
+            subscription.status = SubscriptionStatus.GRACE
+            subscription.service_expire_at = now + timedelta(
+                hours=get_settings().grace_period_hours
+            )
+            subscription.reconcile_state = ReconcileState.PENDING
+            return True
     service_expire_at = as_utc(subscription.service_expire_at)
     if subscription.status == SubscriptionStatus.ACTIVE and now >= service_expire_at:
         subscription.status = SubscriptionStatus.GRACE
@@ -222,6 +232,8 @@ def reconcile_subscription(
     db: Session,
     subscription: Subscription,
     provider: AccountingProvider,
+    *,
+    pending_manual_on_failure: bool = False,
 ) -> None:
     """Overwrite the accounting provider from current DB truth."""
     if not subscription.accounting_user_id or subscription.current_period_id is None:
@@ -260,7 +272,13 @@ def reconcile_subscription(
         current = db.get(Subscription, subscription.id)
         if current is None:
             raise ValueError("Subscription disappeared during reconcile") from exc
-        current.reconcile_state = ReconcileState.PENDING
+        current.reconcile_state = (
+            ReconcileState.PENDING_MANUAL
+            if pending_manual_on_failure
+            else ReconcileState.PENDING
+        )
+        if pending_manual_on_failure:
+            current.provision_error = str(exc)
         db.commit()
         raise
     current = db.get(Subscription, subscription.id)

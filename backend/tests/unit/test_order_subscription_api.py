@@ -335,6 +335,7 @@ def test_subscription_feed_has_complete_private_headers_and_ua_formats(
     db_session.flush()
     period = UsagePeriod(
         subscription_id=subscription.id,
+        order_id=order.id,
         period_start=datetime.now(UTC),
         period_end=datetime.now(UTC) + timedelta(days=30),
         used_bytes=123,

@@ -43,6 +43,7 @@ class SubscriptionStatus(str, enum.Enum):
 class ReconcileState(str, enum.Enum):
     SYNCED = "SYNCED"
     PENDING = "PENDING"
+    PENDING_MANUAL = "PENDING_MANUAL"
     FAILED = "FAILED"
 
 
@@ -128,6 +129,7 @@ class UsagePeriod(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     subscription_id: Mapped[int] = mapped_column(ForeignKey("subscriptions.id"), index=True)
+    order_id: Mapped[int] = mapped_column(ForeignKey("orders.id"), unique=True)
     plan_id: Mapped[int | None] = mapped_column(ForeignKey("plans.id"), index=True)
     period_start: Mapped[datetime] = mapped_column(PRECISE_DATETIME)
     period_end: Mapped[datetime] = mapped_column(PRECISE_DATETIME)
