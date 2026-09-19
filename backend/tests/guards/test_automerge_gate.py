@@ -387,8 +387,26 @@ def test_the_workflow_exposes_no_bypass_input() -> None:
     assert inputs == {"pr_number", "facts"}, inputs
 
 
-def test_the_committed_switch_file_is_enabled() -> None:
-    assert SWITCH_PATH.read_text(encoding="utf-8").strip() == "true"
+def test_the_committed_switch_file_holds_exactly_one_recognised_literal() -> None:
+    """The breaker file must be readable by the gate, whichever way it is set.
+
+    This used to assert the file reads ``"true"``.  That asserted a *policy
+    choice* -- that auto-merge is on -- and the choice is the User's, not this
+    test's: on 2026-09-19 the User turned auto-merge off after PR #155 became
+    the first PR the workflow merged unseen (ADR-034 §5a).  An assertion that
+    the breaker stays on would have to be edited every time the breaker moves,
+    which makes it a tripwire against the breaker rather than a guard.
+
+    The durable invariant is narrower and stronger: the file exists and holds
+    exactly one of the two literals :func:`_evaluate_switch` recognises, with
+    no surrounding whitespace or case drift.  ``True``, ``yes`` or ``enabled``
+    all parse as "not 'true'" and would silently block every merge forever
+    while looking enabled to a human reader -- that is the failure this guard
+    is worth having for, and the old assertion could not see it.
+    """
+    raw = SWITCH_PATH.read_text(encoding="utf-8")
+    assert raw.strip() in {"true", "false"}, raw
+    assert raw.strip() == raw.strip("\n"), "no leading/trailing whitespace beyond a newline"
 
 
 def test_the_workflow_merges_only_on_a_merge_decision() -> None:
