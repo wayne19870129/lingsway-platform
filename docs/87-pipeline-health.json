@@ -1,12 +1,10 @@
 {
-  "alerts": [
-    "BREAKER_OFF"
-  ],
+  "alerts": [],
   "automerge": {
-    "breaker": "absent",
+    "breaker": "true",
     "merged_without_user_since_breaker_on": 0
   },
-  "generated_at": "1970-01-01T00:00:00+00:00",
+  "generated_at": "2026-09-19T03:05:19.366Z",
   "judgement_only_signals": [
     "SAME_FINDING_FAILED_TWICE",
     "PASS_BUT_CRITICAL"
@@ -14,7 +12,24 @@
   "main": {
     "ci_conclusion": "pending",
     "commits_since_last_digest": 0,
-    "sha": ""
+    "sha": "b21eb19074369695978ce186f33d54a53618906f"
   },
-  "open_prs": []
+  "open_prs": [
+    {
+      "age_hours": 4.02,
+      "ci": "success",
+      "head_sha": "593ec1fe452f456549bb9c965eebace0b1815051",
+      "hours_since_last_commit": 4.02,
+      "labels": [
+        "risk:high",
+        "dependencies",
+        "github_actions"
+      ],
+      "latest_verdict_on_head": "none",
+      "mergeable": null,
+      "number": 135,
+      "review_rounds": 0,
+      "touches_high_risk_paths": false
+    }
+  ]
 }
