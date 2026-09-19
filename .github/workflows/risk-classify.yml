@@ -24,32 +24,8 @@ jobs:
               pull_number: pullNumber,
               per_page: 100,
             });
-
-            const low = [
-              path => path.startsWith('frontend/'),
-              path => path.startsWith('docs/'),
-              path => path.startsWith('backend/app/api/'),
-              path => path.startsWith('backend/app/domain/'),
-              path => path.startsWith('backend/app/schemas/'),
-              path => path.startsWith('backend/tests/'),
-            ];
-            const medium = [
-              path => path.startsWith('backend/app/providers/gateway/'),
-              path => path.startsWith('backend/app/providers/forwarder/'),
-              path => path.startsWith('backend/app/providers/egress/'),
-              path => path.startsWith('ops/gateway/'),
-              path => path.startsWith('ops/forwarder/'),
-              path => path.startsWith('infrastructure/marzban/'),
-              path => path.startsWith('infrastructure/compose/'),
-            ];
-            const isMigration = path => path.startsWith('infrastructure/alembic/versions/');
+            const { classifyPath } = require('./scripts/risk_classify_paths.js');
             const rank = { low: 1, medium: 2, migration: 3, high: 4 };
-            const classifyPath = path => {
-              if (isMigration(path)) return 'migration';
-              if (medium.some(match => match(path))) return 'medium';
-              if (low.some(match => match(path))) return 'low';
-              return 'high';
-            };
 
             const classified = files.map(file => ({ path: file.filename, risk: classifyPath(file.filename) }));
             const risk = classified.reduce(
