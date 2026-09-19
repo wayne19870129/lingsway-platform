@@ -300,6 +300,7 @@ def test_usage_period_allows_one_active_and_multiple_queued(db: Session) -> None
 
 def test_usage_period_order_id_is_required_and_unique(db: Session) -> None:
     subscription, plan, orders = _queue_fixture(db, "002")
+    db.commit()
     with pytest.raises(IntegrityError):
         db.add(
             UsagePeriod(
@@ -344,6 +345,7 @@ def test_usage_period_order_id_is_required_and_unique(db: Session) -> None:
 
 def test_concurrent_rollover_keeps_exactly_one_active_period(db: Session) -> None:
     subscription, plan, orders = _queue_fixture(db, "003")
+    subscription_id = subscription.id
     active = UsagePeriod(
         subscription_id=subscription.id,
         order_id=orders[0].id,
@@ -370,13 +372,13 @@ def test_concurrent_rollover_keeps_exactly_one_active_period(db: Session) -> Non
     db.flush()
     subscription.current_period_id = active.id
     db.commit()
+    engine = db.get_bind()
 
     def rollover() -> None:
-        engine = db.get_bind()
         with Session(engine) as contender:
             current = contender.scalar(
                 select(Subscription)
-                .where(Subscription.id == subscription.id)
+                .where(Subscription.id == subscription_id)
                 .with_for_update()
             )
             assert current is not None
@@ -389,12 +391,12 @@ def test_concurrent_rollover_keeps_exactly_one_active_period(db: Session) -> Non
         futures = [pool.submit(rollover) for _ in range(2)]
         for future in futures:
             future.result()
-    with Session(db.get_bind()) as final_db:
-        final_subscription = final_db.get(Subscription, subscription.id)
+    with Session(engine) as final_db:
+        final_subscription = final_db.get(Subscription, subscription_id)
         assert final_subscription is not None
         final_periods = final_db.scalars(
             select(UsagePeriod)
-            .where(UsagePeriod.subscription_id == subscription.id)
+            .where(UsagePeriod.subscription_id == subscription_id)
             .order_by(UsagePeriod.id)
         ).all()
         assert sum(period.status is UsagePeriodStatus.ACTIVE for period in final_periods) == 1
