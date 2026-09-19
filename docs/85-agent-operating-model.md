@@ -159,6 +159,12 @@ S02→S04-B1 连续 8 个 PR 一个 TASK 文件都没有，规则空转。**现�
 要点：**指向 TASK 文件，不要把要求复述一遍**——复述必然漂移，两份要求
 一旦不一致，Codex 会按你复述的那份做。
 
+> **建 Issue 派活时用 `.github/ISSUE_TEMPLATE/codex-dispatch.md`**
+> （GitHub 新建 Issue 页面里选「Codex dispatch」）。那个模板只有一句
+> 指向 TASK 文件的触发指令，**正文里不放需求**——ADR-029 §2。
+> 下面这段更长的模板是给聊天窗口里直接指挥 Codex 用的，两者内容不得互相
+> 矛盾；有出入时以 TASK 文件为准。
+
 ```text
 任务：<一句话说清这次要交付什么>
 
@@ -297,15 +303,35 @@ Claude 的产出形态是：ADR、TASK 文件、`docs/81-reviews/REVIEW-*.md`、
 > 刚推上去还没合并的东西看不到（见 §1）。
 >
 > 最后更新：2026-09-18。ADR-029 已合并（PR #133）；备份工具已合并（PR #132）；
-> 排序规则确定为**先自动化、后生产**，S08 排第一。
+> **S08 自动合并流水线已由 Claude Code 实现，正等 User 人工合并**（见 5.0）；
+> 排序规则仍是**先自动化、后生产**。
 
-### 5.1 可以立刻派给 Codex
+### 5.0 正在等 User 人工合并的东西
+
+| 任务 | PR | 状态 |
+|---|---|---|
+| **S08** 自动合并流水线与断路器 | [#136](https://github.com/wayne19870129/lingsway-platform/pull/136) | 已实现、本地全绿（ruff / mypy 130 文件 / 663 测试），**必须 User 人工合并**——开关生效之前它还不存在，生效之后由它批准自己是循环论证 |
+
+合并之后先做一件事：**在仓库里建一个 `no-automerge` 标签**（任意颜色）。
+那是把单个 PR 从自动合并里摘出来的逃生口，标签不存在的话临时要用会很难受。
+断路器（`.github/automerge-enabled` 改成 `false`）是全局闸，标签是单 PR 闸，
+两个都要能用。
+
+**S08 合并之前，5.1 里的东西先不要派。** 这是 User 定的排序规则（见下），
+不是 Claude 的偏好。合并之后这一行移走，5.1 就是可派发队列。
+
+**这个 PR 是 Claude Code 写的，不是 Codex。** 理由记在 PR 描述里：
+`AGENTS.md` 的模块写权限表把 Claude Code 列为当前统一执行者，而且
+S08 改的是仓库的安全姿态本身——派活流水线在它落地之前还不存在，
+让被治理者去实现治理机制本身也不合适。**这是一次性的引导，不是新惯例**：
+S08 合并之后，业务任务仍然按 §2 派给 Codex。
+
+### 5.1 S08 合并后可以立刻派给 Codex
 
 | # | 任务 | TASK 文件 | 闸门状态 |
 |---|---|---|---|
-| 1 | **S08** 自动合并流水线与断路器 | `docs/82-tasks/TASK-S08-automerge-pipeline.md` | ✅ ADR-029 **已接受**。**这个 PR 必须 User 人工合并**——自动合并不能自己批准自己 |
-| 2 | **S07** 订单队列计费（续费/加购） | `docs/82-tasks/TASK-S07-order-queue-billing.md` | ✅ ADR-027 **已接受**。**内含一条已可达的线上缺陷，见下** |
-| 3 | **S04-B2-B** Mihomo 运行时实现 | `docs/82-tasks/TASK-S04-mihomo-activation.md` | ✅ 两道闸门都已满足（ADR-025 已合并、TASK 已合并）。**必须与 S04-C 分成两个 PR** |
+| 1 | **S07** 订单队列计费（续费/加购） | `docs/82-tasks/TASK-S07-order-queue-billing.md` | ✅ ADR-027 **已接受**。**内含一条已可达的线上缺陷，见下** |
+| 2 | **S04-B2-B** Mihomo 运行时实现 | `docs/82-tasks/TASK-S04-mihomo-activation.md` | ✅ 两道闸门都已满足（ADR-025 已合并、TASK 已合并）。**必须与 S04-C 分成两个 PR** |
 
 派 S04-B2-B 时提醒 Codex：B2-B 结束时要有测试证明
 `FORWARDER_PROVIDER=mihomo` **仍然**被 `build_registry()` 拒绝——防止
@@ -316,7 +342,7 @@ Claude 的产出形态是：ADR、TASK 文件、`docs/81-reviews/REVIEW-*.md`、
 **先把自动化工作流做完，再开展生产功能。**
 
 1. **S08 自动合并流水线** —— 流水线本身没接通之前，后面所有自动化都是空话。
-   **这一条做完之前不要派 S07 或 S04-B2-B。**
+   **这一条合并之前不要派 S07 或 S04-B2-B。**
 2. 之后才是生产功能。其中 **S07 优先于 S04-B2-B**，因为它含一条
    **客户今天就能踩到**的缺陷（见下方速览末尾）。
 
@@ -396,8 +422,8 @@ User 全权授权 Claude 决定，结论写在 ADR-027 §7.1–7.4。
 
 ### 5.5 代码健康度与 provider 接线
 
-`ruff`（含 `ops/` 与 `infrastructure/`）、`mypy --strict`（128 文件）、
-596 个 unit+guard 测试全绿；前端 `tsc` / `eslint` / `next build` 全绿。
+`ruff`（含 `ops/`、`infrastructure/`、`scripts/`）、`mypy --strict`（130 文件）、
+663 个 unit+guard 测试全绿；前端 `tsc` / `eslint` / `next build` 全绿。
 23 个 Alembic migration 单根单头无分叉。`domain/` 层零外部依赖。
 
 | Provider | 真实实现可达？ |

@@ -1,0 +1,268 @@
+name: Auto merge
+
+# ADR-029: a pull request merges automatically only when all of ADR-029 §4's
+# conditions hold on the SAME head SHA. This workflow collects the facts; the
+# decision itself lives in scripts/automerge_gate.py so that it can be tested
+# (backend/tests/guards/test_automerge_gate.py) instead of asserted.
+#
+# Deliberately NOT triggered by `pull_request`: every trigger below runs the
+# copy of this file, and the circuit-breaker file, that is on the default
+# branch. A pull request therefore cannot rewrite its own gate.
+
+on:
+  issue_comment:
+    types: [created, edited]
+  pull_request_review:
+    types: [submitted, edited]
+  check_suite:
+    types: [completed]
+  workflow_run:
+    workflows: ["CI", "Security", "Risk classification"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Evaluate this PR and print the decision. Never merges."
+        required: false
+        type: string
+      facts:
+        description: "Simulation only: a facts JSON literal to evaluate instead of a PR."
+        required: false
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: auto-merge-${{ github.event.issue.number || github.event.pull_request.number || inputs.pr_number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
+      actions: read
+    outputs:
+      decision: ${{ steps.decide.outputs.decision }}
+      pr_number: ${{ steps.collect.outputs.pr_number }}
+      head_sha: ${{ steps.collect.outputs.head_sha }}
+    steps:
+      - name: Checkout the default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Collect the facts for this pull request
+        id: collect
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          SIMULATED_FACTS: ${{ inputs.facts }}
+          DISPATCH_PR: ${{ inputs.pr_number }}
+        with:
+          script: |
+            const fs = require('fs');
+            const { owner, repo } = context.repo;
+
+            // Simulation: evaluate a literal facts document. This path is
+            // reachable only from workflow_dispatch, and the merge job below
+            // refuses to run on workflow_dispatch at all, so a crafted
+            // document can print a decision but can never merge anything.
+            const simulated = (process.env.SIMULATED_FACTS || '').trim();
+            if (simulated) {
+              fs.writeFileSync('facts.json', simulated);
+              core.info('Using simulated facts; this run cannot merge.');
+              core.setOutput('pr_number', 'simulated');
+              core.setOutput('head_sha', 'simulated');
+              return;
+            }
+
+            // Resolve which pull request this event is about.
+            let prNumber = null;
+            if (process.env.DISPATCH_PR) {
+              prNumber = Number(process.env.DISPATCH_PR);
+            } else if (context.eventName === 'issue_comment') {
+              if (!context.payload.issue.pull_request) {
+                core.info('Comment is on an issue, not a pull request.');
+                core.setOutput('pr_number', '');
+                return;
+              }
+              prNumber = context.payload.issue.number;
+            } else if (context.eventName === 'pull_request_review') {
+              prNumber = context.payload.pull_request.number;
+            } else {
+              const sha = context.eventName === 'check_suite'
+                ? context.payload.check_suite.head_sha
+                : context.payload.workflow_run.head_sha;
+              const { data: associated } =
+                await github.rest.repos.listPullRequestsAssociatedWithCommit({
+                  owner, repo, commit_sha: sha,
+                });
+              const open = associated.filter(pr => pr.state === 'open');
+              if (open.length !== 1) {
+                core.info(`Commit ${sha} maps to ${open.length} open pull requests; skipping.`);
+                core.setOutput('pr_number', '');
+                return;
+              }
+              prNumber = open[0].number;
+            }
+
+            const { data: pr } = await github.rest.pulls.get({
+              owner, repo, pull_number: prNumber,
+            });
+            const headSha = pr.head.sha;
+
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner, repo, pull_number: prNumber, per_page: 100,
+            });
+
+            // The circuit breaker is read from the DEFAULT BRANCH, never from
+            // the pull request head -- otherwise a pull request could switch
+            // automatic merging on for itself (ADR-029 §5).
+            let automergeSwitch = null;
+            try {
+              const { data: file } = await github.rest.repos.getContent({
+                owner, repo,
+                path: '.github/automerge-enabled',
+                ref: context.payload.repository.default_branch,
+              });
+              automergeSwitch = Buffer.from(file.content, file.encoding).toString('utf8');
+            } catch (error) {
+              if (error.status !== 404) { throw error; }
+              core.info('.github/automerge-enabled is absent on the default branch.');
+            }
+
+            // Required checks come from workflow runs (their name is the
+            // workflow name ADR-029 §4.2 refers to); non-Actions check runs
+            // are folded in so a third-party failure still blocks.
+            const runs = await github.paginate(github.rest.actions.listWorkflowRunsForRepo, {
+              owner, repo, head_sha: headSha, per_page: 100,
+            }, response => response.data);
+            const latestPerWorkflow = new Map();
+            for (const run of runs) {
+              if (run.name === context.workflow) { continue; }  // never wait on ourselves
+              const previous = latestPerWorkflow.get(run.name);
+              if (!previous || run.id > previous.id) { latestPerWorkflow.set(run.name, run); }
+            }
+            const checkRuns = [...latestPerWorkflow.values()].map(run => ({
+              name: run.name, workflow: run.name,
+              status: run.status, conclusion: run.conclusion || '',
+            }));
+
+            const external = await github.paginate(github.rest.checks.listForRef, {
+              owner, repo, ref: headSha, per_page: 100,
+            }, response => response.data);
+            for (const check of external) {
+              if (check.app && check.app.slug === 'github-actions') { continue; }
+              checkRuns.push({
+                name: check.name, workflow: (check.app && check.app.name) || 'external',
+                status: check.status, conclusion: check.conclusion || '',
+              });
+            }
+
+            // Both PR reviews and issue comments count: the review format in
+            // CLAUDE.md is identified by its body and head SHA, not by where
+            // it was posted or by which account posted it.
+            const reviews = [];
+            for (const review of await github.paginate(github.rest.pulls.listReviews, {
+              owner, repo, pull_number: prNumber, per_page: 100,
+            })) {
+              reviews.push({
+                author: review.user && review.user.login,
+                author_association: review.author_association,
+                submitted_at: review.submitted_at,
+                body: review.body || '',
+              });
+            }
+            for (const comment of await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number: prNumber, per_page: 100,
+            })) {
+              reviews.push({
+                author: comment.user && comment.user.login,
+                author_association: comment.author_association,
+                submitted_at: comment.updated_at || comment.created_at,
+                body: comment.body || '',
+              });
+            }
+
+            const facts = {
+              pr_number: prNumber,
+              head_sha: headSha,
+              head_ref: pr.head.ref,
+              base_ref: pr.base.ref,
+              state: pr.state,
+              draft: pr.draft,
+              merged: pr.merged,
+              mergeable: pr.mergeable,
+              labels: pr.labels.map(label => label.name),
+              changed_files: files.map(file => file.filename),
+              automerge_switch: automergeSwitch,
+              check_runs: checkRuns,
+            };
+            fs.writeFileSync('facts.json', JSON.stringify({ ...facts, reviews }, null, 2));
+
+            // Review bodies are untrusted text and are not echoed.
+            core.startGroup('Collected facts (review bodies omitted)');
+            core.info(JSON.stringify({ ...facts, review_count: reviews.length }, null, 2));
+            core.endGroup();
+
+            core.setOutput('pr_number', String(prNumber));
+            core.setOutput('head_sha', headSha);
+
+      - name: Evaluate the ADR-029 §4 conditions
+        id: decide
+        if: steps.collect.outputs.pr_number != ''
+        run: |
+          set -euo pipefail
+          python scripts/automerge_gate.py --facts facts.json --output decision.json
+          echo "decision=$(python -c "import json;print(json.load(open('decision.json'))['decision'])")" >> "$GITHUB_OUTPUT"
+
+      - name: Summarize
+        if: steps.collect.outputs.pr_number != ''
+        run: |
+          set -euo pipefail
+          {
+            echo '### Auto-merge decision'
+            echo ''
+            echo '```'
+            python scripts/automerge_gate.py --facts facts.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  merge:
+    needs: evaluate
+    # Two independent guards. The second one is what makes the simulation
+    # entrypoint above safe: a workflow_dispatch run can print any decision it
+    # likes and still never reach this job.
+    if: >-
+      github.event_name != 'workflow_dispatch' &&
+      needs.evaluate.outputs.decision == 'MERGE'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Merge the pull request
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          PR_NUMBER: ${{ needs.evaluate.outputs.pr_number }}
+          HEAD_SHA: ${{ needs.evaluate.outputs.head_sha }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            // sha: refuse to merge anything other than the exact commit the
+            // decision was made about. A push landing between the two jobs
+            // makes this call fail rather than merge an unreviewed commit.
+            await github.rest.pulls.merge({
+              owner, repo,
+              pull_number: Number(process.env.PR_NUMBER),
+              sha: process.env.HEAD_SHA,
+              merge_method: 'merge',
+            });
+            core.info(`Merged #${process.env.PR_NUMBER} at ${process.env.HEAD_SHA}.`);

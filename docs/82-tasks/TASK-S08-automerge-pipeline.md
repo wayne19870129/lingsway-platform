@@ -46,15 +46,30 @@
 未列出的路径一律不得修改。
 
 ```
-.github/workflows/auto-merge.yml              # 新增
-.github/automerge-enabled                     # 新增
-.github/ISSUE_TEMPLATE/codex-dispatch.md      # 新增
+.github/workflows/auto-merge.yml                      # 新增
+.github/automerge-enabled                             # 新增
+.github/ISSUE_TEMPLATE/codex-dispatch.md              # 新增
+scripts/automerge_gate.py                             # 新增（见下方修订说明）
+backend/tests/guards/test_automerge_gate.py           # 新增（见下方修订说明）
+docs/82-tasks/TASK-S08-automerge-pipeline.md          # 本文件（记录这次修订）
 docs/83-project-continuity.md
 docs/85-agent-operating-model.md
 ```
 
-**明确不在范围内**：任何 `backend/**`、`frontend/**`、`ops/**`、
-`infrastructure/**`、`deploy/**`。本任务不碰一行业务代码。
+> **2026-09-18 修订：加入后两个路径。** 原清单只有 `.github/**`，那意味着
+> 判定逻辑只能内联在 workflow 的 YAML 里——而内联逻辑**没有任何办法在本地
+> 跑一遍**，下面「验收标准」要求的「逐条可复现」就只能退化成贴源码说
+> "这里判断了"，正是本 TASK 明确不接受的那种交付。
+>
+> 因此把判定抽成一个纯函数 `scripts/automerge_gate.py`（`scripts/` 已在
+> `make lint` 的 ruff 覆盖范围内），workflow 只负责采集事实并调用它；
+> 八条验收标准由 `backend/tests/guards/test_automerge_gate.py` 在 CI 里
+> 逐条跑。**这是扩大了允许清单，不是绕过它**——按 §2.1「需要动未列出的
+> 文件就停下来说明」的要求，理由记在这里和 PR 描述里。
+
+**明确不在范围内**：任何 `backend/app/**`、`frontend/**`、`ops/**`、
+`infrastructure/**`、`deploy/**`。本任务不碰一行业务代码；
+`backend/tests/guards/` 下的新增文件是上面说明的判定逻辑测试，不是业务改动。
 
 ## 验收标准
 
