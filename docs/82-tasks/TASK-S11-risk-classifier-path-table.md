@@ -71,6 +71,8 @@
 - **不得改动** `ci.yml` / `security.yml` / `auto-merge.yml` /
   `pipeline-health.yml`。
 - **不得**给 workflow 增加任何权限；`permissions:` 一行不动。
+  （加 `actions/checkout` **不需要**改 permissions —— `contents: read` 已经
+  在那里了。所以加 checkout 不违反本条。）
 - **不得**动 `scripts/automerge_gate.py` 或 `scripts/pipeline_health.py`。
 
 ## 允许修改的文件
@@ -95,7 +97,43 @@ docs/85-agent-operating-model.md
 >
 > workflow 里改成：
 > `const { classifyPath } = require('./scripts/risk_classify_paths.js');`
-> 其余逻辑保持原样。
+>
+> **⚠️ 2026-09-19 修订（本条原文是错的，已实测失败）：**
+> `risk-classify.yml` **原本没有 `actions/checkout` 步骤** —— 它只用
+> `github-script` 调 API，从不需要仓库文件落到磁盘。因此仅仅加一行
+> `require()` 会失败：
+>
+> ```
+> Error: Cannot find module '.../scripts/risk_classify_paths.js'
+> ```
+>
+> （PR #144 实测，job `classify` 失败。）
+>
+> **所以必须在 `classify` job 的 `github-script` 之前加一步 checkout：**
+>
+> ```yaml
+>     steps:
+>       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+>         with:
+>           persist-credentials: false
+>       - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+>         with:
+>           script: |
+>             const { classifyPath } = require(
+>               `${process.env.GITHUB_WORKSPACE}/scripts/risk_classify_paths.js`
+>             );
+>             ...
+> ```
+>
+> 两个细节都不能省：
+> - **`persist-credentials: false`** —— 这个 job 只读文件，不需要 git 凭据。
+> - **`${process.env.GITHUB_WORKSPACE}` 绝对路径** —— `github-script` 里的
+>   `require()` 是相对于 action 自己的目录解析的，不是相对于仓库根，
+>   写 `'./scripts/...'` 即使 checkout 了也可能解析不到。
+>
+> 本条此前写的「其余逻辑保持原样」**造成了那次失败**：它被正确理解成
+> "不要加步骤"。判定逻辑、`rank`、文案、标签与评论逻辑仍然一行不改，
+> 但 checkout 这一步必须加。
 
 ## 验收标准
 
