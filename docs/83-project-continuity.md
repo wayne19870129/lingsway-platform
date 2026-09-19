@@ -432,13 +432,22 @@ so this was a hang, not a quiet no-op. Cause: the Routine was created from a
 session with no connector grants, so the fired session had no
 `mcp__github__*` tools and no repository source.
 
-**ADR-030 §3 replaces the mechanism rather than patching that one Routine.**
+**ADR-030 §3 replaces the mechanism rather than patching that one Routine**, and
+TASK-S10 implements the replacement (`.github/workflows/pipeline-health.yml`
+plus `scripts/pipeline_health.py`, writing `docs/87-pipeline-health.json`).
 The lesson is architectural: *any carrier of scheduled automation whose
 credentials and repository access are not version-controlled and inspectable
 in the repo cannot be trusted to carry a safety mechanism.* Supervision moves
 to `.github/workflows/` — a machine-generated health digest
 (`TASK-S10-pipeline-health-digest.md`, no LLM, `GITHUB_TOKEN` only) that
-Claude reads on a low cadence. Related finding: `claude.yml` has 247 runs and
-every recent one is `conclusion: skipped` (its `if` needs `@claude` in the
-comment), so **there is no evidence `CLAUDE_CODE_OAUTH_TOKEN` is configured
-and working** — nothing safety-critical may depend on it until that is proven.
+Claude reads on a low cadence. **Correction to an earlier note here:** it previously said there was "no
+evidence `CLAUDE_CODE_OAUTH_TOKEN` is configured and working". That was too
+strong. Branches such as `claude/issue-97-xray-gateway-registry-wiring` exist,
+and `claude-code-action` only creates those after actually running and
+committing — so it has worked. The accurate statement is that `claude.yml` has
+247 runs whose recent ones all concluded `skipped`, because its `if` requires
+`@claude` in a comment and none was posted: **not triggered, not broken.**
+The digest still avoids that credential, for the reasons in ADR-030 §3 —
+availability of the supervision input must not depend on a rotatable secret
+that cannot be inspected from the repository, and polling a model every two
+hours to conclude "no change" is what the token budget forbids.

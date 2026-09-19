@@ -341,7 +341,7 @@ Claude 的产出形态是：ADR、TASK 文件、`docs/81-reviews/REVIEW-*.md`、
 
 | 任务 | 状态 |
 |---|---|
-| **S10** 流水线健康摘要 | ADR-030 已接受，TASK 已写。**治理变更且动 `AGENTS.md`，必须 User 人工合并** |
+| **S10** 流水线健康摘要 | 已由 Claude 实现，等 User 人工合并（动 `.github/workflows/` 与 `AGENTS.md`） |
 | **S07** 订单队列计费 | **已由 Claude 派给 Codex**。这一个 PR 要打 `no-automerge`，由 User 人工合——理由见下 |
 
 **两件还需要 User 动手的事：**
