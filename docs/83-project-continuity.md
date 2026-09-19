@@ -46,6 +46,10 @@ state, reviews, and checks. Do not rely on an older chat or SHA snapshot.
 > tolerable only because **the user currently merges every PR by hand**
 > (ADR-033 §3), and stops being tolerable the moment the workflow starts
 > merging PRs the user has not seen (ADR-033 §8).
+> **That "moment" has since arrived and been answered** — PR #155 was merged by
+> the workflow, and auto-merge is now off; see the resolution note below. So
+> "the user merges every PR by hand" is no longer a description of current
+> practice that could drift, it is the mechanical state.
 >
 > **ADR-034 (same day) went one step further and is the current rule:** the
 > three remaining mandatory audit triggers are gone too, so **an audit happens
@@ -91,9 +95,12 @@ state, reviews, and checks. Do not rely on an older chat or SHA snapshot.
 > One ADR-030 property survives both pivots unchanged: **Claude can stop the
 > pipeline alone but cannot restart it alone** (§5a) — restoring the breaker is
 > a user-merged PR. Automation that can switch itself back on has no breaker.
-> The other one, *supervision is periodic*, is exactly what ADR-033 removed;
-> the `docs/85` §6.1 third breaker (pause and report after three consecutive
-> auto-merges) is now the main thing that puts a person back in the loop.
+> The other one, *supervision is periodic*, is exactly what ADR-033 removed.
+> **The thing that puts a person back in the loop is now manual merge itself**,
+> not `docs/85` §6.1's third breaker (pause and report after three consecutive
+> auto-merges): with auto-merge off that breaker can no longer fire at all. It
+> is kept rather than deleted because it would be a precondition for any future
+> re-enable.
 >
 > It is written out in two standing instruction files, both subordinate to
 > `AGENTS.md`:
@@ -344,11 +351,46 @@ different contents) and the PR #128 version won.
   (`ADR-025-mihomo-projection-generation-authority.md`) and the S-series
   implementation TASK (`TASK-S04-mihomo-activation.md`). Architecture and
   documentation only — no Python, no ORM, no migration, as specified.
-- **S04-B2-B:** **READY — next implementation task.** Both gates are now
-  satisfied: ADR-025's status line reads `Accepted` (flipped 2026-09-19 in
-  the spec-only preflight PR, per that ADR's own transition contract), **and**
+- **S04-B2-B:** **IN FLIGHT, split into four checkpoints (2026-09-19).** Both
+  original gates are satisfied: ADR-025 reads `Accepted` and
   `TASK-S04-mihomo-activation.md` is merged. **ADR-025's status is no longer
   a blocker; do not cite it as one.**
+
+  **B2-B1** (receipt binding, SQL controller-secret resolver, canonical
+  manifest + generation allocator, DNS candidate gate) is on **PR #156** and
+  depends on nothing else. **B2-B2 / B2-B3 / B2-B4 are blocked on a new ADR**
+  — see the next bullet. The four checkpoints' union equals the original
+  B2-B; nothing was deferred to S04-C and no acceptance criterion was
+  lowered. The split followed the §6.1 breaker: Codex failed the same Round 1
+  finding set twice, so retrying it unchanged was not allowed.
+
+- **⛔ S04-B2-B2 blocker — `ADR-035` is needed and does not exist yet.**
+  **The authority class is already settled and is not what is open.** ADR-025
+  §3's taxonomy rules deployment-owned validated constants as
+  **`deployment, not DB`**, read from **validated `Settings` / repo-owned
+  deployment constants**, and states outright that **"Deployment constants are
+  never migrated into the database."** A DB table is therefore not an
+  available option; proposing one would require superseding ADR-025.
+
+  What is genuinely open sits *inside* that class. Three of the seven
+  `_validate_deployment_constants()` keys have no default and must be supplied
+  by the caller — `external-controller`, `api-secret-ref` and
+  `api-secret-revision`; only `mode`, `mixed-port`, `allow-lan` and
+  `log-level` default. `api-secret-revision`'s source is already decided (the
+  fresh purpose-bound `Secret.revision`), so the open question is narrow:
+  **do `external-controller` and `api-secret-ref` live in validated `Settings`
+  or in repo-owned fixed constants?** Both are legal under ADR-025 §3.
+  `Settings` has the closer precedent (`core/config.py:62`'s
+  `transport_cache_root`) but that file belongs to S04-C, which is a TASK
+  scoping problem rather than an architectural one; fixed constants keep B2-B2
+  self-contained but pin an environment-specific `host:port` that S04-C would
+  have to move. ADR-035 decides only that, and may not reopen the authority
+  class.
+
+  > **An earlier version of this entry was wrong** and said both ADRs left the
+  > constants unlocated, listing a versioned DB table as a candidate. ADR-025
+  > §3 had located them; only §4 had been read. Corrected 2026-09-19 after
+  > review.
 
   Two things to carry in rather than re-derive. **Migration numbers moved**:
   S07 took `0024_usage_period_queue`, so B2-B's two migrations are
