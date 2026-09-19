@@ -5,10 +5,11 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
-from sqlalchemy import create_engine, select
-from sqlalchemy.orm import Session
+from sqlalchemy import Table, create_engine, select
+from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from backend.app.core.config import Settings
@@ -26,7 +27,10 @@ from backend.app.models import (
 from backend.app.providers.accounting.mock import MockAccountingProvider
 from backend.app.providers.registry import ProviderRegistry, build_registry
 from backend.app.workers import scheduler
-from backend.app.workers.accounting_sync import apply_expiry_policy, reconcile_subscription
+from backend.app.workers.accounting_sync import (
+    apply_expiry_policy,
+    sync_subscription_usage,
+)
 from backend.app.workers.scheduler import (
     FAST_USAGE_INTERVAL_SECONDS,
     NORMAL_USAGE_INTERVAL_SECONDS,
@@ -213,9 +217,21 @@ def test_rollover_accounting_write_failure_is_pending_manual() -> None:
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
-    Base.metadata.create_all(engine)
+    table_names = {
+        "audit_logs",
+        "customers",
+        "orders",
+        "plans",
+        "subscriptions",
+        "usage_alerts",
+        "usage_deltas",
+        "usage_periods",
+        "usage_samples",
+    }
+    tables: list[Table] = [Base.metadata.tables[name] for name in table_names]
+    Base.metadata.create_all(engine, tables=tables)
     try:
-        with Session(engine) as db:
+        with sessionmaker(bind=engine, expire_on_commit=False)() as db:
             customer = Customer(
                 customer_no="CUS-S07-FAIL",
                 email="s07-fail@example.invalid",
@@ -242,6 +258,16 @@ def test_rollover_accounting_write_failure_is_pending_manual() -> None:
             )
             db.add(order)
             db.flush()
+            queued_order = Order(
+                order_no="ORD-S07-FAIL-QUEUED",
+                customer_id=customer.id,
+                plan_id=plan.id,
+                client_request_id="s07-fail-queued",
+                amount="10.00",
+                currency="CNY",
+            )
+            db.add(queued_order)
+            db.flush()
             subscription = Subscription(
                 subscription_no="SUB-S07-FAIL",
                 customer_id=customer.id,
@@ -251,7 +277,7 @@ def test_rollover_accounting_write_failure_is_pending_manual() -> None:
                 route_group_code="S07",
                 service_expire_at=datetime.now(UTC) + timedelta(days=30),
                 accounting_user_id="acct-s07-fail",
-                current_period_id=None,
+                token_hash="stable-token-hash",
             )
             db.add(subscription)
             db.flush()
@@ -267,29 +293,53 @@ def test_rollover_accounting_write_failure_is_pending_manual() -> None:
             db.add(period)
             db.flush()
             subscription.current_period_id = period.id
+            queued = UsagePeriod(
+                subscription_id=subscription.id,
+                order_id=queued_order.id,
+                plan_id=plan.id,
+                period_start=datetime.now(UTC),
+                period_end=datetime.now(UTC) + timedelta(days=30),
+                quota_bytes=200,
+                status=UsagePeriodStatus.QUEUED,
+            )
+            db.add(queued)
             db.commit()
+            db.refresh(subscription)
+            assert subscription.current_period is not None
             provider = MockAccountingProvider(
                 failures={"set_quota": RuntimeError("s07-rollover-write-failed")}
             )
             provider.users["acct-s07-fail"] = provider.create_user(
                 "acct-s07-fail", 100, subscription.service_expire_at
             )
-            with pytest.raises(RuntimeError, match="s07-rollover-write-failed"):
-                reconcile_subscription(
-                    db,
-                    subscription,
-                    provider,
-                    pending_manual_on_failure=True,
-                )
+            provider.set_mock_usage("acct-s07-fail", 100)
+            accounting = Mock(wraps=provider)
+            accounting.delete_user = Mock()
+            sync_subscription_usage(
+                db,
+                subscription,
+                accounting,
+                now=datetime.now(UTC),
+            )
+            accounting.set_quota.assert_called_once()
             db.expire_all()
             persisted = db.scalar(
                 select(Subscription).where(Subscription.id == subscription.id)
             )
+            persisted_periods = db.scalars(
+                select(UsagePeriod)
+                .where(UsagePeriod.subscription_id == subscription.id)
+                .order_by(UsagePeriod.id)
+            ).all()
             assert persisted is not None
             assert persisted.reconcile_state is ReconcileState.PENDING_MANUAL
             assert persisted.provision_error == "s07-rollover-write-failed"
+            assert persisted_periods[0].status is UsagePeriodStatus.CLOSED
+            assert persisted_periods[1].status is UsagePeriodStatus.ACTIVE
+            assert persisted.current_period_id == persisted_periods[1].id
+            accounting.delete_user.assert_not_called()
     finally:
-        Base.metadata.drop_all(engine)
+        Base.metadata.drop_all(engine, tables=tables)
         engine.dispose()
 
 

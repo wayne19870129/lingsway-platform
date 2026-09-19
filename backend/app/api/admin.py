@@ -717,13 +717,16 @@ def admin_confirm_payment(
                 order_type=order_type,
                 plan_id=str(order.plan_id),
             )
+            plan = db.get(Plan, order.plan_id)
+            if plan is None:
+                raise ValueError("Order plan is not available")
             outcome = confirm_payment_and_provision(
                 command,
                 ProvisionRequest(
                     order_id=str(order.id),
                     customer_id=str(order.customer_id),
                     username="",
-                    quota_gb=Decimal(0),
+                    quota_gb=Decimal(plan.traffic_limit_bytes) / Decimal(1024**3),
                     thread_limit=1,
                     expire_at=datetime.now(UTC),
                     subscription_domain=get_settings().subscription_domain

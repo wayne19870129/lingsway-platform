@@ -2,21 +2,26 @@ from __future__ import annotations
 
 import importlib
 import socket
+from collections.abc import Iterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import Mock
 
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import Table, create_engine, select
 from sqlalchemy.engine import Engine
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from backend.app import main
 from backend.app.api import admin as admin_api
 from backend.app.core.config import Settings
+from backend.app.core.database import Base
 from backend.app.dependencies import AuthContext, get_auth_context
 from backend.app.domain.capacity import CapacityExceededError
 from backend.app.domain.provisioning import ProvisionOutcome, ProvisionStatus
@@ -31,6 +36,8 @@ from backend.app.models import (
     Plan,
     Subscription,
     SubscriptionStatus,
+    UsagePeriod,
+    UsagePeriodStatus,
 )
 from backend.app.providers.accounting.mock import MockAccountingProvider
 from backend.app.providers.base import CapacityDTO
@@ -260,31 +267,140 @@ def test_confirm_payment_capacity_failure_is_rejected_before_payment(
 
 
 def test_confirm_renewal_payment_enqueues_without_current_period_side_effects(
-    monkeypatch: pytest.MonkeyPatch,
+    db_session: Session,
 ) -> None:
-    db, order, subscription = _provision_fixtures()
-    order.order_type = "RENEWAL"
-    order.target_subscription_id = subscription.id
-    captured: list[object] = []
+    customer = Customer(
+        customer_no="CUS-RENEWAL-001",
+        email="renewal@example.invalid",
+        password_hash="unused",
+        status=CustomerStatus.ACTIVE,
+        role=CustomerRole.CUSTOMER,
+    )
+    plan = Plan(
+        plan_code="PLAN-RENEWAL",
+        name="Renewal Plan",
+        traffic_limit_bytes=50 * 1024**3,
+        duration_days=30,
+        price=Decimal("30.00"),
+        currency="CNY",
+        route_group_code="DEFAULT",
+    )
+    first_order = Order(
+        order_no="ORD-RENEWAL-CURRENT",
+        customer=customer,
+        plan=plan,
+        client_request_id="renewal-current-001",
+        amount=plan.price,
+        currency=plan.currency,
+        status=OrderStatus.ACTIVATED,
+        payment_status=PaymentStatus.PAID,
+        created_at=datetime.now(UTC),
+    )
+    db_session.add_all([customer, plan, first_order])
+    db_session.flush()
+    subscription = Subscription(
+        subscription_no="SUB-RENEWAL-001",
+        customer_id=customer.id,
+        plan_id=plan.id,
+        order_id=first_order.id,
+        status=SubscriptionStatus.ACTIVE,
+        route_group_code="DEFAULT",
+        service_expire_at=datetime.now(UTC) + timedelta(days=20),
+        token_hash="stable-token-hash",
+    )
+    db_session.add(subscription)
+    db_session.flush()
+    current = UsagePeriod(
+        subscription_id=subscription.id,
+        order_id=first_order.id,
+        plan_id=plan.id,
+        period_start=datetime.now(UTC) - timedelta(days=10),
+        period_end=datetime.now(UTC) + timedelta(days=20),
+        quota_bytes=plan.traffic_limit_bytes,
+        used_bytes=123,
+        status=UsagePeriodStatus.ACTIVE,
+    )
+    db_session.add(current)
+    db_session.flush()
+    subscription.current_period_id = current.id
+    renewal = Order(
+        order_no="ORD-RENEWAL-NEXT",
+        customer_id=customer.id,
+        plan_id=plan.id,
+        target_subscription_id=subscription.id,
+        client_request_id="renewal-next-001",
+        order_type="RENEWAL",
+        amount=plan.price,
+        currency=plan.currency,
+        status=OrderStatus.PENDING,
+        payment_status=PaymentStatus.UNPAID,
+        created_at=datetime.now(UTC),
+    )
+    db_session.add(renewal)
+    db_session.commit()
+    db_session.refresh(subscription)
+    before_quota = current.quota_bytes
+    before_end = current.period_end.replace(tzinfo=None)
+    before_token_hash = subscription.token_hash
+    before_current_period_id = subscription.current_period_id
 
-    def fake_confirm(*args: object, **kwargs: object) -> ProvisionOutcome:
-        del kwargs
-        captured.append(args[0])
-        return ProvisionOutcome("run-renewal", ProvisionStatus.SUCCEEDED, None)
-
-    monkeypatch.setattr(admin_api, "confirm_payment_and_provision", fake_confirm)
+    registry = build_registry(Settings())
+    accounting = Mock(wraps=registry.accounting)
+    accounting.delete_user = Mock()
+    registry = replace(registry, accounting=accounting)
     result = admin_api.admin_confirm_payment(
-        order.id,
+        renewal.id,
         PaymentConfirmation(payment_reference="renewal-reference"),
-        cast(Session, db),
+        db_session,
         Customer(),
-        build_registry(Settings()),
+        registry,
     )
 
-    assert result.order.id == order.id
+    db_session.expire_all()
+    persisted_subscription = db_session.get(Subscription, subscription.id)
+    assert persisted_subscription is not None
+    periods = db_session.scalars(
+        select(UsagePeriod)
+        .where(UsagePeriod.subscription_id == subscription.id)
+        .order_by(UsagePeriod.id)
+    ).all()
+    assert result.order.id == renewal.id
     assert result.subscription.id == subscription.id
-    assert len(captured) == 1
-    command = cast(Any, captured[0])
-    assert command.order_type == "RENEWAL"
-    assert command.subscription_id == str(subscription.id)
-    assert subscription.current_period_id is None
+    assert len(periods) == 2
+    queued = periods[1]
+    assert queued.status is UsagePeriodStatus.QUEUED
+    assert queued.order_id == renewal.id
+    assert periods[0].id == current.id
+    assert periods[0].quota_bytes == before_quota
+    assert periods[0].period_end == before_end
+    assert periods[0].status is UsagePeriodStatus.ACTIVE
+    assert persisted_subscription.token_hash == before_token_hash
+    assert persisted_subscription.current_period_id == before_current_period_id
+    accounting.set_quota.assert_not_called()
+    accounting.set_expire.assert_not_called()
+    accounting.delete_user.assert_not_called()
+
+
+@pytest.fixture
+def db_session() -> Iterator[Session]:
+    engine = create_engine(
+        "sqlite+pysqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    table_names = {
+        "audit_logs",
+        "customers",
+        "jobs",
+        "orders",
+        "plans",
+        "subscriptions",
+        "usage_periods",
+    }
+    tables: list[Table] = [Base.metadata.tables[name] for name in table_names]
+    Base.metadata.create_all(engine, tables=tables)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    with factory() as session:
+        yield session
+    Base.metadata.drop_all(engine, tables=tables)
+    engine.dispose()

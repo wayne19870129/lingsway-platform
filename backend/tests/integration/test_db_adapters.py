@@ -256,11 +256,64 @@ def test_usage_period_allows_one_active_and_multiple_queued(db: Session) -> None
     db.flush()
     subscription.current_period_id = periods[0].id
     db.commit()
-    assert db.scalar(select(func.count()).select_from(UsagePeriod)) == 3
+    second_active_order = Order(
+        order_no="ORD-QUEUE-001-ACTIVE-2",
+        customer_id=subscription.customer_id,
+        plan_id=plan.id,
+        client_request_id="queue-001-active-2",
+        amount="10.00",
+        currency="CNY",
+    )
+    db.add(second_active_order)
+    db.flush()
+    db.add(
+        UsagePeriod(
+            subscription_id=subscription.id,
+            order_id=second_active_order.id,
+            plan_id=plan.id,
+            period_start=datetime(2026, 1, 1, tzinfo=UTC),
+            period_end=datetime(2026, 2, 1, tzinfo=UTC),
+            quota_bytes=100,
+            status=UsagePeriodStatus.ACTIVE,
+        )
+    )
+    with pytest.raises(IntegrityError):
+        db.flush()
+    db.rollback()
+    assert db.scalar(
+        select(func.count())
+        .select_from(UsagePeriod)
+        .where(
+            UsagePeriod.subscription_id == subscription.id,
+            UsagePeriod.status == UsagePeriodStatus.ACTIVE,
+        )
+    ) == 1
+    assert db.scalar(
+        select(func.count())
+        .select_from(UsagePeriod)
+        .where(
+            UsagePeriod.subscription_id == subscription.id,
+            UsagePeriod.status == UsagePeriodStatus.QUEUED,
+        )
+    ) == 2
 
 
 def test_usage_period_order_id_is_required_and_unique(db: Session) -> None:
     subscription, plan, orders = _queue_fixture(db, "002")
+    with pytest.raises(IntegrityError):
+        db.add(
+            UsagePeriod(
+                subscription_id=subscription.id,
+                order_id=None,
+                plan_id=plan.id,
+                period_start=datetime(2026, 1, 1, tzinfo=UTC),
+                period_end=datetime(2026, 2, 1, tzinfo=UTC),
+                quota_bytes=100,
+                status=UsagePeriodStatus.ACTIVE,
+            )
+        )
+        db.flush()
+    db.rollback()
     db.add(
         UsagePeriod(
             subscription_id=subscription.id,
@@ -301,16 +354,19 @@ def test_concurrent_rollover_keeps_exactly_one_active_period(db: Session) -> Non
         used_bytes=100,
         status=UsagePeriodStatus.ACTIVE,
     )
-    queued = UsagePeriod(
-        subscription_id=subscription.id,
-        order_id=orders[1].id,
-        plan_id=plan.id,
-        period_start=datetime(2026, 2, 1, tzinfo=UTC),
-        period_end=datetime(2026, 3, 1, tzinfo=UTC),
-        quota_bytes=100,
-        status=UsagePeriodStatus.QUEUED,
-    )
-    db.add_all([active, queued])
+    queued = [
+        UsagePeriod(
+            subscription_id=subscription.id,
+            order_id=orders[index].id,
+            plan_id=plan.id,
+            period_start=datetime(2026, 2 + index, 1, tzinfo=UTC),
+            period_end=datetime(2026, 3 + index, 1, tzinfo=UTC),
+            quota_bytes=100 + index,
+            status=UsagePeriodStatus.QUEUED,
+        )
+        for index in (1, 2)
+    ]
+    db.add_all([active, *queued])
     db.flush()
     subscription.current_period_id = active.id
     db.commit()
@@ -333,14 +389,19 @@ def test_concurrent_rollover_keeps_exactly_one_active_period(db: Session) -> Non
         futures = [pool.submit(rollover) for _ in range(2)]
         for future in futures:
             future.result()
-    assert db.scalar(
-        select(func.count())
-        .select_from(UsagePeriod)
-        .where(
-            UsagePeriod.subscription_id == subscription.id,
-            UsagePeriod.status == UsagePeriodStatus.ACTIVE,
-        )
-    ) == 1
+    with Session(db.get_bind()) as final_db:
+        final_subscription = final_db.get(Subscription, subscription.id)
+        assert final_subscription is not None
+        final_periods = final_db.scalars(
+            select(UsagePeriod)
+            .where(UsagePeriod.subscription_id == subscription.id)
+            .order_by(UsagePeriod.id)
+        ).all()
+        assert sum(period.status is UsagePeriodStatus.ACTIVE for period in final_periods) == 1
+        assert final_periods[0].status is UsagePeriodStatus.CLOSED
+        assert final_periods[1].status is UsagePeriodStatus.ACTIVE
+        assert final_periods[2].status is UsagePeriodStatus.QUEUED
+        assert final_subscription.current_period_id == final_periods[1].id
 
 
 def test_gateway_route_binding_is_idempotent_and_active_unique(
