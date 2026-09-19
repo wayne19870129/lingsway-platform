@@ -316,16 +316,28 @@ different contents) and the PR #128 version won.
   Mihomo DNS field/type validation remains a later candidate-schema/runtime
   validation gate before production activation.
 
-- **S04-B2-A:** ACTIVE on `task/s04-b2-mihomo-runtime-reconciliation`, PR #128,
-  architecture/documentation-only. It delivers **ADR-025**
+- **S04-B2-A:** **COMPLETE.** PR #128 merged. It delivered **ADR-025**
   (`ADR-025-mihomo-projection-generation-authority.md`) and the S-series
-  implementation TASK (`TASK-S04-mihomo-activation.md`). No Python, no ORM,
-  no migration.
-- **S04-B2-B:** **NOT STARTED.** Two gates, both required: ADR-025's status
-  line reads `Accepted` (PR #128 merged by the User), **and**
-  `TASK-S04-mihomo-activation.md` is merged. `TASK-T16` is explicitly **not**
-  the execution vehicle — its allowed-file list does not authorize
-  `backend/app/models/`, `backend/app/infra/`, or
+  implementation TASK (`TASK-S04-mihomo-activation.md`). Architecture and
+  documentation only — no Python, no ORM, no migration, as specified.
+- **S04-B2-B:** **READY — next implementation task.** Both gates are now
+  satisfied: ADR-025's status line reads `Accepted` (flipped 2026-09-19 in
+  the spec-only preflight PR, per that ADR's own transition contract), **and**
+  `TASK-S04-mihomo-activation.md` is merged. **ADR-025's status is no longer
+  a blocker; do not cite it as one.**
+
+  Two things to carry in rather than re-derive. **Migration numbers moved**:
+  S07 took `0024_usage_period_queue`, so B2-B's two migrations are
+  `0025_mihomo_projection_generations` (down_revision
+  `0024_usage_period_queue`) and `0026_mihomo_transport_materializations`
+  (down_revision `0025_mihomo_projection_generations`). **And the TASK's
+  allowed-file list gained `backend/tests/integration/test_models.py`**,
+  because that file asserts an exact table count (38 today) that two new
+  tables necessarily break — found by the preflight scope-closure check, not
+  by CI this time.
+
+  `TASK-T16` is explicitly **not** the execution vehicle — its allowed-file
+  list does not authorize `backend/app/models/`, `backend/app/infra/`, or
   `infrastructure/alembic/versions/`.
 - **S04-C:** **NOT STARTED.** `FORWARDER_PROVIDER=mihomo` remains NOT
   selectable; no deployment authorization exists.

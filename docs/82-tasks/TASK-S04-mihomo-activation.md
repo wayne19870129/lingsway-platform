@@ -18,17 +18,24 @@
 激活"，分三个**各自独立 PR**的阶段。当前 `build_registry()` 对
 `FORWARDER_PROVIDER != "mock"` 一律抛 `ProviderConfigurationError`。
 
-### S04-B2-A — ADR / 架构（ACTIVE，PR #128）
+### S04-B2-A — ADR / 架构（**COMPLETE**，PR #128 已合并）
 
 交付 ADR-025：全局 projection generation authority、authority taxonomy
 （保留 ADR-023 §1.2 三类输入 + deployment constants 的读取边界）、
 durable transport materialization receipt 的 producer/commit/crash 契约、
 以及 B2-B 的 planned schema。**仅文档，不含任何实现。**
 
-### S04-B2-B — 实现（NOT STARTED）
+### S04-B2-B — 实现（**READY，下一个要做的任务**）
 
-仅在 ADR-025 状态变为 `Accepted`（PR #128 已被 User 合并）**且**本文件
-已合并之后方可开始。交付：
+> **2026-09-19：两道前置闸门都已满足，可以开工。**
+> - ADR-025 状态已是 **`Accepted`**（PR #128 已合并，状态行已按该 ADR 自己的
+>   迁移契约翻转）；
+> - 本文件已合并。
+>
+> **不要再把 ADR-025 的状态当作 blocker。** 开工前仍要读 ADR-025 正文，
+> 但那是读**内容**，不是等**状态**。
+
+交付：
 
 1. **两个 additive migration + 两个 ORM model**（ADR-025 §8）：
    `mihomo_projection_generations` 与 `mihomo_transport_materializations`。
@@ -55,6 +62,7 @@ durable transport materialization receipt 的 producer/commit/crash 契约、
 ## 约束
 
 - **B2-B 的两个前置闸门缺一不可**：ADR-025 状态为 `Accepted`，且本文件已合并。
+  **（2026-09-19：两条都已满足，闸门已开。）**
 - **铁律 1**：Mihomo 配置一律从数据库全量生成，禁止增量拼接。
 - **铁律 3**：不提供任何 `force` / `override` / `bypass` 开关。
 - **铁律 7**：不得改写任何已有 Alembic revision；两个新迁移必须**幂等**。
@@ -103,8 +111,8 @@ backend/app/providers/forwarder/mihomo.py
 backend/app/providers/forwarder/mihomo_projection.py
 backend/app/providers/transport/subscription.py     # 仅为 receipt producer 计算 content_hash
 backend/app/workers/transport_sync.py               # 仅为在同一事务内提交 receipt
-infrastructure/alembic/versions/0024_mihomo_projection_generations.py   # 新增
-infrastructure/alembic/versions/0025_mihomo_transport_materializations.py # 新增
+infrastructure/alembic/versions/0025_mihomo_projection_generations.py     # 新增
+infrastructure/alembic/versions/0026_mihomo_transport_materializations.py # 新增
 backend/tests/unit/test_mihomo_projection.py
 backend/tests/unit/test_mihomo_reconciliation.py
 backend/tests/unit/test_transport_provider.py
@@ -114,13 +122,81 @@ backend/tests/guards/test_mihomo_reconciliation_safety.py
 backend/tests/guards/test_secret_leak.py
 backend/tests/integration/test_mihomo_reconciliation_mysql.py
 backend/tests/integration/test_db_adapters.py
+backend/tests/integration/test_models.py                # 2026-09-19 补入，依据见下
 docs/80-decisions/ADR-025-mihomo-projection-generation-authority.md      # 仅状态改为 Accepted
 docs/82-tasks/TASK-S04-mihomo-activation.md
 docs/83-project-continuity.md
 ```
 
-迁移编号 `0024` / `0025` 为预留；若届时 `main` 上的 head 已前移，使用当时
-的下一个连续编号，并在 PR 描述中说明——**不得改写任何已有 revision**。
+### 迁移编号：**已更新为 `0025` / `0026`**（2026-09-19）
+
+原文预留 `0024` / `0025`。**S07（PR #152）已占用 `0024_usage_period_queue`**，
+实测 `main`（`f23bb39c7b6243fd854f52a1b96ec3a0018e4419`）上最大编号就是 `0024`。
+两个新迁移因此定为：
+
+| 文件 | `down_revision` |
+|---|---|
+| `0025_mihomo_projection_generations.py` | **`0024_usage_period_queue`** |
+| `0026_mihomo_transport_materializations.py` | **`0025_mihomo_projection_generations`** |
+
+**铁律 7：不得改写任何已有 revision。** 两个新迁移必须**幂等**
+（表存在则跳过），且只能 additive。
+
+**开工时仍然要自己再确认一次编号**：对着当时的 `main` **加上所有 open PR**
+一起查，取下一个连续编号；与本文件写的不一致时以实际为准，并在 PR 描述里
+说明。只看 `main` 会撞号（2026-09-18 已因此撞过一次）。
+
+### 2026-09-19 范围闭包检查（S04-B2-B，开工前）
+
+沿四条轴各走一遍，对着 `main`（`f23bb39c`）实测。**共补入 1 个文件。**
+
+| 轴 | 查了什么 | 结果 |
+|---|---|---|
+| **数据库 schema** | 新增两张表会打破什么 | ❌ **发现漏项**，见下 |
+| **函数 / 协议** | B2-B 触及模块的公开签名与协议落点 | 未发现可证明的漏项 |
+| **API 契约** | B2-B 是否产生 API 表面 | 无——交付物全在 `infra/` `providers/` `workers/` `models/`，不碰 `api/` 或 `schemas/` |
+| **渲染字段** | projection 渲染相关文件 | `mihomo_projection.py` 与其单测均已在清单内 |
+
+**补入：`backend/tests/integration/test_models.py`**
+
+依据是一行硬断言：
+
+```python
+# backend/tests/integration/test_models.py:11
+assert len(Base.metadata.tables) == 38
+```
+
+实测当前 `main` 上正是 **38** 张表。B2-B 新增 `mihomo_projection_generations`
+与 `mihomo_transport_materializations` 两张，**这个断言必然失败**，而该文件
+原本不在清单里。
+
+> **这与 S07 第二次漏项是同一类**（`UsagePeriod.order_id NOT NULL` 打破了清单外
+> 的既有 fixture）。**区别是这次由开工前的闭包检查发现，不是由 CI 发现**——
+> 少一轮返工。
+
+**查过但明确不加（防范围蔓延）：**
+
+- `backend/tests/guards/test_persistent_state_manifest.py` —— 它校验的是
+  `docs/90-migration/persistent-state-manifest.md` 里的 compose 状态与独立
+  SQLite 路径，**不枚举数据库表**，新增表不影响。
+- `backend/tests/unit/test_drift_check.py` —— 它按**具名**表
+  （`audit_logs` / `egress_endpoints` / `egress_groups`）从 metadata 里取，
+  不做全量计数，新增表不影响。
+- `backend/tests/unit/test_desired_routing_snapshot.py` —— 它覆盖的是
+  **Xray** 路由快照（`XrayOutboundDTO`、`GatewayRouteBinding`），
+  不是 B2-B 第 4 项的 Mihomo desired snapshot loader。
+- `backend/app/providers/base.py` —— receipt producer 的改动写在
+  `providers/transport/subscription.py` 与 `workers/transport_sync.py` 内部
+  （"仅为计算 `content_hash`" / "仅为同事务提交 receipt"），**没有证据表明
+  需要改 Protocol**。要改它属于 `AGENTS.md` 铁律 5 的范围，**停下来上报**。
+
+> **一条给执行者的补充规则（这次闭包检查的副产品）：**
+> `backend/tests/integration/test_mihomo_projection_lock.py` **不在清单里**，
+> 而它直接 import 了 `mihomo_projection_lock` / `mihomo_blocker` /
+> `mihomo_reconciliation` 三个 B2-B 允许修改的模块。目前**无法证明**它必然
+> 需要改（它测的是命名锁语义，不是 generation 分配）。
+> **所以：如果你的改动动到了这三个模块的公开签名，停下来上报，不要自行
+> 修改那个测试文件。** 这属于 `docs/86` §7 的"需要改清单外文件"情形。
 
 ### S04-C
 
@@ -149,6 +225,9 @@ python -m pytest backend/tests                # 需 TEST_DATABASE_URL（MySQL 8.
 
 - ADR-025 状态为 `Proposed`，且含明确的状态迁移归属（谁在什么时候改成
   `Accepted`）。
+  > **这是 B2-A 交付当时的验收条件，已满足，属历史记录。**
+  > PR #128 合并后，该状态已于 2026-09-19 按其自身迁移契约翻转为
+  > **`Accepted`** ——**不要照这一行把它改回 `Proposed`**。
 - authority taxonomy 保留 ADR-023 §1.2 三类输入，并单独给出 deployment
   constants 的读取边界；文中不再出现"所有 authoritative input 都来自
   owning committed DB rows"这类压平表述。
