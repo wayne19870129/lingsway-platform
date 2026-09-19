@@ -1,40 +1,42 @@
 {
-  "alerts": [],
+  "alerts": [
+    "BREAKER_OFF"
+  ],
   "automerge": {
-    "breaker": "true",
+    "breaker": "false",
     "merged_without_user_since_breaker_on": 0
   },
-  "generated_at": "2026-09-19T12:23:49.780Z",
+  "generated_at": "2026-09-19T14:18:38.769Z",
   "judgement_only_signals": [
     "SAME_FINDING_FAILED_TWICE",
     "PASS_BUT_CRITICAL"
   ],
   "main": {
-    "ci_conclusion": "pending",
+    "ci_conclusion": "success",
     "commits_since_last_digest": 0,
-    "sha": "a10d237d8b1922137e5790f6dba30cabbb3b83b3"
+    "sha": "5b92992b10ce64ccc86a6bcba383017f2bf48bdf"
   },
   "open_prs": [
     {
-      "age_hours": 0.35,
+      "age_hours": 0.43,
       "ci": "success",
-      "head_sha": "28c3ffb6b7d837be4d2e79650efb07974d588678",
-      "hours_since_last_commit": 0.17,
+      "head_sha": "b31c35cf375283e4c154536092f7e19dd0ccf1f1",
+      "hours_since_last_commit": 0.44,
       "labels": [
         "risk:low",
         "no-automerge"
       ],
-      "latest_verdict_on_head": "PASS",
+      "latest_verdict_on_head": "none",
       "mergeable": null,
-      "number": 157,
-      "review_rounds": 1,
+      "number": 159,
+      "review_rounds": 0,
       "touches_high_risk_paths": false
     },
     {
-      "age_hours": 1.96,
+      "age_hours": 3.87,
       "ci": "success",
-      "head_sha": "143c1e58f52f03967ece66e7ff56e2f01cb41127",
-      "hours_since_last_commit": 1.94,
+      "head_sha": "9c2067383f1d5f832f2a663d04c0dbb0b740ebb4",
+      "hours_since_last_commit": 1.17,
       "labels": [
         "risk:high",
         "no-automerge"
@@ -42,7 +44,7 @@
       "latest_verdict_on_head": "NEEDS_CHANGES",
       "mergeable": null,
       "number": 156,
-      "review_rounds": 0,
+      "review_rounds": 1,
       "touches_high_risk_paths": true
     }
   ]
