@@ -61,13 +61,32 @@ state, reviews, and checks. Do not rely on an older chat or SHA snapshot.
 > table records each audit's starting SHA so the next one has a span rather
 > than a blank page.
 >
-> **One unresolved tension, recorded rather than smoothed over** (ADR-034 §5a):
-> `AGENTS.md` calls the breaker *and* the independent audit joint
-> preconditions for auto-merge, "not optional decoration". The audit is now
-> gone. It is accepted only on a countable fact — **the workflow has never
-> merged a single PR**; #135 through #153 were all merged by hand. If that ever
-> changes, either the audit comes back or auto-merge goes off; keeping
-> `.github/automerge-enabled` at `false` is the cheap equivalent.
+> **That tension is now resolved: auto-merge is OFF.** ADR-034 §5a had accepted
+> the missing audit on one countable fact — that the workflow had never merged
+> a PR — and bound it to a condition: the first workflow-merged PR the user had
+> not seen forces a choice between restoring the independent audit and turning
+> auto-merge off.
+>
+> **The condition fired. `PR #155` was merged by `github-actions[bot]`**
+> (`merged_by` on the API, 2026-09-19T10:02:34Z), with no prior user review of
+> that merge. It is the first and so far only PR the workflow merged; #154 was
+> merged by the user and #152 carried `no-automerge`. **The user chose to turn
+> auto-merge off rather than restore periodic or forced Claude review**, so
+> `.github/automerge-enabled` is now `false` and **every PR is merged by the
+> user by hand**. ADR-034's on-demand review principle is untouched: no
+> cadence, no forced review node.
+>
+> Two things this does not mean. It does not revoke ADR-029 — the workflow,
+> the gate function and its truth table all stay in place and stay tested; the
+> breaker simply reads `false`, which is the mechanism ADR-029 §5 exists for.
+> And it does not restore the audit: the honest position is that `main` now has
+> **no independent post-merge check at all**, and the compensation is that a
+> human approves every merge (ADR-034 §2's distinction — what was removed is
+> "Claude must look", not "a human must approve").
+>
+> **Turning it back on is a user-merged PR** (ADR-030 §5a's asymmetry), and
+> ADR-034 §5a's condition would have to be answered first: restore the
+> independent audit, or explain what replaced it.
 >
 > One ADR-030 property survives both pivots unchanged: **Claude can stop the
 > pipeline alone but cannot restart it alone** (§5a) — restoring the breaker is
@@ -91,6 +110,11 @@ state, reviews, and checks. Do not rely on an older chat or SHA snapshot.
 > `.github/automerge-enabled` circuit breaker; governance and audit PRs stay
 > human-merged.
 >
+> **⚠️ As of 2026-09-19 the breaker is `false`, so nothing merges
+> automatically — the user merges every PR by hand.** ADR-029's machinery is
+> intact and still tested; it is simply gated off. See the resolution note
+> below for why.
+>
 > **Where that policy actually lives, as of the S08 PR:**
 >
 > | Part | File |
@@ -98,7 +122,7 @@ state, reviews, and checks. Do not rely on an older chat or SHA snapshot.
 > | Trigger → facts collection → merge | `.github/workflows/auto-merge.yml` |
 > | The decision itself (a pure function) | `scripts/automerge_gate.py` |
 > | The eight-case truth table, run in CI | `backend/tests/guards/test_automerge_gate.py` |
-> | Circuit breaker | `.github/automerge-enabled` (`true` = on) |
+> | Circuit breaker | `.github/automerge-enabled` — **currently `false` (off)** |
 > | ~~Dispatch issue template~~ | **Removed 2026-09-19** — see below |
 >
 > Two properties worth not re-deriving: the workflow deliberately has **no
