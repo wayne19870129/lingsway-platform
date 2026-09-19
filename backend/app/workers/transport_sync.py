@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from backend.app.models import (
+    MihomoTransportMaterialization,
     ProviderStatus,
+    Secret,
     TransportCapacityAlert,
     TransportEndpointRecord,
     TransportProviderRecord,
@@ -74,9 +76,7 @@ def refresh_provider_inventory(
         record.transport = endpoint.transport
         record.tls_mode = endpoint.tls_mode
         record.status = "AVAILABLE"
-        record.raw_metadata_json = json.dumps(
-            endpoint.raw_metadata or {}, separators=(",", ":")
-        )
+        record.raw_metadata_json = json.dumps(endpoint.raw_metadata or {}, separators=(",", ":"))
     stale_query = select(TransportEndpointRecord).where(
         TransportEndpointRecord.provider_id == provider_record.id
     )
@@ -98,6 +98,32 @@ def refresh_provider_inventory(
     provider_record.status = ProviderStatus.HEALTHY if endpoints else ProviderStatus.DEGRADED
     provider_record.last_refresh_at = now
     provider_record.last_health_at = now
+    proof = getattr(provider, "materialization_proof", lambda: None)()
+    if proof is not None:
+        secret = db.scalar(select(Secret).where(Secret.secret_ref == provider_record.secret_ref))
+        if secret is None or secret.revision <= 0:
+            raise RuntimeError("Transport materialization source secret is unavailable")
+        cache_identity, content_hash = proof
+        receipt = db.scalar(
+            select(MihomoTransportMaterialization)
+            .where(MihomoTransportMaterialization.owner_record_id == provider_record.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        deadline = (
+            capacity.expire_at
+            if capacity is not None and capacity.expire_at
+            else now + timedelta(hours=1)
+        )
+        if receipt is None:
+            receipt = MihomoTransportMaterialization(owner_record_id=provider_record.id)
+            db.add(receipt)
+        receipt.provider_code = provider_record.code
+        receipt.source_revision = secret.revision
+        receipt.cache_identity = cache_identity
+        receipt.content_hash = content_hash
+        receipt.freshness_deadline = deadline
+        receipt.updated_at = now
     db.commit()
     return len(endpoints)
 

@@ -267,11 +267,7 @@ def _validate_sections(desired: DesiredForwarderState) -> None:
         rule_target = _validate_target(rule_target_obj, "MIHOMO_RULE_TARGET_INVALID")
         if rule_match.upper() != "MATCH":
             value = rule.get("value")
-            if (
-                rule_match.upper() not in supported_rules
-                or not isinstance(value, str)
-                or not value
-            ):
+            if rule_match.upper() not in supported_rules or not isinstance(value, str) or not value:
                 raise MihomoProjectionError("MIHOMO_RULE_TYPE_UNSUPPORTED")
             _canonical_rule_value(rule_match.upper(), value)
         elif rule.get("value") not in (None, ""):
@@ -295,13 +291,26 @@ def _validate_sections(desired: DesiredForwarderState) -> None:
         ):
             raise MihomoProjectionError("MIHOMO_RULE_INVALID")
         second_rule_match = second_rule_match_obj
-        second_rule_target = _validate_target(
-            second_rule_target_obj, "MIHOMO_RULE_TARGET_INVALID"
-        )
+        second_rule_target = _validate_target(second_rule_target_obj, "MIHOMO_RULE_TARGET_INVALID")
         if second_rule_match.upper() != "MATCH" and second_rule_target not in allowed_targets:
             raise MihomoProjectionError("MIHOMO_RULE_TARGET_INVALID")
-    _mapping(desired.dns, "MIHOMO_DNS_INVALID")
+    _validate_dns_schema(desired.dns)
     _mapping(desired.policy, "MIHOMO_POLICY_INVALID")
+
+
+def _validate_dns_schema(dns: Mapping[str, object]) -> None:
+    for key, value in dns.items():
+        if key in {"enable", "ipv6"} and isinstance(value, bool):
+            continue
+        if key == "nameserver" and isinstance(value, (list, tuple)):
+            continue
+        if key not in {"enable", "ipv6", "nameserver"} or not isinstance(
+            value, (list, tuple, bool)
+        ):
+            raise MihomoProjectionError("MIHOMO_DNS_INVALID")
+        raise MihomoProjectionError("MIHOMO_DNS_INVALID")
+
+
 def _unsafe_component(value: str) -> bool:
     return any(char == "," or ord(char) < 32 for char in value)
 
@@ -359,12 +368,7 @@ def _canonical_rule_value(kind: str, value: str) -> str:
 def _controller_identity(desired: DesiredForwarderState) -> tuple[str, int]:
     ref = desired.deployment_constants.get("api-secret-ref")
     revision = desired.deployment_constants.get("api-secret-revision")
-    if (
-        not isinstance(ref, str)
-        or not ref
-        or ref != ref.strip()
-        or _unsafe_component(ref)
-    ):
+    if not isinstance(ref, str) or not ref or ref != ref.strip() or _unsafe_component(ref):
         raise MihomoProjectionError("MIHOMO_CONTROLLER_SECRET_REF_INVALID")
     if isinstance(revision, bool) or not isinstance(revision, int) or revision <= 0:
         raise MihomoProjectionError("MIHOMO_CONTROLLER_SECRET_REVISION_INVALID")
@@ -438,9 +442,7 @@ def compose_mihomo_document(desired: DesiredForwarderState) -> tuple[dict[str, o
         "bind-address": "127.0.0.1",
         "mode": "rule",
         "log-level": "warning",
-        "external-controller": _validate_deployment_constants(
-            desired.deployment_constants
-        )[1],
+        "external-controller": _validate_deployment_constants(desired.deployment_constants)[1],
         **dict(desired.deployment_constants),
     }
 

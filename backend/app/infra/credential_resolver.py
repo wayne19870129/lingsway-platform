@@ -8,16 +8,44 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import Select
 
-from backend.app.core.secrets import SecretStoreError, decrypt_secret
+from backend.app.core.secrets import (
+    SecretStoreError,
+    decrypt_secret,
+    reveal_secret_snapshot_for_purpose,
+)
 from backend.app.models import Secret
 from backend.app.providers.base import (
     CredentialDTO,
     CredentialResolutionError,
 )
+from backend.app.providers.forwarder.mihomo import (
+    ControllerSecretResolver,
+    ControllerSecretSnapshot,
+)
 from backend.app.providers.gateway.xray_composition import (
     XrayRealityConfig,
     XrayRenderResolver,
 )
+
+MIHOMO_CONTROLLER_SECRET_PURPOSE = "MIHOMO_CONTROLLER_API_SECRET"
+
+
+class SqlMihomoControllerSecretResolver(ControllerSecretResolver):
+    def __init__(self, db: Session) -> None:
+        self._db = db
+
+    def resolve(self, secret_ref: str) -> ControllerSecretSnapshot:
+        if not isinstance(secret_ref, str) or not secret_ref.strip():
+            raise CredentialResolutionError("CREDENTIAL_REF_INVALID")
+        try:
+            snapshot = reveal_secret_snapshot_for_purpose(
+                self._db, secret_ref, MIHOMO_CONTROLLER_SECRET_PURPOSE
+            )
+        except (SecretStoreError, ValueError):
+            raise CredentialResolutionError("CREDENTIAL_RESOLUTION_FAILED") from None
+        if not snapshot.value.strip() or snapshot.revision <= 0:
+            raise CredentialResolutionError("CREDENTIAL_RESOLUTION_FAILED")
+        return ControllerSecretSnapshot(secret_ref, snapshot.revision, snapshot.value)
 
 
 def _current_secret_statement(
@@ -104,4 +132,3 @@ class SqlAlchemyCredentialResolver(XrayRenderResolver):
             raise CredentialResolutionError("CREDENTIAL_MALFORMED") from None
         except Exception:
             raise CredentialResolutionError("CREDENTIAL_RESOLUTION_FAILED") from None
-

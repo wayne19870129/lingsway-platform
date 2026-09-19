@@ -1,6 +1,8 @@
 import logging
+from datetime import UTC, datetime
 
 from backend.app.core.logging import CredentialRedactionFilter
+from backend.app.infra.mihomo_materialization import VerifiedMaterialization
 
 
 class CredentialRecord(logging.LogRecord):
@@ -24,3 +26,12 @@ def test_known_credential_fields_are_redacted_before_formatting() -> None:
     rendered = logging.Formatter("%(message)s %(password)s").format(record)
     assert "aaaa11111111bbbb" not in rendered
     assert "left-secret-right" not in rendered
+
+
+def test_mihomo_materialization_repr_is_secret_safe() -> None:
+    value = VerifiedMaterialization(
+        1, "provider", 2, "cache-token", "a" * 64, datetime.now(UTC), b"SENTINEL_YAML"
+    )
+    rendered = repr(value)
+    assert "SENTINEL_YAML" not in rendered
+    assert "cache-token" not in rendered

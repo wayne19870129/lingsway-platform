@@ -8,6 +8,7 @@ from sqlalchemy import (
     DateTime,
     Enum,
     ForeignKey,
+    Integer,
     String,
     Text,
     UniqueConstraint,
@@ -176,3 +177,29 @@ class Tutorial(Base):
     sort_order: Mapped[int] = mapped_column(default=100)
     published: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class MihomoProjectionGeneration(Base):
+    __tablename__ = "mihomo_projection_generations"
+    revision: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
+    manifest_version: Mapped[str] = mapped_column(String(32))
+    desired_fingerprint: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(PRECISE_DATETIME, default=utcnow)
+
+
+class MihomoTransportMaterialization(Base):
+    __tablename__ = "mihomo_transport_materializations"
+    __table_args__ = (UniqueConstraint("owner_record_id", name="uq_mihomo_materialization_owner"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    owner_record_id: Mapped[int] = mapped_column(ForeignKey("transport_providers.id"))
+    provider_code: Mapped[str] = mapped_column(String(40))
+    source_revision: Mapped[int] = mapped_column(BigInteger)
+    cache_identity: Mapped[str] = mapped_column(String(160))
+    content_hash: Mapped[str] = mapped_column(String(64))
+    freshness_deadline: Mapped[datetime] = mapped_column(PRECISE_DATETIME)
+    created_at: Mapped[datetime] = mapped_column(PRECISE_DATETIME, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(PRECISE_DATETIME, default=utcnow, onupdate=utcnow)

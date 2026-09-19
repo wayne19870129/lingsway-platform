@@ -208,6 +208,8 @@ class SubscriptionTransportProvider:
         self._endpoints: list[TransportEndpointDTO] = []
         self._capacity: TransportCapacityDTO | None = None
         self._close_failed = False
+        self._last_content_hash: str | None = None
+        self._last_cache_identity: str | None = None
 
     def __repr__(self) -> str:
         return (
@@ -277,10 +279,18 @@ class SubscriptionTransportProvider:
         endpoints = parse_subscription(self.provider_code, response.text)
         if self._cache_path is not None:
             validate_mihomo_provider_document(response.text)
+            self._last_content_hash = hashlib.sha256(response.content).hexdigest()
+            self._last_cache_identity = str(self._cache_path)
             write_provider_cache(self._cache_path, response.content)
         # Publish the new snapshot only after parsing and cache persistence succeed.
         self._endpoints = endpoints
         self._capacity = capacity
+
+    def materialization_proof(self) -> tuple[str, str] | None:
+        """Return proof for the bytes written by the most recent successful sync."""
+        if self._last_content_hash is None or self._last_cache_identity is None:
+            return None
+        return self._last_cache_identity, self._last_content_hash
 
     def list_endpoints(self) -> list[TransportEndpointDTO]:
         return list(self._endpoints)
