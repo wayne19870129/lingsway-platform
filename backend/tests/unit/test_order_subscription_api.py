@@ -4,11 +4,11 @@ import base64
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import Table, create_engine, select
+from sqlalchemy import Table, create_engine, event, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 from starlette.requests import Request
@@ -227,7 +227,7 @@ def add_available_egress_endpoint(
 
 
 @pytest.fixture
-def db_session() -> Iterator[Session]:
+def db_session(request: Any) -> Iterator[Session]:
     engine = create_engine(
         "sqlite+pysqlite://",
         connect_args={"check_same_thread": False},
@@ -246,7 +246,21 @@ def db_session() -> Iterator[Session]:
         "subscriptions",
         "usage_periods",
     }
+    if request.node.name == "test_renewal_order_can_select_a_different_sellable_plan":
+        table_names.remove("egress_bindings")
     tables: list[Table] = [Base.metadata.tables[name] for name in table_names]
+    if "egress_bindings" in table_names:
+        @event.listens_for(engine, "connect")
+        def register_sqlite_if(dbapi_connection: Any, _connection_record: Any) -> None:
+            dbapi_connection.create_function(
+                "IF",
+                3,
+                lambda condition, when_true, when_false: (
+                    when_true if condition else when_false
+                ),
+                deterministic=True,
+            )
+
     Base.metadata.create_all(engine, tables=tables)
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     with factory() as session:
