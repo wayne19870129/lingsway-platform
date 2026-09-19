@@ -79,7 +79,7 @@ backend/app/api/public.py
 backend/app/workers/accounting_sync.py
 backend/app/core/config.py
 backend/app/schemas/public.py
-infrastructure/alembic/versions/0026_usage_period_queue.py    # 新增，编号见下
+infrastructure/alembic/versions/0024_usage_period_queue.py    # 新增，编号见下
 backend/tests/unit/test_domain.py
 backend/tests/unit/test_order_subscription_api.py
 backend/tests/unit/test_admin_api.py
@@ -96,10 +96,18 @@ docs/82-tasks/TASK-S07-order-queue-billing.md
 docs/83-project-continuity.md
 ```
 
-迁移编号 `0026` 为预留。若届时 `main` 上的 head 已前移（S04-B2-B 会占用
-`0024`/`0025`），使用当时的下一个连续编号，并在 PR 描述中说明。
-**认领编号时要对着 `main` 加上所有 open PR 一起查**，不能只看 `main`
-（2026-09-18 已因此撞过一次号）。
+> **2026-09-19 更正：编号从 `0026` 改为 `0024`。**
+> 原文预留 0026，理由是"S04-B2-B 会占用 0024/0025"——那是按 S04 先做写的。
+> 后来排序规则反了过来（`docs/85` §5.1：**S07 优先于 S04-B2-B**），
+> S04-B2-B 一行都还没写。**实测 2026-09-19：`main` 上最大编号是 `0023`。**
+> 继续用 0026 会平白留下两个空号。
+>
+> 这是**和 S11 同一类的规格缺陷**：TASK 里一个当时成立、后来被别的决定推翻
+> 的前提。派活前逐条核实前提，不要假定 TASK 写下的那一刻还成立。
+
+**开工时仍然要自己确认一次编号**：对着当前 `main` **加上所有 open PR** 一起
+查，取下一个连续编号；与本文件写的不一致时以实际为准，并在 PR 描述里说明。
+只看 `main` 会撞号（2026-09-18 已因此撞过一次）。
 
 ## 验收标准
 
