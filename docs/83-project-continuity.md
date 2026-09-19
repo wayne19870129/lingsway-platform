@@ -46,6 +46,10 @@ state, reviews, and checks. Do not rely on an older chat or SHA snapshot.
 > tolerable only because **the user currently merges every PR by hand**
 > (ADR-033 §3), and stops being tolerable the moment the workflow starts
 > merging PRs the user has not seen (ADR-033 §8).
+> **That "moment" has since arrived and been answered** — PR #155 was merged by
+> the workflow, and auto-merge is now off; see the resolution note below. So
+> "the user merges every PR by hand" is no longer a description of current
+> practice that could drift, it is the mechanical state.
 >
 > **ADR-034 (same day) went one step further and is the current rule:** the
 > three remaining mandatory audit triggers are gone too, so **an audit happens
@@ -91,9 +95,12 @@ state, reviews, and checks. Do not rely on an older chat or SHA snapshot.
 > One ADR-030 property survives both pivots unchanged: **Claude can stop the
 > pipeline alone but cannot restart it alone** (§5a) — restoring the breaker is
 > a user-merged PR. Automation that can switch itself back on has no breaker.
-> The other one, *supervision is periodic*, is exactly what ADR-033 removed;
-> the `docs/85` §6.1 third breaker (pause and report after three consecutive
-> auto-merges) is now the main thing that puts a person back in the loop.
+> The other one, *supervision is periodic*, is exactly what ADR-033 removed.
+> **The thing that puts a person back in the loop is now manual merge itself**,
+> not `docs/85` §6.1's third breaker (pause and report after three consecutive
+> auto-merges): with auto-merge off that breaker can no longer fire at all. It
+> is kept rather than deleted because it would be a precondition for any future
+> re-enable.
 >
 > It is written out in two standing instruction files, both subordinate to
 > `AGENTS.md`:
