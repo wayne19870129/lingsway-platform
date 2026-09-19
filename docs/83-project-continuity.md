@@ -333,22 +333,33 @@ different contents) and the PR #128 version won.
   lowered. The split followed the §6.1 breaker: Codex failed the same Round 1
   finding set twice, so retrying it unchanged was not allowed.
 
-- **⛔ S04-B2-B2 blocker — `ADR-035` is needed and does not exist yet:**
-  Mihomo's `deployment_constants` have **no defined source**. Measured on
-  `main` (`a10d237d`): `external-controller` is the one key with no default
-  (`_validate_controller_address(None)` raises), `backend/app/core/config.py`
-  has zero Mihomo fields **and belongs to S04-C**, and no deployment-constant
-  table exists. ADR-023 §2.2 says the operation transaction reads "the
-  current version of the deployment constants" without ever saying where they
-  live; ADR-025 §4 requires them in the manifest and is equally silent. **So
-  the concrete DB desired loader cannot construct a valid
-  `DesiredForwarderState`** — this is a genuine architecture gap, not a
-  granularity problem, and it is the provable reason the loader work stalled
-  twice. The three candidate resolutions (Settings, a versioned DB table,
-  repo-owned fixed constants) are mutually exclusive and are deliberately
-  **not** chosen in the TASK. ADR-035 must fix the store, the write
-  authority, the current-read path, the manifest representation, and whether
-  S04-C changes the source.
+- **⛔ S04-B2-B2 blocker — `ADR-035` is needed and does not exist yet.**
+  **The authority class is already settled and is not what is open.** ADR-025
+  §3's taxonomy rules deployment-owned validated constants as
+  **`deployment, not DB`**, read from **validated `Settings` / repo-owned
+  deployment constants**, and states outright that **"Deployment constants are
+  never migrated into the database."** A DB table is therefore not an
+  available option; proposing one would require superseding ADR-025.
+
+  What is genuinely open sits *inside* that class. Three of the seven
+  `_validate_deployment_constants()` keys have no default and must be supplied
+  by the caller — `external-controller`, `api-secret-ref` and
+  `api-secret-revision`; only `mode`, `mixed-port`, `allow-lan` and
+  `log-level` default. `api-secret-revision`'s source is already decided (the
+  fresh purpose-bound `Secret.revision`), so the open question is narrow:
+  **do `external-controller` and `api-secret-ref` live in validated `Settings`
+  or in repo-owned fixed constants?** Both are legal under ADR-025 §3.
+  `Settings` has the closer precedent (`core/config.py:62`'s
+  `transport_cache_root`) but that file belongs to S04-C, which is a TASK
+  scoping problem rather than an architectural one; fixed constants keep B2-B2
+  self-contained but pin an environment-specific `host:port` that S04-C would
+  have to move. ADR-035 decides only that, and may not reopen the authority
+  class.
+
+  > **An earlier version of this entry was wrong** and said both ADRs left the
+  > constants unlocated, listing a versioned DB table as a candidate. ADR-025
+  > §3 had located them; only §4 had been read. Corrected 2026-09-19 after
+  > review.
 
   Two things to carry in rather than re-derive. **Migration numbers moved**:
   S07 took `0024_usage_period_queue`, so B2-B's two migrations are

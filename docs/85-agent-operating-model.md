@@ -547,12 +547,23 @@ Claude 的产出形态是：ADR、TASK 文件、`docs/81-reviews/REVIEW-*.md`、
 > 有单向依赖的段落**。判断标准很简单：**这一轮能不能独立跑通验收并提交？**
 > 不能，就该切。
 >
-> **更要紧的是它暴露了一个真架构缺口**（不是粒度问题）：
-> `deployment_constants` 里的 **`external-controller` 没有任何来源**
-> ——无默认值、`core/config.py` 零个 Mihomo 字段且属 S04-C、没有对应 DB 表，
-> 而 ADR-023 §2.2 只说要读它的"当前版本"、从未说它存在哪里。
-> **concrete DB loader 因此造不出合法的 `DesiredForwarderState`。**
-> 需要 **ADR-035**（Claude 写），在它被接受前 B2-B2/B3/B4 不得开工。
+> **另外它暴露了一个规格缺口，需要 ADR-035**（Claude 写），
+> 在它被接受前 B2-B2/B3/B4 不得开工，**B2-B1 不受阻塞**。
+>
+> **注意缺口的范围，别读大了**：authority class **已经定了**——ADR-025 §3
+> 裁定 deployment-owned 常量是 **`deployment, not DB`**，读取边界是
+> **validated `Settings` / repo-owned constants**，并明写"永不迁入数据库"。
+> 真正未定的只是这个 class **内部**的落点：`_validate_deployment_constants()`
+> 七个 key 里**三个没有默认值**（`external-controller`、`api-secret-ref`、
+> `api-secret-revision`），其中 `api-secret-revision` 的来源已由 ADR-025 定为
+> fresh 的 purpose-bound `Secret.revision`——**所以只剩前两个要决定：
+> 落在 validated `Settings` 还是 repo-owned fixed constants。**
+>
+> > **这一段的初稿是错的**（说两条 ADR 都没定位它，并把"版本化 DB 表"列为
+> > 候选）。**ADR-025 §3 已经定位了，只是当时只读了 §4。** 2026-09-19 经
+> > ChatGPT 审查指出后更正。**教训：一找到能自圆其说的解释就停止搜索，
+> > 正是这次出错的方式**——把 ADR 当依据时，要读完它的 taxonomy/决策表，
+> > 不能只读与自己结论相关的那一节。
 >
 > **B2-B1 不受阻塞**，PR #156 落到 B2-B1 为止；B2-B2 起新开 PR。
 > 逐条边界（loader 读哪些表、cache identity 怎么算、哪个函数拥有哪个事务、

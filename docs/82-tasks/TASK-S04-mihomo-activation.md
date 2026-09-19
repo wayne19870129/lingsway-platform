@@ -76,7 +76,7 @@ B2-B1  receipt / secret resolver / manifest / allocator / DNS gate
    │        ← 不依赖任何其它 checkpoint
    ▼
 B2-B2  concrete DB desired loader + preparation transaction
-   │        ← ⛔ 被一个真实架构缺口阻塞，见「必须新增的 ADR」
+   │        ← ⛔ 被 ADR-035 阻塞（deployment-owned 常量的落点，见下）
    ▼
 B2-B3  freshness 复核 / recovery / runtime exact readback
    │
@@ -92,46 +92,80 @@ authority、第二个 writer、临时 runtime fallback、或"先用 runtime 兜�
 
 ---
 
-#### ⛔ 必须先补一条 ADR：deployment constants 的来源与所有权
+#### ⛔ 必须先补一条 ADR：deployment-owned 常量的**具体落点**
 
-**B2-B2 在这一点上无法开工，而且这不是粒度问题，是 ADR 真的没写。**
+> **2026-09-19 更正（ChatGPT Round 1 审查 · Major 1/2，均已核实成立）。**
+> 本节初稿把「新建版本化 deployment-constant DB 表」列为三个并列候选之一，
+> 并说"两条 ADR 都提到它却都没定位它"。**两句都是错的：**
+>
+> **ADR-025 §3 的 authority taxonomy 已经裁定了 authority class**——
+> deployment-owned validated constants 的 authority 是
+> **`deployment, not DB`**，读取边界是
+> **validated `Settings` / repo-owned deployment constants**，
+> 并且紧跟着明写：**"Deployment constants are never migrated into the
+> database"**。
+>
+> **所以"版本化 DB 表"不是一个合法候选。** 本 checkpoint 重构声明
+> "只改执行粒度、不改架构结论"，而 DB authority 方案需要**先 supersede
+> ADR-025**——那已经不是"架构不变"。**不要再把它当普通选项提出来。**
+>
+> **我错在哪**：只读了 ADR-025 §4（manifest 覆盖范围）就下结论，
+> 没读 §3 那张 taxonomy 表——**而那张表正是答案所在**。
+> 一找到能自圆其说的解释就停止搜索，是这次的实际失误。
 
-实测证据（`main` = `a10d237d`）：
+**B2-B2 仍然被阻塞，但缺口比初稿窄得多，而且性质不同。**
 
-| 事实 | 位置 |
-|---|---|
-| `deployment_constants` 的白名单有 7 个 key，其中 6 个有默认值 | `mihomo_projection.py:152-183` |
-| **`external-controller` 没有默认值**，`_validate_controller_address(None)` 直接抛 `MIHOMO_CONTROLLER_ADDRESS_INVALID` | `mihomo_projection.py:124-126, 183` |
-| `backend/app/core/config.py` **零个 Mihomo 字段** | 实测 `grep -i mihomo` 无输出 |
-| **没有任何 deployment-constant 的 DB 表** | 模型清单里无对应表 |
-| `core/config.py` 属 **S04-C** 的允许清单，不在 B2-B | 本文件「允许修改的文件」 |
-| 现有测试把它**硬编码**成 `"172.30.0.10:9090"` | `test_mihomo_projection.py:74` |
+##### 已经定了的（不要再讨论）
 
-两条 ADR 都**提到**它却都**没定位**它：
+| 项 | 已定的结论 | 依据 |
+|---|---|---|
+| authority class | **deployment，不是 DB**；**永不迁入数据库** | ADR-025 §3 |
+| 读取边界 | **validated `Settings` / repo-owned deployment constants** | ADR-025 §3 |
+| 进 manifest 的方式 | 已验证的值**逐字（verbatim）**进 manifest，因而被 fingerprint 覆盖 | ADR-025 §3/§4 |
+| **`api-secret-revision` 的来源** | **fresh 的 purpose-bound `Secret.revision`**，**不是**另一个配置来源 | ADR-025 §4/§8 |
 
-- **ADR-023 §2.2**：操作 transaction 要读「deployment constants 的**当前版本**」
-  ——"当前版本"暗示一个可 current-read 的版本化来源，但没说是什么；
-- **ADR-023 §1.2 / 行 24**：字段必须被归类为 deployment constant 等三选一，
-  但**归类之后存哪里没有规定**；
-- **ADR-025 §4**：manifest 必须覆盖 deployment constants，同样不说来源。
+##### 真正未定的：deployment-owned class **内部**的落点
 
-**所以 concrete DB desired loader 造不出一个合法的 `DesiredForwarderState`**
-——这正是两次都卡在 loader 的可证明原因之一。
+`_validate_deployment_constants()` 的白名单有 7 个 key。**有默认值的只有 4 个**
+（`mode`="rule"、`mixed-port`=7890、`allow-lan`=False、`log-level`="warning"）。
+**三个没有默认值、必须由调用方提供**：
 
-**候选方案互斥且各有代价，不由本次 TASK 修正擅自选定：**
+| key | 校验位置 | 现状 |
+|---|---|---|
+| `external-controller` | `_validate_controller_address()`，`None` 直接抛 `MIHOMO_CONTROLLER_ADDRESS_INVALID` | **无落点** |
+| `api-secret-ref` | `_controller_identity()`，要求非空、无前后空白的安全字符串 | **无落点** |
+| `api-secret-revision` | `_controller_identity()`，要求正整数（`bool` 不算） | 来源**已定**（purpose-bound `Secret.revision`），但要**经由哪个 deployment-owned 字段拿到 ref** 仍未定 |
 
-1. **`Settings`（`core/config.py`）** —— 但该文件属 S04-C，会把 S04-C 的
-   范围提前拉进 B2-B，与"三阶段不得合并"冲突；
-2. **新建一张版本化的 deployment-constant DB 表** —— 最贴合 ADR-023 §2.2
-   的"当前版本"措辞，但需要第三条迁移，且要定义谁能写；
-3. **仓库自有的固定常量**（ADR-023 行 24 的"固定部署常量"字面读法）
-   —— `external-controller` 是环境相关的 host:port，写死不适合生产；
-   B2-B 不做生产激活，所以"B2-B 用固定值、S04-C 再迁移"在**本阶段**成立，
-   但那等于承认一个将来必须改的临时设计，需要明确记录而不是默认。
+> **初稿写的"7 个 key 里 6 个有默认值、只有 `external-controller` 没有"是错的。**
+> 实际是 **4 个有默认值、3 个没有**；`api-secret-ref` 与 `api-secret-revision`
+> 同样由 `_controller_identity()` 强制要求。**缺口不止 controller 地址。**
 
-> **需要的 ADR：`ADR-035 — Mihomo deployment constants 的来源与所有权边界`。**
-> 它必须唯一确定：存储位置、谁有写权限、如何做 current-read、
-> 如何进入 manifest、以及 S04-C 激活时是否改变来源。
+**所以未决问题只有一个，而且限定在 ADR-025 已画好的框内：**
+
+> **`external-controller` 与 `api-secret-ref` 这两个 deployment-owned 必填值，
+> 分别落在 validated `Settings` 还是 repo-owned fixed constants？**
+
+两边都合法（ADR-025 §3 把两者并列为读取边界），但**代价不同**：
+
+1. **validated `Settings`** —— 仓库已有同类先例（`core/config.py:62` 的
+   `transport_cache_root`，并在 `validate_runtime_safety()` 里校验），
+   **是最贴合 ADR-025 §3 措辞的一条**。代价：`core/config.py` 属 **S04-C**
+   的允许清单，B2-B2 用它会把 S04-C 的范围提前拉进来，与"三阶段不得合并成
+   一个 PR"冲突——**这是 TASK 层面的范围问题，不是架构问题**。
+2. **repo-owned fixed constants** —— 不碰 `core/config.py`，B2-B2 可以独立完成。
+   代价：`external-controller` 是环境相关的 `host:port`，写死不适合生产；
+   B2-B 不做生产激活所以**本阶段**可行，但等于承认一个 S04-C 必须再改一次的
+   临时落点，**必须明确记录而不是默认**。
+
+> **需要的 ADR：`ADR-035 — Mihomo deployment-owned 常量的落点`。**
+> 范围**仅限**在 ADR-025 §3 已裁定的 deployment-owned class 内部决定：
+> `external-controller` 与 `api-secret-ref` 各自落在 validated `Settings`
+> 还是 repo-owned fixed constants；若选 `Settings`，同时裁定 B2-B2 是否
+> 破例动 `core/config.py`，还是等到 S04-C。
+>
+> **ADR-035 不得重新讨论 authority class，也不得引入 DB 落点**——
+> 那需要先 supersede ADR-025，属另一件事。
+>
 > **在 ADR-035 被接受之前，B2-B2 / B2-B3 / B2-B4 不得开工。**
 > **B2-B1 完全不受此阻塞**（它不构造 desired state，只消费传入的）。
 
@@ -218,7 +252,13 @@ backend/tests/integration/test_models.py
   断言 receipt / generation / verified materialization 的 `repr()`、错误文本、日志均不出现
 - `test_models.py`：表计数从 38 更新为 40（新增两表）
 - `SqlMihomoControllerSecretResolver` 的 purpose/revision 校验测试
-  —— 放 `test_mihomo_generation.py` 或新建，**测试名自定，但必须存在**
+  —— **固定放在 `backend/tests/unit/test_mihomo_generation.py`**（该文件已在
+  允许清单内）。**测试名自定，但必须存在。**
+
+> **2026-09-19 更正（Round 1 审查 · Minor）**：本条原文写「或新建」，
+> 而 B2-B1 的精确允许清单**没有**授权任何新测试路径。按本仓库的铁律，
+> 「或新建」会诱导执行者越出 allowed-file list。**已固定到上面那个已授权
+> 的文件，不留开放式"新建"。** 同类表述以后一律不写。
 
 **明确不做**：不写 concrete DB loader；不写 preparation/recovery；不改
 `mihomo_reconciliation.py`；不改 `mihomo.py`；不改 registry；不做 S04-C。
