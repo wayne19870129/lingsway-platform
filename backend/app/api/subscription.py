@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from sqlalchemy import select
 
+from backend.app.catalog import SELLABLE_PLAN_CODES
 from backend.app.dependencies import CurrentCustomer, DbSession, ManagedRegistry
 from backend.app.domain.ordering import BillingOrderType
 from backend.app.domain.subscription_render import render_subscription
@@ -22,6 +23,8 @@ from backend.app.models import (
     Plan,
     Subscription,
     SubscriptionStatus,
+    UsagePeriod,
+    UsagePeriodStatus,
 )
 from backend.app.schemas.public import (
     BillingOrderRequest,
@@ -51,6 +54,7 @@ def _create_renewal_order(
     db: DbSession,
     customer: CurrentCustomer,
     subscription: Subscription,
+    plan_id: int | None,
     client_request_id: str,
 ) -> Order:
     """Create only the renewal order branch from the legacy billing behavior."""
@@ -62,9 +66,11 @@ def _create_renewal_order(
     )
     if existing is not None:
         return existing
-    current_plan = db.get(Plan, subscription.plan_id)
+    current_plan = db.get(Plan, plan_id or subscription.plan_id)
     if current_plan is None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Plan not found")
+    if current_plan.plan_code not in SELLABLE_PLAN_CODES:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Plan is not sellable")
 
     order = Order(
         order_no=f"ORD-{datetime.now(UTC):%Y%m%d}-{secrets.token_hex(6).upper()}",
@@ -110,11 +116,28 @@ def subscription_details(
         )
     ).first()
     endpoint = binding_row[1] if binding_row else None
+    queued = db.scalars(
+        select(UsagePeriod)
+        .where(
+            UsagePeriod.subscription_id == subscription.id,
+            UsagePeriod.status == UsagePeriodStatus.QUEUED,
+        )
+        .order_by(UsagePeriod.id)
+    ).all()
     subscription_url: str | None = None
     if subscription.token_hash:
         subscription_url = SqlAlchemyProvisioningState(
             db, subscription.id
         ).current_subscription_url()
+    queued_periods = []
+    for period in queued:
+        queued_plan = db.get(Plan, period.plan_id) if period.plan_id else None
+        queued_periods.append(
+            {
+                "plan_name": queued_plan.name if queued_plan else "未知套餐",
+                "queued_at": period.created_at,
+            }
+        )
     return {
         "id": subscription.id,
         "subscription_no": subscription.subscription_no,
@@ -128,6 +151,7 @@ def subscription_details(
         "egress_location": endpoint.location if endpoint else None,
         "egress_isp": endpoint.isp if endpoint else None,
         "egress_ip_type": endpoint.ip_type if endpoint else None,
+        "queued_periods": queued_periods,
     }
 
 
@@ -139,7 +163,7 @@ def create_renewal_order(
     customer: CurrentCustomer,
 ) -> Order:
     subscription = _owned_subscription(db, subscription_id, customer)
-    return _create_renewal_order(db, customer, subscription, data.client_request_id)
+    return _create_renewal_order(db, customer, subscription, data.plan_id, data.client_request_id)
 
 
 @router.post(

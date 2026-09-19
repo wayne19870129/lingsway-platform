@@ -353,7 +353,6 @@ def confirm_payment_and_provision(
             order_state.prepare_purchase(command)
         else:
             apply_paid_billing_change(command, order_state)
-            order_state.activate_subscription(command)
             return None
 
     # ADR-017: steps 1-6 (CAPACITY..CREATE_ACCOUNTING_USER) never touch

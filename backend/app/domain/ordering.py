@@ -70,6 +70,8 @@ class OrderWorkflowState(Protocol):
 
     def apply_addon(self, command: BillingCommand) -> None: ...
 
+    def enqueue_subscription(self, command: BillingCommand) -> None: ...
+
     def activate_subscription(self, command: BillingCommand) -> None: ...
 
     def mark_provision_pending(self, command: BillingCommand, error: str) -> None: ...
@@ -93,12 +95,8 @@ def apply_paid_billing_change(command: BillingCommand, state: OrderWorkflowState
         raise ValueError("A billing change requires a target subscription")
     if command.order_type is BillingOrderType.RENEWAL:
         state.apply_renewal(command)
-    elif command.order_type is BillingOrderType.UPGRADE:
-        state.apply_upgrade(command)
-    elif command.order_type is BillingOrderType.ADDON:
-        if command.addon_bytes <= 0:
-            raise ValueError("Add-on bytes must be positive")
-        state.apply_addon(command)
+    elif command.order_type in (BillingOrderType.UPGRADE, BillingOrderType.ADDON):
+        raise ValueError(f"{command.order_type.value} billing changes are not supported")
     else:
         raise ValueError("Purchase orders are handled by the provisioning workflow")
 

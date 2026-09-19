@@ -102,9 +102,16 @@ class SubscriptionDetails(BaseModel):
     egress_location: str | None
     egress_isp: str | None
     egress_ip_type: str | None
+    queued_periods: list[QueuedPeriodRead] = Field(default_factory=list)
+
+
+class QueuedPeriodRead(BaseModel):
+    plan_name: str
+    queued_at: datetime
 
 
 class BillingOrderRequest(BaseModel):
+    plan_id: int | None = None
     client_request_id: str = Field(min_length=8, max_length=80)
 
 

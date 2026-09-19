@@ -12,6 +12,7 @@ from backend.app.domain.ordering import (
     BillingCommand,
     BillingOrderType,
     PaymentConfirmation,
+    apply_paid_billing_change,
 )
 from backend.app.domain.provisioning import (
     ProvisioningCheckpoint,
@@ -182,13 +183,16 @@ class WorkflowState:
         self.events.append("subscription:provisioning")
 
     def apply_renewal(self, command: BillingCommand) -> None:
-        self.events.append("billing:renewal")
+        self.events.append("billing:enqueue")
 
     def apply_upgrade(self, command: BillingCommand) -> None:
         self.events.append("billing:upgrade")
 
     def apply_addon(self, command: BillingCommand) -> None:
         self.events.append("billing:addon")
+
+    def enqueue_subscription(self, command: BillingCommand) -> None:
+        self.events.append("billing:enqueue")
 
     def activate_subscription(self, command: BillingCommand) -> None:
         self.events.append("subscription:active")
@@ -541,9 +545,7 @@ def test_lock_acquisition_failure_disables_accounting_user_and_rolls_back() -> N
 @pytest.mark.parametrize(
     ("order_type", "event"),
     [
-        (BillingOrderType.RENEWAL, "billing:renewal"),
-        (BillingOrderType.UPGRADE, "billing:upgrade"),
-        (BillingOrderType.ADDON, "billing:addon"),
+        (BillingOrderType.RENEWAL, "billing:enqueue"),
     ],
 )
 def test_paid_non_purchase_orders_use_ordering_branch(
@@ -567,7 +569,15 @@ def test_paid_non_purchase_orders_use_ordering_branch(
 
     assert result is None
     assert event in workflow.events
-    assert workflow.events[-1] == "subscription:active"
+    assert workflow.events[-1] == "billing:enqueue"
+
+
+@pytest.mark.parametrize("order_type", [BillingOrderType.UPGRADE, BillingOrderType.ADDON])
+def test_paid_billing_change_rejects_upgrade_and_addon(order_type: BillingOrderType) -> None:
+    workflow = WorkflowState()
+    with pytest.raises(ValueError, match=order_type.value):
+        apply_paid_billing_change(command(order_type), workflow)
+    assert workflow.events == []
 
 
 def test_services_compose_t3_provisioning_from_registry() -> None:

@@ -216,6 +216,9 @@ class _RealCommitOrderState:
     def apply_addon(self, command: BillingCommand) -> None:
         raise AssertionError("not used by purchase-order tests")
 
+    def enqueue_subscription(self, command: BillingCommand) -> None:
+        raise AssertionError("not used by purchase-order tests")
+
     def activate_subscription(self, command: BillingCommand) -> None:
         self.events.append("activate")
 

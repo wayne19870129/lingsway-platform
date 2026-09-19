@@ -38,7 +38,7 @@ function Orders() {
   async function confirm(order: AdminOrder) {
     const reference = window.prompt("请输入付款登记号", `MANUAL-${order.order_no}`);
     if (!reference?.trim()) return;
-    if (!window.confirm(`确认已收到 ${order.amount} ${order.currency}，并开始开通 ${order.order_no}？`)) return;
+    if (!window.confirm(`确认已收到 ¥${order.amount}，并开始开通 ${order.order_no}？`)) return;
     setBusy(order.id); setMessage(""); setError("");
     try {
       const response = await request(`/admin/orders/${order.id}/confirm-payment`, {
@@ -68,7 +68,7 @@ function Orders() {
           <td><strong>{order.order_no}</strong><small>{order.plan_code}</small></td>
           <td>{order.customer_email}</td>
           <td>{order.plan_name}<small>{formatBytes(order.traffic_limit_bytes)}</small></td>
-          <td>{order.amount} {order.currency}</td>
+          <td>¥{order.amount}</td>
           <td><span className={`status ${statusClass(order.status)}`}>{order.status}</span><small>{order.payment_status}</small></td>
           <td>{order.payment_notice_at ? <span className="status status-good">已通知</span> : <span className="status status-neutral">未通知</span>}</td>
           <td>{formatDate(order.created_at)}</td>

@@ -30,6 +30,7 @@ from backend.app.models import (
     UsageDelta,
     UsageDeltaReason,
     UsagePeriod,
+    UsagePeriodStatus,
     UsageSample,
 )
 from backend.app.providers.base import AccountingProvider, GatewayProvider
@@ -159,14 +160,17 @@ def sync_subscription_usage(
     period.used_bytes += delta_bytes
     locked.last_usage_synced_at = now
     record_usage_alerts(db, locked, period)
-    needs_reconcile = apply_expiry_policy(locked, now)
+    needs_reconcile = apply_expiry_policy(db, locked, now)
+    rolled_period = locked.current_period_id != period.id
     release_requested = locked.status == SubscriptionStatus.EXPIRED
     db.commit()
     if release_requested:
         release_egress(db, locked.id, now, gateway=gateway)
     if needs_reconcile:
         try:
-            reconcile_subscription(db, locked, provider)
+            reconcile_subscription(
+                db, locked, provider, pending_manual_on_failure=rolled_period
+            )
         except Exception:
             # The PENDING state was committed before the external write and is
             # intentionally left for the background retry loop.
@@ -174,8 +178,43 @@ def sync_subscription_usage(
     return delta_bytes
 
 
-def apply_expiry_policy(subscription: Subscription, now: datetime) -> bool:
-    """Move the service expiry for grace without touching usage-period boundaries."""
+def apply_expiry_policy(db: Session, subscription: Subscription, now: datetime) -> bool:
+    """Close an exhausted/expired period and activate the FIFO queued period."""
+    period = subscription.current_period
+    if (
+        period is not None
+        and subscription.status == SubscriptionStatus.ACTIVE
+        and (period.used_bytes >= period.quota_bytes or now >= as_utc(period.period_end))
+    ):
+            queued = db.scalars(
+                select(UsagePeriod)
+                .where(
+                    UsagePeriod.subscription_id == subscription.id,
+                    UsagePeriod.status == UsagePeriodStatus.QUEUED,
+                )
+                .order_by(UsagePeriod.id)
+                .with_for_update()
+            ).all()
+            if queued:
+                period.status = UsagePeriodStatus.CLOSED
+                next_period = queued[0]
+                next_period.status = UsagePeriodStatus.ACTIVE
+                next_period.period_start = now
+                next_period.period_end = now + timedelta(days=30)
+                subscription.current_period_id = next_period.id
+                if next_period.plan_id is not None:
+                    subscription.plan_id = next_period.plan_id
+                subscription.service_expire_at = next_period.period_end
+                subscription.status = SubscriptionStatus.ACTIVE
+                subscription.reconcile_state = ReconcileState.PENDING
+                return True
+            period.status = UsagePeriodStatus.CLOSED
+            subscription.status = SubscriptionStatus.GRACE
+            subscription.service_expire_at = now + timedelta(
+                hours=get_settings().grace_period_hours
+            )
+            subscription.reconcile_state = ReconcileState.PENDING
+            return True
     service_expire_at = as_utc(subscription.service_expire_at)
     if subscription.status == SubscriptionStatus.ACTIVE and now >= service_expire_at:
         subscription.status = SubscriptionStatus.GRACE
@@ -193,6 +232,8 @@ def reconcile_subscription(
     db: Session,
     subscription: Subscription,
     provider: AccountingProvider,
+    *,
+    pending_manual_on_failure: bool = False,
 ) -> None:
     """Overwrite the accounting provider from current DB truth."""
     if not subscription.accounting_user_id or subscription.current_period_id is None:
@@ -231,7 +272,13 @@ def reconcile_subscription(
         current = db.get(Subscription, subscription.id)
         if current is None:
             raise ValueError("Subscription disappeared during reconcile") from exc
-        current.reconcile_state = ReconcileState.PENDING
+        current.reconcile_state = (
+            ReconcileState.PENDING_MANUAL
+            if pending_manual_on_failure
+            else ReconcileState.PENDING
+        )
+        if pending_manual_on_failure:
+            current.provision_error = str(exc)
         db.commit()
         raise
     current = db.get(Subscription, subscription.id)

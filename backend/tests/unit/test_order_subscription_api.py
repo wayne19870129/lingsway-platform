@@ -4,16 +4,21 @@ import base64
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any, cast
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import Table, create_engine, select
+from sqlalchemy import Table, create_engine, event, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 from starlette.requests import Request
 
 from backend.app.api.public import payment_notice, place_order
-from backend.app.api.subscription import get_subscription
+from backend.app.api.subscription import (
+    _create_renewal_order,
+    get_subscription,
+    subscription_details,
+)
 from backend.app.core.config import Settings
 from backend.app.core.database import Base
 from backend.app.domain.capacity import CapacityExceededError
@@ -39,6 +44,154 @@ from backend.app.models import (
 from backend.app.providers.base import CapacityDTO
 from backend.app.providers.registry import ProviderRegistry, build_registry
 from backend.app.schemas.public import OrderCreate
+
+
+def test_renewal_order_can_select_a_different_sellable_plan(db_session: Session) -> None:
+    actor = customer()
+    plan_a = Plan(
+        plan_code="PLAN_50GB",
+        name="A",
+        traffic_limit_bytes=50,
+        duration_days=30,
+        price=Decimal("30"),
+        currency="CNY",
+        route_group_code="DEFAULT",
+    )
+    plan_b = Plan(
+        plan_code="PLAN_100GB",
+        name="B",
+        traffic_limit_bytes=100,
+        duration_days=30,
+        price=Decimal("50"),
+        currency="CNY",
+        route_group_code="DEFAULT",
+    )
+    current_order = Order(
+        order_no="ORD-RENEW-CURRENT",
+        customer=actor,
+        plan=plan_a,
+        client_request_id="renew-current-001",
+        amount=plan_a.price,
+        currency="CNY",
+    )
+    db_session.add_all([actor, plan_a, plan_b, current_order])
+    db_session.flush()
+    subscription = Subscription(
+        subscription_no="SUB-RENEW",
+        customer_id=actor.id,
+        plan_id=plan_a.id,
+        order_id=current_order.id,
+        status=SubscriptionStatus.ACTIVE,
+        route_group_code="DEFAULT",
+        service_expire_at=datetime.now(UTC) + timedelta(days=30),
+    )
+    db_session.add(subscription)
+    db_session.flush()
+    order = _create_renewal_order(db_session, actor, subscription, plan_b.id, "renew-plan-b-001")
+    assert order.order_type == "RENEWAL"
+    assert order.plan_id == plan_b.id
+
+
+def test_subscription_details_returns_fifo_queued_periods(db_session: Session) -> None:
+    actor = customer()
+    plan_a = Plan(
+        plan_code="PLAN_50GB",
+        name="A",
+        traffic_limit_bytes=50,
+        duration_days=30,
+        price=Decimal("30"),
+        currency="CNY",
+        route_group_code="DEFAULT",
+    )
+    plan_b = Plan(
+        plan_code="PLAN_100GB",
+        name="B",
+        traffic_limit_bytes=100,
+        duration_days=30,
+        price=Decimal("50"),
+        currency="CNY",
+        route_group_code="DEFAULT",
+    )
+    db_session.add_all([actor, plan_a, plan_b])
+    db_session.flush()
+    order = Order(
+        order_no="ORD-QUEUE",
+        customer_id=actor.id,
+        plan_id=plan_a.id,
+        client_request_id="queue-current-001",
+        amount=plan_a.price,
+        currency="CNY",
+    )
+    db_session.add(order)
+    db_session.flush()
+    subscription = Subscription(
+        subscription_no="SUB-QUEUE",
+        customer_id=actor.id,
+        plan_id=plan_a.id,
+        order_id=order.id,
+        status=SubscriptionStatus.ACTIVE,
+        route_group_code="DEFAULT",
+        service_expire_at=datetime.now(UTC) + timedelta(days=30),
+    )
+    db_session.add(subscription)
+    db_session.flush()
+    current = UsagePeriod(
+        subscription_id=subscription.id,
+        order_id=order.id,
+        plan_id=plan_a.id,
+        period_start=datetime.now(UTC),
+        period_end=datetime.now(UTC) + timedelta(days=30),
+        quota_bytes=50,
+        status=UsagePeriodStatus.ACTIVE,
+    )
+    db_session.add(current)
+    db_session.flush()
+    subscription.current_period_id = current.id
+    order_b = Order(
+        order_no="ORD-Q-B",
+        customer_id=actor.id,
+        plan_id=plan_b.id,
+        client_request_id="queue-b-001",
+        amount=plan_b.price,
+        currency="CNY",
+    )
+    order_c = Order(
+        order_no="ORD-Q-C",
+        customer_id=actor.id,
+        plan_id=plan_a.id,
+        client_request_id="queue-c-001",
+        amount=plan_a.price,
+        currency="CNY",
+    )
+    db_session.add_all([order_b, order_c])
+    db_session.flush()
+    first = UsagePeriod(
+        subscription_id=subscription.id,
+        order_id=order_b.id,
+        plan_id=plan_b.id,
+        period_start=current.period_end,
+        period_end=current.period_end + timedelta(days=30),
+        quota_bytes=100,
+        status=UsagePeriodStatus.QUEUED,
+    )
+    second = UsagePeriod(
+        subscription_id=subscription.id,
+        order_id=order_c.id,
+        plan_id=plan_a.id,
+        period_start=current.period_end,
+        period_end=current.period_end + timedelta(days=60),
+        quota_bytes=50,
+        status=UsagePeriodStatus.QUEUED,
+    )
+    db_session.add_all([first, second])
+    db_session.commit()
+    result = subscription_details(subscription.id, db_session, actor)
+    queued_periods = cast(list[dict[str, object]], result["queued_periods"])
+    assert [item["plan_name"] for item in queued_periods] == ["B", "A"]
+    assert [item["queued_at"] for item in queued_periods] == [
+        first.created_at,
+        second.created_at,
+    ]
 
 
 def _registry() -> ProviderRegistry:
@@ -74,7 +227,7 @@ def add_available_egress_endpoint(
 
 
 @pytest.fixture
-def db_session() -> Iterator[Session]:
+def db_session(request: Any) -> Iterator[Session]:
     engine = create_engine(
         "sqlite+pysqlite://",
         connect_args={"check_same_thread": False},
@@ -84,6 +237,7 @@ def db_session() -> Iterator[Session]:
         "audit_logs",
         "customers",
         "egress_endpoints",
+        "egress_bindings",
         "egress_groups",
         "jwt_sessions",
         "orders",
@@ -92,7 +246,21 @@ def db_session() -> Iterator[Session]:
         "subscriptions",
         "usage_periods",
     }
+    if request.node.name == "test_renewal_order_can_select_a_different_sellable_plan":
+        table_names.remove("egress_bindings")
     tables: list[Table] = [Base.metadata.tables[name] for name in table_names]
+    if "egress_bindings" in table_names:
+        @event.listens_for(engine, "connect")
+        def register_sqlite_if(dbapi_connection: Any, _connection_record: Any) -> None:
+            dbapi_connection.create_function(
+                "IF",
+                3,
+                lambda condition, when_true, when_false: (
+                    when_true if condition else when_false
+                ),
+                deterministic=True,
+            )
+
     Base.metadata.create_all(engine, tables=tables)
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     with factory() as session:
@@ -162,11 +330,14 @@ def test_order_to_payment_notice_state_flow(db_session: Session) -> None:
     assert persisted is not None
     assert persisted.status is OrderStatus.PENDING
     assert persisted.payment_status is PaymentStatus.UNPAID
-    assert db_session.scalar(
-        select(AuditLog).where(
-            AuditLog.entity_id == str(order.id), AuditLog.result == "SUCCESS"
+    assert (
+        db_session.scalar(
+            select(AuditLog).where(
+                AuditLog.entity_id == str(order.id), AuditLog.result == "SUCCESS"
+            )
         )
-    ) is not None
+        is not None
+    )
 
 
 def test_capacity_is_rejected_before_payment_mark() -> None:
@@ -215,9 +386,10 @@ def test_place_order_rejects_when_no_dedicated_ip_available(db_session: Session)
             _registry(),
         )
     assert excinfo.value.status_code == 409
-    assert db_session.scalar(
-        select(Order).where(Order.client_request_id == "no-ip-request-001")
-    ) is None
+    assert (
+        db_session.scalar(select(Order).where(Order.client_request_id == "no-ip-request-001"))
+        is None
+    )
 
 
 def test_place_order_rejects_when_only_mismatched_egress_endpoints_exist(
@@ -241,9 +413,7 @@ def test_place_order_rejects_when_only_mismatched_egress_endpoints_exist(
     db_session.add_all([actor, plan])
     db_session.flush()
 
-    wrong_status = add_available_egress_endpoint(
-        db_session, code="EGRESS_WRONG_STATUS", port=21081
-    )
+    wrong_status = add_available_egress_endpoint(db_session, code="EGRESS_WRONG_STATUS", port=21081)
     wrong_status.status = "MAINTENANCE"
     wrong_purpose = add_available_egress_endpoint(
         db_session, code="EGRESS_WRONG_PURPOSE", port=21082
@@ -261,9 +431,10 @@ def test_place_order_rejects_when_only_mismatched_egress_endpoints_exist(
             _registry(),
         )
     assert excinfo.value.status_code == 409
-    assert db_session.scalar(
-        select(Order).where(Order.client_request_id == "mismatch-request-001")
-    ) is None
+    assert (
+        db_session.scalar(select(Order).where(Order.client_request_id == "mismatch-request-001"))
+        is None
+    )
 
 
 def test_place_order_precheck_does_not_mutate_egress_endpoint(db_session: Session) -> None:
@@ -335,6 +506,7 @@ def test_subscription_feed_has_complete_private_headers_and_ua_formats(
     db_session.flush()
     period = UsagePeriod(
         subscription_id=subscription.id,
+        order_id=order.id,
         period_start=datetime.now(UTC),
         period_end=datetime.now(UTC) + timedelta(days=30),
         used_bytes=123,
