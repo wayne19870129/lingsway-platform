@@ -11,19 +11,34 @@ state, reviews, and checks. Do not rely on an older chat or SHA snapshot.
 
 ## 2. Roles and workflow
 
-> **ADR-030 (2026-09-19) changed who directs.** The operating model is now:
-> **Claude Code designs the architecture, writes the ADRs/TASKs, dispatches
-> Codex, supervises periodically, and can halt the pipeline**; Codex/LUNA
-> implements; **ChatGPT's role narrowed to independent exact-head-SHA
-> review**; a GitHub workflow merges.
+> **ADR-032 (2026-09-19) is the current split, and it supersedes ADR-030's.**
+> **ChatGPT directs and reviews; Codex *desktop* implements; Claude Code
+> designs the architecture, writes the ADRs/TASKs, supervises periodically and
+> can halt the pipeline**; a GitHub workflow merges.
 >
-> That change removed ADR-029's own recorded objection #1 — the reviewer was
-> reviewing code built to its own spec. Specifier and reviewer are now
-> different agents. Two further properties not to re-derive: **supervision is
-> deliberately periodic, never real-time** (ADR-030 §4), and **Claude can
-> stop the pipeline alone but cannot restart it alone** (§5a) — restoring the
-> breaker is a user-merged PR. Automation that can switch itself back on has
-> no breaker.
+> ADR-030 had moved dispatch to Claude, but that was designed around Codex
+> *Cloud*, which turned out to offer no model or reasoning-effort selection and
+> no way to push from its sandbox. Cloud was abandoned; dispatch went back to
+> ChatGPT. **Its code review stays enabled** — it is PR-triggered regardless of
+> who pushed, costs nothing on the executor side, and already caught a real
+> cross-step defect on PR #142. It carries no authority: its
+> `author_association` is `NONE`, so the merge gate ignores its verdict.
+>
+> **Two consequences to not re-derive.** First, ADR-030's independence
+> argument now rests entirely on `docs/82-tasks/` and `docs/80-decisions/`
+> staying Claude-exclusive: ChatGPT reviews against a TASK it did not write, so
+> the specifier and the reviewer are still different agents even though the
+> dispatcher and the reviewer are the same one. Relaxing that write boundary
+> silently removes the only thing making the review independent. Second,
+> **unattended operation is off the table** (ADR-032 §4) — Codex desktop runs
+> on the user's machine, so nothing advances while it is off. CI, auto-merge,
+> the health digest, Codex Cloud's review and Claude's supervision all still
+> run without it.
+>
+> Two ADR-030 properties survive the pivot unchanged: **supervision is
+> deliberately periodic, never real-time** (§4), and **Claude can stop the
+> pipeline alone but cannot restart it alone** (§5a) — restoring the breaker is
+> a user-merged PR. Automation that can switch itself back on has no breaker.
 >
 > It is written out in two standing instruction files, both subordinate to
 > `AGENTS.md`:
