@@ -27,6 +27,28 @@ state, reviews, and checks. Do not rely on an older chat or SHA snapshot.
 > `PASS` review plus green checks on the same head SHA, gated by the
 > `.github/automerge-enabled` circuit breaker; governance and audit PRs stay
 > human-merged.
+>
+> **Where that policy actually lives, as of the S08 PR:**
+>
+> | Part | File |
+> |---|---|
+> | Trigger → facts collection → merge | `.github/workflows/auto-merge.yml` |
+> | The decision itself (a pure function) | `scripts/automerge_gate.py` |
+> | The eight-case truth table, run in CI | `backend/tests/guards/test_automerge_gate.py` |
+> | Circuit breaker | `.github/automerge-enabled` (`true` = on) |
+> | Dispatch issue template | `.github/ISSUE_TEMPLATE/codex-dispatch.md` |
+>
+> Two properties worth not re-deriving: the workflow deliberately has **no
+> `pull_request` trigger**, so a PR cannot rewrite its own gate — every
+> trigger runs the default branch's copy, and the breaker is read from the
+> default branch, not the PR head. And the merge call passes the decided
+> `sha`, so a push landing between the decision and the merge fails the call
+> instead of merging an unreviewed commit.
+>
+> **To pull the breaker:** set `.github/automerge-enabled` to `false` (or
+> delete it) on the default branch. That is a normal PR, so it is recorded
+> and revertible. A single PR can also be excluded with the `no-automerge`
+> label without touching the breaker.
 
 - User owns acceptance, manual merge, and production approval.
 - The task-assigned execution agent is the sole writer for its task and branch;
@@ -354,7 +376,7 @@ Known divergences (do not treat these as missing work without checking intent):
 |---|---|
 | `backend/app/core/rate_limit.py` | Does not exist; rate limiting lives inside `providers/egress/webshare.py` |
 | `workers/usage_sync.py`, `workers/baseline.py` | Renamed to `accounting_sync.py`, `transport_sync.py`, `drift_check.py` |
-| `ops/backup/{backup,restore,install-cron}.sh` | Implemented by TASK-S07; `ops/status.py` remains absent |
+| `ops/backup/{backup,restore,install-cron}.sh` | Implemented by TASK-S09 (PR #132; the TASK file was created as S07, collided, and was renamed); `ops/status.py` remains absent |
 | `egress/manual`, `payment/manual`, `notify/telegram`, `email/{resend,smtp}`, `captcha/turnstile`, `storage/{r2,s3,local}` | None exist; only mock/noop |
 | `providers/base.py` Protocol signatures | Materially evolved (e.g. `GatewayProvider.render()` now requires a `CredentialResolver`; `AccountUserDTO.routing_principal` added per ADR-016) |
 | `(docs)/guides/{windows,macos,ios,android}` | Route directories exist but contain only `.gitkeep` |
@@ -365,3 +387,32 @@ Known divergences (do not treat these as missing work without checking intent):
 requirements, and §8 deployment acceptance list **do** still hold and are
 actively enforced by tests — the drift is in the file tree and task sequence,
 not the invariants.
+
+## 10. Most recent scheduled architecture audit
+
+ADR-029 §6 requires the scheduled audit (every 6 hours) to append its result
+here every time it runs: **date, the `main` SHA audited, what was actually run,
+what was found, and whether the breaker was pulled.** An audit that only reads
+code and does not run `ruff` / `mypy` / the test suite does not satisfy §6.
+
+| Date (UTC) | `main` SHA | Ran | Findings | Breaker pulled? |
+|---|---|---|---|---|
+| — | — | — | No audit has appended a row yet. | — |
+
+Two things a fresh session should know rather than re-derive:
+
+1. **The audit is the only independent check after `main`.** Under ADR-029 the
+   reviewer of a PR is the same agent that specified it, so a whole class of
+   defect — the cross-PR interaction that appears in no single diff — can only
+   be caught here. The live example is recorded in §8.
+2. **A Critical finding forces re-evaluation of ADR-029 itself**, not just a
+   breaker pull. ADR-029's "重新评估条件" says so explicitly: repeated
+   Criticals mean read-only review plus after-the-fact detection is not an
+   adequate substitute for the manual gate it replaced.
+
+**Unverified as of 2026-09-19:** the Routine that fires this audit
+(`43 */6 * * *`) was created from a session holding no connector grants, so the
+fired session may have no GitHub tools and no repository source — in which case
+it cannot open its audit PR. If this table is still empty after several
+6-hour windows, that is the reason; the remedy is recreating the Routine from
+the claude.ai Routines UI so it inherits the GitHub connector.
