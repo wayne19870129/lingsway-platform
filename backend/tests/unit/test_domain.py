@@ -10,6 +10,7 @@ import pytest
 import yaml
 
 from backend.app.domain.capacity import CapacityExceededError
+from backend.app.domain.ordering import BillingCommand, BillingOrderType, apply_paid_billing_change
 from backend.app.domain.provisioning import (
     PENDING_MANUAL_BUSINESS_MESSAGES,
     ExternalTenantCreationError,
@@ -779,3 +780,17 @@ def test_quota_conversion_boundary_values_are_exact_and_never_rounded() -> None:
 
     with pytest.raises(ValueError, match="whole number of bytes"):
         quota_gb_to_bytes(Decimal("0.0000000005"))
+
+
+@pytest.mark.parametrize("order_type", [BillingOrderType.UPGRADE, BillingOrderType.ADDON])
+def test_paid_billing_change_rejects_upgrade_and_addon(order_type: BillingOrderType) -> None:
+    class State:
+        def apply_upgrade(self, command: BillingCommand) -> None:
+            raise AssertionError("upgrade must fail closed")
+
+        def apply_addon(self, command: BillingCommand) -> None:
+            raise AssertionError("addon must fail closed")
+
+    command = BillingCommand("1", "1", order_type, plan_id="1", addon_bytes=1)
+    with pytest.raises(ValueError, match=order_type.value):
+        apply_paid_billing_change(command, State())  # type: ignore[arg-type]

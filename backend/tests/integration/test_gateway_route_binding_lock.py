@@ -1004,6 +1004,7 @@ def test_sync_subscription_usage_expiry_persists_when_no_active_egress_binding(
         db.flush()
         period = UsagePeriod(
             subscription_id=subscription.id,
+            order_id=order.id,
             period_start=now - timedelta(days=30),
             period_end=now,
             used_bytes=0,

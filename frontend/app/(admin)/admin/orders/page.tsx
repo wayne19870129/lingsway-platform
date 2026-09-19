@@ -68,7 +68,7 @@ function Orders() {
           <td><strong>{order.order_no}</strong><small>{order.plan_code}</small></td>
           <td>{order.customer_email}</td>
           <td>{order.plan_name}<small>{formatBytes(order.traffic_limit_bytes)}</small></td>
-          <td>{order.amount} {order.currency}</td>
+          <td>¥{order.amount}</td>
           <td><span className={`status ${statusClass(order.status)}`}>{order.status}</span><small>{order.payment_status}</small></td>
           <td>{order.payment_notice_at ? <span className="status status-good">已通知</span> : <span className="status status-neutral">未通知</span>}</td>
           <td>{formatDate(order.created_at)}</td>
