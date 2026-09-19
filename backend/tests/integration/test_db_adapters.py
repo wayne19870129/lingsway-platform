@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -40,6 +41,8 @@ from backend.app.models import (
     TrafficRule,
     TransportProviderKind,
     TransportProviderRecord,
+    UsagePeriod,
+    UsagePeriodStatus,
 )
 from backend.app.providers.base import (
     CredentialDTO,
@@ -181,6 +184,163 @@ def test_subscription_token_is_hash_plus_encrypted_secret_and_round_trips(
     assert state.current_subscription_url("subs.example.invalid") == (
         "https://subs.example.invalid/s/one-time-token-only-in-test"
     )
+
+
+def _queue_fixture(db: Session, suffix: str) -> tuple[Subscription, Plan, list[Order]]:
+    customer = Customer(
+        customer_no=f"CUS-QUEUE-{suffix}",
+        email=f"queue-{suffix}@example.invalid",
+        password_hash="x",
+    )
+    plan = Plan(
+        plan_code=f"QUEUE-PLAN-{suffix}",
+        name="Queue plan",
+        traffic_limit_bytes=100,
+        duration_days=30,
+        price="10.00",
+        currency="CNY",
+        route_group_code="QUEUE",
+    )
+    db.add_all([customer, plan])
+    db.flush()
+    orders = [
+        Order(
+            order_no=f"ORD-QUEUE-{suffix}-{index}",
+            customer_id=customer.id,
+            plan_id=plan.id,
+            client_request_id=f"queue-{suffix}-{index}",
+            amount="10.00",
+            currency="CNY",
+        )
+        for index in range(3)
+    ]
+    db.add_all(orders)
+    db.flush()
+    subscription = Subscription(
+        subscription_no=f"SUB-QUEUE-{suffix}",
+        customer_id=customer.id,
+        plan_id=plan.id,
+        order_id=orders[0].id,
+        status=SubscriptionStatus.ACTIVE,
+        route_group_code="QUEUE",
+        service_expire_at=datetime(2027, 1, 1, tzinfo=UTC),
+    )
+    db.add(subscription)
+    db.flush()
+    return subscription, plan, orders
+
+
+def test_usage_period_allows_one_active_and_multiple_queued(db: Session) -> None:
+    subscription, plan, orders = _queue_fixture(db, "001")
+    periods = [
+        UsagePeriod(
+            subscription_id=subscription.id,
+            order_id=order.id,
+            plan_id=plan.id,
+            period_start=datetime(2026, 1, 1, tzinfo=UTC),
+            period_end=datetime(2026, 2, 1, tzinfo=UTC),
+            quota_bytes=100,
+            status=status,
+        )
+        for order, status in zip(
+            orders,
+            [
+                UsagePeriodStatus.ACTIVE,
+                UsagePeriodStatus.QUEUED,
+                UsagePeriodStatus.QUEUED,
+            ],
+            strict=True,
+        )
+    ]
+    db.add_all(periods)
+    db.flush()
+    subscription.current_period_id = periods[0].id
+    db.commit()
+    assert db.scalar(select(func.count()).select_from(UsagePeriod)) == 3
+
+
+def test_usage_period_order_id_is_required_and_unique(db: Session) -> None:
+    subscription, plan, orders = _queue_fixture(db, "002")
+    db.add(
+        UsagePeriod(
+            subscription_id=subscription.id,
+            order_id=orders[0].id,
+            plan_id=plan.id,
+            period_start=datetime(2026, 1, 1, tzinfo=UTC),
+            period_end=datetime(2026, 2, 1, tzinfo=UTC),
+            quota_bytes=100,
+            status=UsagePeriodStatus.ACTIVE,
+        )
+    )
+    db.commit()
+    db.add(
+        UsagePeriod(
+            subscription_id=subscription.id,
+            order_id=orders[0].id,
+            plan_id=plan.id,
+            period_start=datetime(2026, 2, 1, tzinfo=UTC),
+            period_end=datetime(2026, 3, 1, tzinfo=UTC),
+            quota_bytes=100,
+            status=UsagePeriodStatus.QUEUED,
+        )
+    )
+    with pytest.raises(IntegrityError):
+        db.flush()
+    db.rollback()
+
+
+def test_concurrent_rollover_keeps_exactly_one_active_period(db: Session) -> None:
+    subscription, plan, orders = _queue_fixture(db, "003")
+    active = UsagePeriod(
+        subscription_id=subscription.id,
+        order_id=orders[0].id,
+        plan_id=plan.id,
+        period_start=datetime(2026, 1, 1, tzinfo=UTC),
+        period_end=datetime(2026, 2, 1, tzinfo=UTC),
+        quota_bytes=100,
+        used_bytes=100,
+        status=UsagePeriodStatus.ACTIVE,
+    )
+    queued = UsagePeriod(
+        subscription_id=subscription.id,
+        order_id=orders[1].id,
+        plan_id=plan.id,
+        period_start=datetime(2026, 2, 1, tzinfo=UTC),
+        period_end=datetime(2026, 3, 1, tzinfo=UTC),
+        quota_bytes=100,
+        status=UsagePeriodStatus.QUEUED,
+    )
+    db.add_all([active, queued])
+    db.flush()
+    subscription.current_period_id = active.id
+    db.commit()
+
+    def rollover() -> None:
+        engine = db.get_bind()
+        with Session(engine) as contender:
+            current = contender.scalar(
+                select(Subscription)
+                .where(Subscription.id == subscription.id)
+                .with_for_update()
+            )
+            assert current is not None
+            from backend.app.workers.accounting_sync import apply_expiry_policy
+
+            apply_expiry_policy(contender, current, datetime(2026, 2, 1, tzinfo=UTC))
+            contender.commit()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(rollover) for _ in range(2)]
+        for future in futures:
+            future.result()
+    assert db.scalar(
+        select(func.count())
+        .select_from(UsagePeriod)
+        .where(
+            UsagePeriod.subscription_id == subscription.id,
+            UsagePeriod.status == UsagePeriodStatus.ACTIVE,
+        )
+    ) == 1
 
 
 def test_gateway_route_binding_is_idempotent_and_active_unique(

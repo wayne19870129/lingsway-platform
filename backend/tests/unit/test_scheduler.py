@@ -2,12 +2,31 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
 
 from backend.app.core.config import Settings
+from backend.app.core.database import Base
+from backend.app.models import (
+    Customer,
+    Order,
+    Plan,
+    ReconcileState,
+    Subscription,
+    SubscriptionStatus,
+    UsagePeriod,
+    UsagePeriodStatus,
+)
+from backend.app.providers.accounting.mock import MockAccountingProvider
 from backend.app.providers.registry import ProviderRegistry, build_registry
 from backend.app.workers import scheduler
+from backend.app.workers.accounting_sync import apply_expiry_policy, reconcile_subscription
 from backend.app.workers.scheduler import (
     FAST_USAGE_INTERVAL_SECONDS,
     NORMAL_USAGE_INTERVAL_SECONDS,
@@ -65,6 +84,213 @@ def test_scheduler_runs_one_mock_round_without_external_services() -> None:
 def test_usage_poll_interval_switches_between_five_and_one_minutes() -> None:
     assert usage_poll_interval_seconds(False) == NORMAL_USAGE_INTERVAL_SECONDS == 300
     assert usage_poll_interval_seconds(True) == FAST_USAGE_INTERVAL_SECONDS == 60
+
+
+class _QueuedResult:
+    def __init__(self, values: list[object]) -> None:
+        self.values = values
+
+    def all(self) -> list[object]:
+        return self.values
+
+
+class _RolloverDb:
+    def __init__(self, queued: list[object]) -> None:
+        self.queued = queued
+
+    def scalars(self, statement: object) -> _QueuedResult:
+        del statement
+        return _QueuedResult(self.queued)
+
+
+def _rollover_state(*, used: int, end: datetime, queued: list[object]) -> tuple[Any, Any, Any]:
+    subscription = SimpleNamespace(
+        id=1,
+        status=SubscriptionStatus.ACTIVE,
+        service_expire_at=end,
+        current_period_id=1,
+        plan_id=10,
+        reconcile_state=ReconcileState.SYNCED,
+    )
+    current = SimpleNamespace(
+        id=1,
+        used_bytes=used,
+        quota_bytes=100,
+        period_end=end,
+        status=UsagePeriodStatus.ACTIVE,
+    )
+    subscription.current_period = current
+    return subscription, current, _RolloverDb(queued)
+
+
+def test_quota_exhaustion_rolls_to_fifo_queued_period() -> None:
+    now = datetime.now(UTC)
+    first = SimpleNamespace(
+        id=2,
+        plan_id=20,
+        status=UsagePeriodStatus.QUEUED,
+        period_start=now,
+        period_end=now,
+        quota_bytes=200,
+    )
+    second = SimpleNamespace(
+        id=3,
+        plan_id=30,
+        status=UsagePeriodStatus.QUEUED,
+        period_start=now,
+        period_end=now,
+        quota_bytes=300,
+    )
+    subscription, current, db = _rollover_state(
+        used=100, end=now + timedelta(days=1), queued=[first, second]
+    )
+    assert apply_expiry_policy(db, subscription, now) is True
+    assert current.status is UsagePeriodStatus.CLOSED
+    assert first.status is UsagePeriodStatus.ACTIVE
+    assert second.status is UsagePeriodStatus.QUEUED
+    assert subscription.current_period_id == first.id
+    assert first.period_start == now
+    assert first.period_end == now + timedelta(days=30)
+
+
+def test_time_expiry_rolls_without_carrying_unused_quota() -> None:
+    now = datetime.now(UTC)
+    first = SimpleNamespace(
+        id=2,
+        plan_id=20,
+        status=UsagePeriodStatus.QUEUED,
+        period_start=now,
+        period_end=now,
+        quota_bytes=200,
+    )
+    subscription, current, db = _rollover_state(
+        used=10, end=now - timedelta(seconds=1), queued=[first]
+    )
+    assert apply_expiry_policy(db, subscription, now) is True
+    assert current.status is UsagePeriodStatus.CLOSED
+    assert first.status is UsagePeriodStatus.ACTIVE
+    assert first.quota_bytes == 200
+    assert first.period_start == now
+    assert first.period_end == now + timedelta(days=30)
+
+
+def test_time_expiry_with_empty_queue_enters_grace() -> None:
+    now = datetime.now(UTC)
+    subscription, current, db = _rollover_state(used=10, end=now - timedelta(seconds=1), queued=[])
+    assert apply_expiry_policy(db, subscription, now) is True
+    assert current.status is UsagePeriodStatus.CLOSED
+    assert subscription.status is SubscriptionStatus.GRACE
+
+
+def test_quota_exhaustion_with_empty_queue_enters_grace() -> None:
+    now = datetime.now(UTC)
+    subscription, current, db = _rollover_state(used=100, end=now + timedelta(days=1), queued=[])
+    assert apply_expiry_policy(db, subscription, now) is True
+    assert current.status is UsagePeriodStatus.CLOSED
+    assert subscription.status is SubscriptionStatus.GRACE
+    assert subscription.service_expire_at > now
+
+
+def test_rollover_keeps_subscription_token_hash() -> None:
+    now = datetime.now(UTC)
+    first = SimpleNamespace(
+        id=2,
+        plan_id=20,
+        status=UsagePeriodStatus.QUEUED,
+        period_start=now,
+        period_end=now,
+        quota_bytes=200,
+    )
+    subscription, _, db = _rollover_state(used=100, end=now + timedelta(days=1), queued=[first])
+    subscription.token_hash = "stable-token-hash"
+    apply_expiry_policy(db, subscription, now)
+    assert subscription.token_hash == "stable-token-hash"
+
+
+def test_rollover_accounting_write_failure_is_pending_manual() -> None:
+    engine = create_engine(
+        "sqlite+pysqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    try:
+        with Session(engine) as db:
+            customer = Customer(
+                customer_no="CUS-S07-FAIL",
+                email="s07-fail@example.invalid",
+                password_hash="x",
+            )
+            plan = Plan(
+                plan_code="S07-FAIL-PLAN",
+                name="S07 failure plan",
+                traffic_limit_bytes=100,
+                duration_days=30,
+                price="10.00",
+                currency="CNY",
+                route_group_code="S07",
+            )
+            db.add_all([customer, plan])
+            db.flush()
+            order = Order(
+                order_no="ORD-S07-FAIL",
+                customer_id=customer.id,
+                plan_id=plan.id,
+                client_request_id="s07-fail",
+                amount="10.00",
+                currency="CNY",
+            )
+            db.add(order)
+            db.flush()
+            subscription = Subscription(
+                subscription_no="SUB-S07-FAIL",
+                customer_id=customer.id,
+                plan_id=plan.id,
+                order_id=order.id,
+                status=SubscriptionStatus.ACTIVE,
+                route_group_code="S07",
+                service_expire_at=datetime.now(UTC) + timedelta(days=30),
+                accounting_user_id="acct-s07-fail",
+                current_period_id=None,
+            )
+            db.add(subscription)
+            db.flush()
+            period = UsagePeriod(
+                subscription_id=subscription.id,
+                order_id=order.id,
+                plan_id=plan.id,
+                period_start=datetime.now(UTC),
+                period_end=datetime.now(UTC) + timedelta(days=30),
+                quota_bytes=100,
+                status=UsagePeriodStatus.ACTIVE,
+            )
+            db.add(period)
+            db.flush()
+            subscription.current_period_id = period.id
+            db.commit()
+            provider = MockAccountingProvider(
+                failures={"set_quota": RuntimeError("s07-rollover-write-failed")}
+            )
+            provider.users["acct-s07-fail"] = provider.create_user(
+                "acct-s07-fail", 100, subscription.service_expire_at
+            )
+            with pytest.raises(RuntimeError, match="s07-rollover-write-failed"):
+                reconcile_subscription(
+                    db,
+                    subscription,
+                    provider,
+                    pending_manual_on_failure=True,
+                )
+            db.expire_all()
+            persisted = db.scalar(
+                select(Subscription).where(Subscription.id == subscription.id)
+            )
+            assert persisted is not None
+            assert persisted.reconcile_state is ReconcileState.PENDING_MANUAL
+            assert persisted.provision_error == "s07-rollover-write-failed"
+    finally:
+        Base.metadata.drop_all(engine)
+        engine.dispose()
 
 
 # ---------------------------------------------------------------------------

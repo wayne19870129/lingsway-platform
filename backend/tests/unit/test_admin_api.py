@@ -150,6 +150,8 @@ class _FakeDb:
             return self.order if identifier == self.order.id else None
         if model is Plan:
             return self.plan if identifier == self.plan.id else None
+        if model is Subscription:
+            return self.subscription if identifier == self.subscription.id else None
         return None
 
     def scalar(self, _statement: Any) -> Subscription:
@@ -255,3 +257,34 @@ def test_confirm_payment_capacity_failure_is_rejected_before_payment(
     assert raised.value.status_code == 409
     assert order.status is OrderStatus.PENDING
     assert order.payment_status is PaymentStatus.UNPAID
+
+
+def test_confirm_renewal_payment_enqueues_without_current_period_side_effects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db, order, subscription = _provision_fixtures()
+    order.order_type = "RENEWAL"
+    order.target_subscription_id = subscription.id
+    captured: list[object] = []
+
+    def fake_confirm(*args: object, **kwargs: object) -> ProvisionOutcome:
+        del kwargs
+        captured.append(args[0])
+        return ProvisionOutcome("run-renewal", ProvisionStatus.SUCCEEDED, None)
+
+    monkeypatch.setattr(admin_api, "confirm_payment_and_provision", fake_confirm)
+    result = admin_api.admin_confirm_payment(
+        order.id,
+        PaymentConfirmation(payment_reference="renewal-reference"),
+        cast(Session, db),
+        Customer(),
+        build_registry(Settings()),
+    )
+
+    assert result.order.id == order.id
+    assert result.subscription.id == subscription.id
+    assert len(captured) == 1
+    command = cast(Any, captured[0])
+    assert command.order_type == "RENEWAL"
+    assert command.subscription_id == str(subscription.id)
+    assert subscription.current_period_id is None
