@@ -56,8 +56,10 @@ JUDGEMENT_ONLY_SIGNALS: Final[tuple[str, ...]] = (
     "PASS_BUT_CRITICAL",
 )
 
-#: `CLAUDE.md`: automatic rework is capped at 5 rounds per pull request.
-REVIEW_ROUND_CAP: Final[int] = 5
+#: ADR-031 §6 / `CLAUDE.md`: automatic rework is capped at 3 rounds per pull
+#: request (tightened from 5 on 2026-09-19). Hitting this is a signal that the
+#: TASK is wrong, not that the executor needs more attempts.
+REVIEW_ROUND_CAP: Final[int] = 3
 
 #: ADR-030 §5: a pull request with unresolved findings and no new commit for
 #: this long is stuck, not in progress.

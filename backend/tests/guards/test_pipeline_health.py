@@ -166,14 +166,16 @@ def test_idle_but_passing_is_not_stuck() -> None:
 # --- case 4: the rework cap --------------------------------------------------
 
 
-def test_five_rounds_alerts() -> None:
-    digest = health.build_digest(facts(prs=[pr(review_rounds=5)]))
+def test_three_rounds_alerts() -> None:
+    """ADR-031 §6 tightened the cap from 5 to 3."""
+    digest = health.build_digest(facts(prs=[pr(review_rounds=3)]))
     assert health.ALERT_ROUNDS_AT_CAP in digest["alerts"]
 
 
-def test_four_rounds_does_not_alert() -> None:
-    digest = health.build_digest(facts(prs=[pr(review_rounds=4)]))
+def test_two_rounds_does_not_alert() -> None:
+    digest = health.build_digest(facts(prs=[pr(review_rounds=2)]))
     assert health.ALERT_ROUNDS_AT_CAP not in digest["alerts"]
+
 
 
 # --- case 5: unattended auto-merge streak ------------------------------------
