@@ -66,6 +66,18 @@
 - 不得触碰 Mihomo / S04 相关路径——那是 `TASK-S04-mihomo-activation.md`
   的范围，两条工作线不得互相夹带。
 - 不得触碰 `deploy/`、生产凭据、或任何真实外部写入的开关。
+- **`backend/app/services.py` 只允许改非 PURCHASE 那一个分支**
+  （`confirm_payment_and_provision()` 第 350–355 行的 `else:`）。
+  **PURCHASE 的九步 saga、ADR-017 的相位切分与终态持久化顺序、
+  `_mark_pending_manual()` 的落库顺序，一行都不许动**——它是本仓库
+  "每条 `PENDING_MANUAL` 路径必须遵循的唯一排序"（见该函数 docstring）。
+  这个文件是本次新加入允许清单的，加它是为了解一个具体调用点，
+  **不是把它开放成可自由重构的范围**。
+- **不得把 `OrderWorkflowState.activate_subscription()` 改成"其实是入队"。**
+  目标 1（入队，当前周期不变）与目标 2/3（之后才真正激活）是两个不同动作，
+  用同一个方法名表达两种语义，等于把缺陷藏进命名里。需要新动作就在
+  `domain/ordering.py` 的 Protocol 上新增方法，并同步四个落点
+  （见「允许修改的文件」下方那张表）。
 
 ## 允许修改的文件
 
@@ -76,6 +88,8 @@ backend/app/domain/ordering.py
 backend/app/models/subscription.py
 backend/app/api/admin.py
 backend/app/api/public.py
+backend/app/api/subscription.py
+backend/app/services.py
 backend/app/workers/accounting_sync.py
 backend/app/core/config.py
 backend/app/schemas/public.py
@@ -84,17 +98,61 @@ backend/tests/unit/test_domain.py
 backend/tests/unit/test_order_subscription_api.py
 backend/tests/unit/test_admin_api.py
 backend/tests/unit/test_scheduler.py
+backend/tests/unit/test_services_wiring.py
 backend/tests/integration/test_db_adapters.py
 backend/tests/integration/test_models.py
+backend/tests/integration/test_provisioning_phase_boundary.py
 frontend/app/(customer)/subscriptions/page.tsx
 frontend/app/(customer)/subscriptions/[id]/page.tsx
 frontend/app/(customer)/orders/new/page.tsx
 frontend/app/(customer)/plans/page.tsx
 frontend/app/(customer)/orders/page.tsx
 frontend/app/(admin)/admin/orders/page.tsx
-docs/82-tasks/TASK-S07-order-queue-billing.md
 docs/83-project-continuity.md
 ```
+
+### 2026-09-19 范围闭包修正（本 TASK 此前自相矛盾，无法派发）
+
+Codex 桌面版在开工前按规则停住并上报：**目标第 10 条点名要改
+`/subscriptions/{subscription_id}/renew`，而它所在的文件不在上面这张清单里。**
+执行者没有越界，是规格错了。借这次修正对十条目标做了一次逐条闭包检查，
+共补入 **4 个文件**、移出 **1 个**。**每一条都给出代码依据，没有"顺手也加上"。**
+
+**补入（逐条可复核）：**
+
+| 文件 | 为什么必需 |
+|---|---|
+| `backend/app/api/subscription.py` | ①目标 10 点名的 `_create_renewal_order()`（第 50–81 行）把档位硬锁成 `plan_id=current_plan.id`，就在本文件；②`/subscriptions/{id}/details`（第 98 行）是前端拿订阅数据的**唯一**端点，「前端展示队列」这条要求绕不开它 |
+| `backend/app/services.py` | `confirm_payment_and_provision()` 的**非 PURCHASE 分支已经存在**（第 350–355 行），当前写的是 `apply_paid_billing_change(...)` + `order_state.activate_subscription(...)`——**它立即激活**。而目标 1 要求付款确认后只入队、当前周期一个字段都不许变。这一行调用点在本文件，改不到就做不出「入队不激活」 |
+| `backend/tests/unit/test_services_wiring.py` | 内含一份 `OrderWorkflowState` 的假实现（`prepare_purchase` / `activate_subscription` / `apply_renewal`），并在第 544 行直接断言 `(BillingOrderType.RENEWAL, "billing:renewal")`。**给 Protocol 加方法必然打破它** |
+| `backend/tests/integration/test_provisioning_phase_boundary.py` | 同样内含一份 `OrderWorkflowState` 假实现（第 210、219 行），同上 |
+
+> **`OrderWorkflowState` 全仓库只有四个落点**，实测：
+> `domain/ordering.py:56`（Protocol）、`api/admin.py:171`（真实实现）、
+> 上面两个测试里的假实现。**前两个本来就在清单里，后两个是这次补的。**
+> 动 Protocol 而漏掉任何一个，`mypy` 或测试必挂。
+
+**移出：**
+
+| 文件 | 为什么移出 |
+|---|---|
+| ~~`docs/82-tasks/TASK-S07-order-queue-billing.md`~~ | `AGENTS.md` 写权限表：`docs/82-tasks/` **由 Claude Code 独占**，ADR-032 §3a 更把这条列为"派活交回 ChatGPT 后审查独立性成立的唯一依据"。**让执行者改 TASK 等于让被约束的人改约束。** 没有任何权威依据要求 Codex 改本文件，故移出 |
+
+**确认过、但明确不加的（防止范围蔓延）：**
+
+- `frontend/lib/api.ts` —— 实测**全文只有一行**（`export const api = ...` 基址常量）。
+  前端调用 `/details` 用的类型是页面文件里的内联 `type Details`，而那两个页面已在清单里。
+  **且全前端没有任何一处调用 `/renew`**（`grep -rn "renew" frontend/` 只命中
+  `node_modules` 里的无关串），所以目标 10 不产生前端改动。
+- `backend/app/domain/provisioning.py` —— `PENDING_MANUAL` 的枚举与文案在这里，
+  但目标 7 的要求是**复用** ADR-026 的语义、**不得重新发明**，只读不改。
+- `backend/app/catalog.py` —— 约束已写明四档价目表是唯一事实源且不新增 SKU，不改。
+- `backend/tests/integration/test_gateway_route_binding_lock.py` —— 虽然引用了
+  `confirm_payment_and_provision`，但**没有** `OrderWorkflowState` 的假实现，
+  不受 Protocol 变更影响。
+
+**如果开工后发现还有清单外的必需文件：按 `docs/86` §7 停下来上报，不要自行扩大范围。**
+这次补漏的方式（先用代码证明必需，再改 TASK）就是标准动作。
 
 > **2026-09-19 更正：编号从 `0026` 改为 `0024`。**
 > 原文预留 0026，理由是"S04-B2-B 会占用 0024/0025"——那是按 S04 先做写的。
