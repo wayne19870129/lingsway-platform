@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from typing import cast
 
 import pytest
-from sqlalchemy import Table, create_engine, select
+from sqlalchemy import Table, create_engine, event, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
@@ -49,6 +49,7 @@ from backend.app.infra.mihomo_reconciliation import (
     reconcile_mihomo_job,
 )
 from backend.app.models import (
+    EgressBinding,
     EgressEndpoint,
     EgressGroup,
     EgressTransportAssignment,
@@ -100,16 +101,38 @@ def test_prepare_generation_and_intent_commit_together(
 ) -> None:
     cast(Table, MihomoProjectionGeneration.__table__).create(bind=db.get_bind())
     monkeypatch.setattr(reconciliation, "mihomo_projection_write", nullcontext)
-    job = prepare_mihomo_reconciliation(
-        db,
-        DesiredForwarderState(snapshot_revision=1, snapshot_identity="input"),
-        operation_id="prepare-together",
-    )
+    class Loader:
+        def load_current(self, session: Session) -> DesiredForwarderState:
+            assert session is db
+            return DesiredForwarderState(snapshot_revision=1, snapshot_identity="input")
+
+    job = prepare_mihomo_reconciliation(db, operation_id="prepare-together", loader=Loader())
     assert db.get(MihomoProjectionGeneration, 1) is not None
     assert db.get(Job, job.id) is not None
     payload = json.loads(job.payload_json)
     assert payload["snapshot_revision"] == 1
     assert db.get(Job, job.id).status is JobStatus.PENDING  # type: ignore[union-attr]
+
+
+def test_prepare_rolls_back_generation_when_intent_enqueue_fails(
+    db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cast(Table, MihomoProjectionGeneration.__table__).create(bind=db.get_bind())
+    monkeypatch.setattr(reconciliation, "mihomo_projection_write", nullcontext)
+
+    class Loader:
+        def load_current(self, _session: Session) -> DesiredForwarderState:
+            return DesiredForwarderState()
+
+    def fail_enqueue(*_args: object, **_kwargs: object) -> Job:
+        raise RuntimeError("enqueue failed")
+
+    monkeypatch.setattr(reconciliation, "enqueue_mihomo_reconciliation", fail_enqueue)
+    with pytest.raises(RuntimeError, match="enqueue failed"):
+        prepare_mihomo_reconciliation(db, operation_id="rollback", loader=Loader())
+    db.rollback()
+    assert db.scalar(select(MihomoProjectionGeneration.revision)) is None
+    assert db.scalar(select(Job.id)) is None
 
 
 def test_sql_controller_secret_resolver_requires_exact_purpose_and_revision(
@@ -141,6 +164,18 @@ def test_sql_desired_loader_rebuilds_db_authority_with_stable_order(
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
+    event.listen(
+        engine,
+        "connect",
+        lambda connection, _record: connection.create_function(
+            "IF",
+            3,
+            lambda condition, when_true, when_false: when_true
+            if condition
+            else when_false,
+            deterministic=True,
+        ),
+    )
     tables = [
         RouteGroup.__table__,
         TransportProviderRecord.__table__,
@@ -151,7 +186,8 @@ def test_sql_desired_loader_rebuilds_db_authority_with_stable_order(
         TrafficRule.__table__,
         MihomoTransportMaterialization.__table__,
         TransportEndpointRecord.__table__,
-    EgressTransportAssignment.__table__,
+        EgressTransportAssignment.__table__,
+        EgressBinding.__table__,
         Secret.__table__,
     ]
     Base.metadata.create_all(engine, tables=tables)  # type: ignore[arg-type]
@@ -187,6 +223,12 @@ def test_sql_desired_loader_rebuilds_db_authority_with_stable_order(
                         purpose="TRANSPORT_SUBSCRIPTION_URL",
                         revision=2,
                     ),
+                    Secret(
+                        secret_ref=credential_resolver.MIHOMO_CONTROLLER_SECRET_REF,
+                        ciphertext="opaque-controller",
+                        purpose=credential_resolver.MIHOMO_CONTROLLER_SECRET_PURPOSE,
+                        revision=7,
+                    ),
                 RouteGroup(id=1, code="route-b", name="B", status=RouteGroupStatus.ACTIVE),
                 RouteGroup(id=2, code="route-a", name="A", status=RouteGroupStatus.ACTIVE),
                 EgressGroup(id=1, code="egress", region="test", status="ACTIVE"),
@@ -201,6 +243,31 @@ def test_sql_desired_loader_rebuilds_db_authority_with_stable_order(
                     credential_secret_ref="egress/a",
                     mihomo_listen_port=10001,
                     status="AVAILABLE",
+                ),
+                EgressBinding(subscription_id=10, egress_id=1, credential_secret_ref=None),
+                TransportEndpointRecord(
+                    id=11,
+                    provider_id=1,
+                    external_id="node-a",
+                    name="Node A",
+                    protocol="https",
+                    host="203.0.113.11",
+                    port=443,
+                    auth_secret_ref="node/a",
+                    status="AVAILABLE",
+                    latency_ms=None,
+                    packet_loss=None,
+                    raw_metadata_json="{}",
+                ),
+                EgressTransportAssignment(
+                    egress_id=1,
+                    transport_provider_id=1,
+                    transport_node_id=11,
+                    state="ACTIVE",
+                    allocation_generation=1,
+                    last_latency_ms=None,
+                    last_checked_at=None,
+                    unavailable_since=None,
                 ),
                 RouteBinding(
                     route_group_id=1,
@@ -235,20 +302,55 @@ def test_sql_desired_loader_rebuilds_db_authority_with_stable_order(
         monkeypatch.setattr(
             credential_resolver,
             "reveal_secret_snapshot_for_purpose",
-            lambda _db, _ref, _purpose: SecretSnapshot("controller-secret", 7),
+            lambda *_args: pytest.fail("loader must not resolve controller plaintext"),
         )
         loader = reconciliation.SqlMihomoDesiredSnapshotLoader(
             cache_root, "203.0.113.20:9090"
         )
-        first = loader.load(session, Job(job_type="MIHOMO_RECONCILE", dedupe_key="x"))
+        first = loader.load_current(session)
         session.expire_all()
-        second = loader.load(session, Job(job_type="MIHOMO_RECONCILE", dedupe_key="y"))
+        second = loader.load_current(session)
         assert tuple(item["name"] for item in first.proxies) == ("egress-a",)
-        assert tuple(item["name"] for item in first.proxy_groups) == ("route-b", "route-a")
+        assert tuple(item["name"] for item in first.proxy_groups) == (
+            "route-b", "route-a", "subscription-10"
+        )
         assert first == second
         assert first.deployment_constants["api-secret-revision"] == 7
     transport_resolver.close()
     engine.dispose()
+
+
+def test_sql_desired_loader_binds_exact_job_generation_identity(tmp_path: Path) -> None:
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    Base.metadata.create_all(
+        engine,
+        tables=cast(list[Table], [Job.__table__, MihomoProjectionGeneration.__table__]),
+    )
+    loader = reconciliation.SqlMihomoDesiredSnapshotLoader(tmp_path, "127.0.0.1:9090")
+    with Session(engine) as session:
+        generation = MihomoProjectionGeneration(
+            revision=7, manifest_version="1", desired_fingerprint="a" * 64
+        )
+        session.add(generation)
+        session.flush()
+        job = Job(
+            job_type="MIHOMO_RECONCILE",
+            dedupe_key="exact-generation",
+            payload_json=json.dumps({"snapshot_revision": 7}),
+        )
+        session.add(job)
+        session.flush()
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(loader, "load_current", lambda _db: DesiredForwarderState())
+        desired = loader.load(session, job)
+        assert desired.snapshot_revision == 7
+        assert desired.snapshot_identity == f"mihomo:1:7:{'a' * 64}"
+        monkeypatch.undo()
+        job.payload_json = json.dumps({"snapshot_revision": 8})
+        with pytest.raises(MihomoReconciliationError, match="GENERATION_MISSING"):
+            loader.load(session, job)
 
 
 def test_enqueue_identity_is_transactional_and_exact(db: Session) -> None:

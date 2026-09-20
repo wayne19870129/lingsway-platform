@@ -4,7 +4,7 @@ import json
 import re
 from collections.abc import Callable
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from backend.app.core.config import get_settings
 from backend.app.core.database import SessionLocal
 from backend.app.infra.credential_resolver import (
+    MIHOMO_CONTROLLER_SECRET_PURPOSE,
     MIHOMO_CONTROLLER_SECRET_REF,
     SqlMihomoControllerSecretResolver,
 )
@@ -45,11 +46,13 @@ from backend.app.infra.mihomo_projection_lock import (
     session_holds_mihomo_projection_lock,
 )
 from backend.app.models import (
+    EgressBinding,
     EgressEndpoint,
     EgressGroup,
     EgressTransportAssignment,
     Job,
     JobStatus,
+    MihomoProjectionGeneration,
     MihomoTransportMaterialization,
     RouteBinding,
     RouteEgressBinding,
@@ -124,6 +127,10 @@ class MihomoDesiredSnapshotLoader(Protocol):
     def load(self, db: Session, job: Job) -> DesiredForwarderState: ...
 
 
+class MihomoPreparationSnapshotLoader(Protocol):
+    def load_current(self, db: Session) -> DesiredForwarderState: ...
+
+
 class SqlMihomoDesiredSnapshotLoader:
     """Rebuild the complete desired projection from committed DB authority."""
 
@@ -131,8 +138,7 @@ class SqlMihomoDesiredSnapshotLoader:
         self._cache_root = cache_root
         self._external_controller = external_controller
 
-    def load(self, db: Session, job: Job) -> DesiredForwarderState:
-        del job
+    def load_current(self, db: Session) -> DesiredForwarderState:
         groups = list(
             db.scalars(
                 select(RouteGroup)
@@ -244,7 +250,31 @@ class SqlMihomoDesiredSnapshotLoader:
                 .execution_options(populate_existing=True)
             )
         )
-        del transport_endpoints, assignments
+        endpoint_ids = {endpoint.id for endpoint in transport_endpoints}
+        egress_ids = {endpoint.id for endpoint in endpoints}
+        for assignment in assignments:
+            if (
+                assignment.transport_node_id not in endpoint_ids
+                or assignment.transport_provider_id
+                != next(
+                    endpoint.provider_id
+                    for endpoint in transport_endpoints
+                    if endpoint.id == assignment.transport_node_id
+                )
+                or assignment.egress_id not in egress_ids
+            ):
+                raise MihomoReconciliationError("MIHOMO_TRANSPORT_ASSIGNMENT_INVALID")
+        active_bindings = list(
+            db.scalars(
+                select(EgressBinding)
+                .where(EgressBinding.released_at.is_(None))
+                .order_by(EgressBinding.subscription_id, EgressBinding.egress_id, EgressBinding.id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        )
+        if any(binding.egress_id not in egress_ids for binding in active_bindings):
+            raise MihomoReconciliationError("MIHOMO_EGRESS_BINDING_INVALID")
         receipts = {
             receipt.owner_record_id: receipt
             for receipt in db.scalars(
@@ -326,6 +356,14 @@ class SqlMihomoDesiredSnapshotLoader:
             }
             for group_id in sorted(groups_by_id)
         )
+        proxy_groups += tuple(
+            {
+                "name": f"subscription-{binding.subscription_id}",
+                "type": "select",
+                "proxies": (endpoint_names[binding.egress_id],),
+            }
+            for binding in active_bindings
+        )
         listeners = tuple(
             ForwarderListenerDTO(
                 f"listener-{endpoint.code}",
@@ -346,7 +384,22 @@ class SqlMihomoDesiredSnapshotLoader:
         )
         if not desired_rules or desired_rules[-1].get("match") != "MATCH":
             desired_rules = (*desired_rules, {"match": "MATCH", "target": "BLOCK"})
-        controller = SqlMihomoControllerSecretResolver(db).resolve(MIHOMO_CONTROLLER_SECRET_REF)
+        controller = db.scalar(
+            select(Secret)
+            .where(
+                Secret.secret_ref == MIHOMO_CONTROLLER_SECRET_REF,
+                Secret.purpose == MIHOMO_CONTROLLER_SECRET_PURPOSE,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if (
+            controller is None
+            or isinstance(controller.revision, bool)
+            or not isinstance(controller.revision, int)
+            or controller.revision <= 0
+        ):
+            raise MihomoReconciliationError("MIHOMO_CONTROLLER_SECRET_METADATA_INVALID")
         constants = {
             "external-controller": self._external_controller,
             "api-secret-ref": MIHOMO_CONTROLLER_SECRET_REF,
@@ -361,6 +414,31 @@ class SqlMihomoDesiredSnapshotLoader:
             transport_materializations=tuple(materials),
             transport_references=tuple(references),
             deployment_constants=constants,
+        )
+
+    def load(self, db: Session, job: Job) -> DesiredForwarderState:
+        payload = _payload(job)
+        try:
+            revision = _validate_revision(payload.get("snapshot_revision"))
+        except ValueError as exc:
+            raise MihomoPayloadError("MIHOMO_RECONCILIATION_PAYLOAD_INVALID") from exc
+        generation = db.scalar(
+            select(MihomoProjectionGeneration)
+            .where(MihomoProjectionGeneration.revision == revision)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if generation is None:
+            raise MihomoReconciliationError("MIHOMO_GENERATION_MISSING")
+        desired = self.load_current(db)
+        return replace(
+            desired,
+            snapshot_revision=generation.revision,
+            snapshot_identity=snapshot_identity(
+                generation.revision,
+                generation.desired_fingerprint,
+                manifest_version=generation.manifest_version,
+            ),
         )
 
 
@@ -396,13 +474,19 @@ class MihomoReconciliationResult:
 
 def prepare_mihomo_reconciliation(
     db: Session,
-    desired: DesiredForwarderState,
     *,
     operation_id: str,
     operation_kind: str = "RECONCILE",
+    loader: MihomoPreparationSnapshotLoader | None = None,
 ) -> Job:
     """Persist one generation and its identifier-only intent atomically."""
     with mihomo_projection_write(db):
+        if loader is None:
+            settings = get_settings()
+            loader = SqlMihomoDesiredSnapshotLoader(
+                Path(settings.transport_cache_root), settings.mihomo_external_controller
+            )
+        desired = loader.load_current(db)
         manifest = build_projection_source_manifest(desired)
         generation = allocate_generation(db, manifest)
         snapshot_identity(generation.revision, generation.desired_fingerprint)
