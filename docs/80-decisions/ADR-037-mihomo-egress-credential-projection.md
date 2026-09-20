@@ -15,10 +15,15 @@
   **不取代其中任何一条**
 - 触发：`AGENTS.md` 铁律 5 —— 本决定会修改 `backend/app/providers/base.py`
   的 provider-neutral contract，必须先有 ADR
-- 实施 TASK：`docs/82-tasks/TASK-S04-mihomo-activation.md`
-  （**B2-B2c** forwarder 侧契约、**B2-B2d** Xray 交接、**S04-C** 激活闸门）
+- 实施 TASK：`docs/82-tasks/TASK-S04-mihomo-activation.md`。**唯一安全顺序**
+  （§5a 的不变式决定，不得重排）：
+  **`B2-B2a` 契约 substrate → `B2-B2` loader/preparation（#163，需 rebase）
+  → `B2-B2c` render/finalization → `B2-B2d` Xray 交接 → `B2-B3` → `B2-B4`
+  → writer（尚无 owner）→ `S04-C` 放行 + 激活闸门**
 
-> **本 ADR 不实现任何代码。** B2-B2c 在本 ADR 合并进 `main` 之后才可开工。
+> **本 ADR 不实现任何代码。** 本 ADR 合并进 `main` 之后，**第一个可以开工的是
+> `B2-B2a`**（纯契约）—— 不是 B2-B2c，也不是 #163。理由见 §5a：任何能生产
+> generation 的 checkpoint，其 manifest 必须已覆盖本 ADR 的全部 effective inputs。
 
 ## 0. 本 ADR 推翻了什么（先说清楚，不埋着）
 
