@@ -427,15 +427,19 @@ different contents) and the PR #128 version won.
   (`ADR-025-mihomo-projection-generation-authority.md`) and the S-series
   implementation TASK (`TASK-S04-mihomo-activation.md`). Architecture and
   documentation only — no Python, no ORM, no migration, as specified.
-- **S04-B2-B:** **IN FLIGHT, split into four checkpoints (2026-09-19).** Both
+- **S04-B2-B:** **IN FLIGHT. Current order (2026-09-20, after ADR-037):
+  `B2-B1 -> B2-B2a -> B2-B2 -> B2-B2c -> B2-B2d -> B2-B3 -> B2-B4`.**
+  The 2026-09-19 four-checkpoint split is history; ADR-037 extended it to six.
+  Both
   original gates are satisfied: ADR-025 reads `Accepted` and
   `TASK-S04-mihomo-activation.md` is merged. **ADR-025's status is no longer
   a blocker; do not cite it as one.**
 
   **B2-B1** (receipt binding, SQL controller-secret resolver, canonical
   manifest + generation allocator, DNS candidate gate) **merged as PR #156 on
-  2026-09-19**. **B2-B2 is next and has no open blocker** — the ADR it was
-  waiting on now exists; see the next bullet. The four checkpoints' union
+  2026-09-19**. **B2-B2a is next**; #163 (B2-B2) waits for B2-B2a to merge,
+  then rebases and its loader must populate `egress_proxies` — see the ADR-037
+  entry below for why the order changed. The checkpoints' union
   equals the original B2-B; nothing was deferred to S04-C and no acceptance
   criterion was lowered. The split followed the §6.1 breaker: Codex failed the
   same Round 1 finding set twice, so retrying it unchanged was not allowed —
@@ -516,9 +520,12 @@ different contents) and the PR #128 version won.
   opaque ref + `Secret.revision` in the manifest with plaintext resolved only
   at the forwarder render boundary.
 
-  **Four consequences worth carrying in.** B2-B2 (PR #163) stays free of all
-  of this and keeps its original five allowed files; B2-B2c has its own list
-  and may touch `providers/base.py`. `dialer-proxy` has **not** been tested
+  **Four consequences worth carrying in.** B2-B2 (PR #163) keeps its original
+  five allowed files but **no longer stays free of this** — after the ordering
+  fix its loader must populate `egress_proxies`, because it is the first
+  checkpoint that can produce a generation. `providers/base.py` belongs to
+  B2-B2a (the DTO) and B2-B2d (the Xray outbound change), not to B2-B2c, which
+  is render/finalization only. `dialer-proxy` has **not** been tested
   against the pinned `metacubex/mihomo:v1.19.27` — B2-B2c must confirm it
   during candidate validation and stop rather than substitute an encoding.
 

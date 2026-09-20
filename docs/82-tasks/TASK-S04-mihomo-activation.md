@@ -56,7 +56,16 @@ durable transport materialization receipt 的 producer/commit/crash 契约、
 8. Mihomo DNS 字段/类型的 candidate-schema 校验闸门（S04-A 只保证了
    canonical mapping/value ownership）。
 
-### S04-B2-B 的执行切分（**2026-09-19 重构：4 个 checkpoint**）
+### S04-B2-B 的执行切分（**当前顺序见下方粗体；2026-09-19 的「4 个 checkpoint」已是历史**）
+
+> ## ⚠️ 当前唯一顺序（2026-09-20，ADR-037 扩展后）
+>
+> ```
+> B2-B1 → B2-B2a → B2-B2 → B2-B2c → B2-B2d → B2-B3 → B2-B4
+> ```
+>
+> **下面那段「4 个 checkpoint」是 2026-09-19 的历史记录**，它的拆分理由仍然有效，
+> 但**数量与顺序已被 ADR-037 取代**。精确边界见「执行切分与唯一安全依赖顺序」节。
 
 > **为什么重构：连续两次同一组 finding 未能完成。** 按 `docs/85` §6.1 的熔断
 > 规则，同一 finding 连续 2 次修复失败后**不得原样再试**。
@@ -70,8 +79,9 @@ durable transport materialization receipt 的 producer/commit/crash 契约、
 > 没定下来，其余三项都无法收敛——这正是两次都停在同一处的原因。
 >
 > **本次只改执行粒度，不改架构结论，不降低任何最终验收要求，
-> 不把任何 B2-B 要求推迟到 S04-C。** 下面四个 checkpoint 的并集
-> **等于**原 B2-B 的交付项 1–8 与验收标准全集。
+> 不把任何 B2-B 要求推迟到 S04-C。** ~~下面四个 checkpoint 的并集~~
+> **（2026-09-20：ADR-037 把 4 个扩为 6 个，并新增 writer + S04-C 闸门。）**
+> **全部 checkpoint 的并集等于**原 B2-B 的交付项 1–8 与验收标准全集。
 
 #### 依赖关系（单向，不得回环）
 
@@ -1019,9 +1029,15 @@ transport node」涉及容量、健康度、地域、重平衡——**那是一�
 
 #### B2-B2 —— concrete DB desired loader + preparation transaction
 
-**前置条件：B2-B1 已合并（PR #156，已满足）。** deployment constants 的落点
-由 **ADR-035** 裁定，结论已写死在上面「deployment-owned 常量的落点」一节。
-**没有别的等待项。**
+**⛔ 前置条件：B2-B1 已合并（PR #156，已满足）**，**且 `B2-B2a` 已合并**
+（2026-09-20 新增，ADR-037 §5a 的顺序不变式要求）。
+
+> **#163 必须 rebase 到 B2-B2a 之后**，并且它的 loader **必须填充 `egress_proxies`** ——
+> 因为 B2-B2 是第一个能生产 generation 的 checkpoint，合并时 manifest 就必须
+> 已覆盖 ADR-037 的全部 effective inputs。
+
+deployment constants 的落点由 **ADR-035** 裁定，结论已写死在上面
+「deployment-owned 常量的落点」一节。
 
 **目标**：`SqlMihomoDesiredSnapshotLoader` 从 DB 全量重建 `DesiredForwarderState`
 （铁律 1），`prepare_mihomo_reconciliation()` 在锁内把 generation 与
@@ -1061,7 +1077,8 @@ loader 全量 DB 重建与稳定排序的覆盖、
 
 #### B2-B3 —— freshness 三点复核 / recovery / runtime exact readback
 
-**前置条件**：B2-B2 已合并。
+**⛔ 前置条件**：**`B2-B2d` 已合并**（它隐含 B2-B2a → B2-B2 → B2-B2c → B2-B2d
+整条单向链已完成）。2026-09-20 按 ADR-037 修正 —— 原文只写「B2-B2 已合并」。
 
 **目标**：`confirm_fresh_generation()` 一个 helper 用于三处（见上表）；
 `recover_mihomo_projection()` 唯一入口；`MihomoExactProjectionVerifier` 接到
@@ -1083,7 +1100,9 @@ loader 全量 DB 重建与稳定排序的覆盖、
 
 #### B2-B4 —— 完整 integration / guard / migration / concurrency 验收
 
-**前置条件**：B2-B1–B3 全部合并。
+**⛔ 前置条件**：**`B2-B3` 已合并，且其全部前置 checkpoint 均已完成** ——
+即 `B2-B1 → B2-B2a → B2-B2 → B2-B2c → B2-B2d → B2-B3` 整条单向链。
+2026-09-20 按 ADR-037 修正 —— 原文只写「B2-B1–B3 全部合并」。
 
 **目标**：在**真实 MySQL 8.4** 上证明前三个 checkpoint 的不变式。
 
@@ -1209,15 +1228,23 @@ backend/tests/integration/test_mihomo_reconciliation_mysql.py
 backend/tests/integration/test_db_adapters.py
 backend/tests/integration/test_models.py                # 2026-09-19 补入，依据见下
 backend/tests/unit/test_registry.py                     # 2026-09-20 补入（ADR-035）：仅上面那条非空校验的单测
-backend/app/providers/base.py                           # 2026-09-20 补入（ADR-037）：仅 B2-B2c，ForwarderEgressProxyDTO + egress_proxies
+backend/app/providers/base.py                           # 2026-09-20（ADR-037）：B2-B2a（ForwarderEgressProxyDTO + egress_proxies）+ B2-B2d（XrayOutboundDTO.credential_secret_ref -> str | None）
+backend/app/infra/provisioning_state.py                  # 2026-09-20 补入（ADR-037 §1a）：仅 B2-B2d，Mihomo 模式下构造 loopback outbound
+backend/app/providers/gateway/xray_composition.py        # 2026-09-20 补入（ADR-037 §1a）：仅 B2-B2d，None 时渲染不带 users 的 socks outbound
+backend/app/providers/gateway/xray_file.py               # 2026-09-20 补入（ADR-037 §1a）：仅 B2-B2d，跳过 None
+backend/tests/unit/test_desired_routing_snapshot.py      # 2026-09-20 补入（ADR-037 §1a）：仅 B2-B2d
+backend/tests/unit/test_xray_composition.py              # 2026-09-20 补入（ADR-037 §1a）：仅 B2-B2d
+backend/tests/guards/test_xray_writer_guard.py           # 2026-09-20 补入（ADR-037 §1a）：仅 B2-B2d
 docs/80-decisions/ADR-025-mihomo-projection-generation-authority.md      # 仅状态改为 Accepted
 docs/82-tasks/TASK-S04-mihomo-activation.md
 docs/83-project-continuity.md
 ```
 
-> **B2-B2c 另有自己的 allowed files**（`providers/base.py`、`mihomo_projection.py`、
-> `mihomo.py`、`mihomo_generation.py` 及其测试），见上面「精确 allowed files」节。
-> **下面这份总清单是 B2-B（全部 checkpoint）的并集，不是某一个 checkpoint 的授权。**
+> **每个 checkpoint 的精确 allowed list 以上面「精确 allowed files」节为准**
+> （`B2-B2a` / `B2-B2` / `B2-B2c` / `B2-B2d` 各不相同）。
+> **下面这份总清单只是全部 checkpoint 的并集，本身不授权任何单个 checkpoint。**
+> 判断某个文件能不能改，要同时满足两条：**在总并集里** ✅ **且在当前 checkpoint
+> 自己的 exact list 里** ✅。
 
 > **两份清单有两处刻意重叠（2026-09-20，ADR-035）。**
 > `backend/app/core/config.py` 与 `backend/tests/unit/test_registry.py`

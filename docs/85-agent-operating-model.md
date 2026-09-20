@@ -624,8 +624,12 @@ Claude 的产出形态是：ADR、`docs/81-reviews/REVIEW-*.md`、以及直接�
 | 任务 | 状态 |
 |---|---|
 | **S04-B2-B1** receipt / secret resolver / manifest / allocator / DNS gate | ✅ **已合并（PR #156）**，2026-09-19 |
-| **S04-B2-B2** concrete DB desired loader + preparation transaction | **可以直接派** —— 没有任何待解除的阻塞项。deployment 常量落点已由 **ADR-035** 裁定并逐条写进 TASK |
-| **S04-B2-B3 / B4** | 依次排在 B2-B2 之后（单向依赖，见 TASK） |
+| **S04-B2-B2a** contract substrate | **#164 合并后的下一项** —— DTO + manifest 键 + `MANIFEST_VERSION "1"→"2"`。纯契约，不生产 generation |
+| **S04-B2-B2** concrete DB desired loader + preparation transaction | **在途 PR #163，需先等 B2-B2a 合并再 rebase**，且 loader 必须**填充 `egress_proxies`**。deployment 常量落点已由 **ADR-035** 裁定 |
+| **S04-B2-B2c / B2-B2d / B2-B3 / B2-B4** | 按 §5.1 的完整顺序依次排（单向依赖，见 TASK） |
+
+> **当前唯一顺序（与 §5.1 一致，不要各写一套）：**
+> `B2-B1 ✅ → B2-B2a → B2-B2(#163) → B2-B2c → B2-B2d → B2-B3 → B2-B4 → writer → S04-C`
 
 > **2026-09-20（第二次更新，ADR-037）：链路与 Q1/Q2 已最终裁定。**
 > 最终链路是 **客户端 → Xray → Mihomo listener → transport node → 住宅 egress**。
@@ -648,7 +652,8 @@ Claude 的产出形态是：ADR、`docs/81-reviews/REVIEW-*.md`、以及直接�
 > `backend/tests/unit/test_registry.py`，与 S04-C 刻意重叠，边界表在 TASK 里）。
 > 派 B2-B2 时**照 TASK 抄，不要让 Codex 重新设计落点**。
 
-> **2026-09-19 · S04-B2-B 已拆成 4 个 checkpoint（熔断后的重构）**
+> **2026-09-19 · S04-B2-B 拆成 4 个 checkpoint（熔断后的重构）——
+> ⚠️ 这是历史记录；2026-09-20 ADR-037 已把它扩为 6 个，当前顺序见上方**
 >
 > Codex 连续两次未能完成同一组 Round 1 finding，触发 `docs/85` §6.1
 > 「同一 finding 连续 2 次修复失败」熔断，**不得原样再试**。
