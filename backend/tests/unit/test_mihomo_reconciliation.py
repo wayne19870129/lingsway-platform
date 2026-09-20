@@ -1,17 +1,23 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Callable, Generator
 from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 
 import pytest
 from sqlalchemy import Table, create_engine, select
 from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
 
 import backend.app.models  # noqa: F401
+from backend.app.core.database import Base
+from backend.app.core.secrets import SecretSnapshot
+from backend.app.infra import credential_resolver
 from backend.app.infra import mihomo_reconciliation as reconciliation
 from backend.app.infra.mihomo_blocker import (
     MIHOMO_BLOCKER_KIND_FINALIZATION,
@@ -39,9 +45,26 @@ from backend.app.infra.mihomo_reconciliation import (
     assert_no_unresolved_mihomo_mutation,
     classify_finalization_outcome,
     enqueue_mihomo_reconciliation,
+    prepare_mihomo_reconciliation,
     reconcile_mihomo_job,
 )
-from backend.app.models import Job, JobStatus
+from backend.app.models import (
+    EgressEndpoint,
+    EgressGroup,
+    EgressTransportAssignment,
+    Job,
+    JobStatus,
+    MihomoProjectionGeneration,
+    MihomoTransportMaterialization,
+    RouteBinding,
+    RouteEgressBinding,
+    RouteGroup,
+    Secret,
+    TrafficRule,
+    TransportEndpointRecord,
+    TransportProviderKind,
+    TransportProviderRecord,
+)
 from backend.app.providers.base import DesiredForwarderState
 from backend.app.providers.forwarder.mihomo import (
     ControllerSecretResolver,
@@ -53,6 +76,10 @@ from backend.app.providers.forwarder.mihomo import (
 from backend.app.providers.forwarder.mihomo_projection import (
     TransportMaterialization,
     TransportMaterializationReference,
+)
+from backend.app.providers.transport.resolver import (
+    SubscriptionTransportResolver,
+    TransportProviderDescriptor,
 )
 
 
@@ -66,6 +93,162 @@ def db() -> Generator[Session, None, None]:
     finally:
         session.close()
         engine.dispose()
+
+
+def test_prepare_generation_and_intent_commit_together(
+    db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cast(Table, MihomoProjectionGeneration.__table__).create(bind=db.get_bind())
+    monkeypatch.setattr(reconciliation, "mihomo_projection_write", nullcontext)
+    job = prepare_mihomo_reconciliation(
+        db,
+        DesiredForwarderState(snapshot_revision=1, snapshot_identity="input"),
+        operation_id="prepare-together",
+    )
+    assert db.get(MihomoProjectionGeneration, 1) is not None
+    assert db.get(Job, job.id) is not None
+    payload = json.loads(job.payload_json)
+    assert payload["snapshot_revision"] == 1
+    assert db.get(Job, job.id).status is JobStatus.PENDING  # type: ignore[union-attr]
+
+
+def test_sql_controller_secret_resolver_requires_exact_purpose_and_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[tuple[str, str]] = []
+
+    def reveal(_db: Session, ref: str, purpose: str) -> SecretSnapshot:
+        seen.append((ref, purpose))
+        return SecretSnapshot("controller-secret", 4)
+
+    monkeypatch.setattr(credential_resolver, "reveal_secret_snapshot_for_purpose", reveal)
+    resolver = credential_resolver.SqlMihomoControllerSecretResolver(cast(Session, object()))
+    snapshot = resolver.resolve(credential_resolver.MIHOMO_CONTROLLER_SECRET_REF)
+    assert snapshot.revision == 4
+    assert seen == [
+        (
+            "mihomo/api-secret",
+            credential_resolver.MIHOMO_CONTROLLER_SECRET_PURPOSE,
+        )
+    ]
+
+
+def test_sql_desired_loader_rebuilds_db_authority_with_stable_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    tables = [
+        RouteGroup.__table__,
+        TransportProviderRecord.__table__,
+        RouteBinding.__table__,
+        EgressGroup.__table__,
+        EgressEndpoint.__table__,
+        RouteEgressBinding.__table__,
+        TrafficRule.__table__,
+        MihomoTransportMaterialization.__table__,
+        TransportEndpointRecord.__table__,
+    EgressTransportAssignment.__table__,
+        Secret.__table__,
+    ]
+    Base.metadata.create_all(engine, tables=tables)  # type: ignore[arg-type]
+    cache_root = tmp_path
+    transport_resolver = SubscriptionTransportResolver(cache_root)
+    descriptor = TransportProviderDescriptor(
+        1, "transport-a", "SUBSCRIPTION", "transport/subscription-a"
+    )
+    cache_path = transport_resolver._cache_path(descriptor)  # noqa: SLF001
+    content = b"proxies:\n  - {name: proxy-a, type: ss, server: a.invalid, port: 443}\n"
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_bytes(content)
+    from backend.app.models import ProviderStatus, RouteGroupStatus
+
+    now = datetime.now(UTC)
+    with Session(engine) as session:
+        provider = TransportProviderRecord(
+            id=1,
+            code="transport-a",
+            slug="transport-a",
+            name="Transport A",
+            kind=TransportProviderKind.SUBSCRIPTION,
+            secret_ref="transport/subscription-a",
+            status=ProviderStatus.HEALTHY,
+            enabled=True,
+        )
+        session.add_all(
+            [
+                    provider,
+                    Secret(
+                        secret_ref="transport/subscription-a",
+                        ciphertext="opaque",
+                        purpose="TRANSPORT_SUBSCRIPTION_URL",
+                        revision=2,
+                    ),
+                RouteGroup(id=1, code="route-b", name="B", status=RouteGroupStatus.ACTIVE),
+                RouteGroup(id=2, code="route-a", name="A", status=RouteGroupStatus.ACTIVE),
+                EgressGroup(id=1, code="egress", region="test", status="ACTIVE"),
+                EgressEndpoint(
+                    id=1,
+                    group_id=1,
+                    code="egress-a",
+                    provider_name="test",
+                    host="203.0.113.10",
+                    port=443,
+                    protocol="ss",
+                    credential_secret_ref="egress/a",
+                    mihomo_listen_port=10001,
+                    status="AVAILABLE",
+                ),
+                RouteBinding(
+                    route_group_id=1,
+                    provider_id=1,
+                    role="PRIMARY",
+                    enabled=True,
+                ),
+                RouteEgressBinding(
+                    route_group_id=1,
+                    egress_endpoint_id=1,
+                    role="PRIMARY",
+                    enabled=True,
+                ),
+                TrafficRule(
+                    rule_set="default",
+                    match_type="MATCH",
+                    target_egress="BLOCK",
+                    priority=100,
+                    enabled=True,
+                ),
+                MihomoTransportMaterialization(
+                    owner_record_id=1,
+                    provider_code="transport-a",
+                    source_revision=2,
+                    cache_identity=str(cache_path),
+                    content_hash=hashlib.sha256(content).hexdigest(),
+                    freshness_deadline=now + timedelta(hours=1),
+                ),
+            ]
+        )
+        session.commit()
+        monkeypatch.setattr(
+            credential_resolver,
+            "reveal_secret_snapshot_for_purpose",
+            lambda _db, _ref, _purpose: SecretSnapshot("controller-secret", 7),
+        )
+        loader = reconciliation.SqlMihomoDesiredSnapshotLoader(
+            cache_root, "203.0.113.20:9090"
+        )
+        first = loader.load(session, Job(job_type="MIHOMO_RECONCILE", dedupe_key="x"))
+        session.expire_all()
+        second = loader.load(session, Job(job_type="MIHOMO_RECONCILE", dedupe_key="y"))
+        assert tuple(item["name"] for item in first.proxies) == ("egress-a",)
+        assert tuple(item["name"] for item in first.proxy_groups) == ("route-b", "route-a")
+        assert first == second
+        assert first.deployment_constants["api-secret-revision"] == 7
+    transport_resolver.close()
+    engine.dispose()
 
 
 def test_enqueue_identity_is_transactional_and_exact(db: Session) -> None:
