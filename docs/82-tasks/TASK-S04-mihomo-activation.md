@@ -180,7 +180,7 @@ B2-B 结束时必须仍有测试证明 `FORWARDER_PROVIDER=mihomo` **被
 
 | 问题 | 唯一答案 | 依据 |
 |---|---|---|
-| **concrete loader 读哪些 DB 权威行** | 启用中的 `RouteGroup` / `RouteBinding` / `RouteEgressBinding`；`TrafficRule`；`EgressGroup` / `EgressEndpoint` / `EgressBinding`；`TransportProviderRecord` / `TransportEndpointRecord` / `EgressTransportAssignment`；`MihomoTransportMaterialization`（receipt）；`Secret`（仅 ref + revision） | ADR-025 §4 的清单逐项映射到仓库现有模型 |
+| **concrete loader 读哪些 DB 权威行** | **见下面「三类 DB authority 的精确分类」** —— 本行原来只给了一个平铺的表名清单，**那是不够的，也误导了两轮实现**（2026-09-20 裁决已更正） | ADR-025 §4 +  ADR-023 §1.1 |
 | **transport → receipt → cache 的确定性解析路径** | `cache_path = cache_root / f"{record_id}-{safe_code}-{sha256('record_id\|code\|kind\|implementation')[:16]}.yaml"`，即 `TransportProviderResolver._cache_path()` **是唯一权威**；`cache_identity` 必须由**同一个四元组**导出，**绝不**从 subscription URL/token 构造 | `providers/transport/resolver.py:58-64` |
 | **receipt 的精确绑定元组** | `(owner_record_id, provider_code, source_revision, cache_identity, content_hash, freshness_deadline)` 六项**全部**精确一致才放行 | ADR-025 §3a；`models/ops.py:189-200`；`mihomo_projection.py:403-405` 已用同样四元组做过比对 |
 | **generation 分配与 intent 入队的 transaction owner** | **`prepare_mihomo_reconciliation()` 唯一拥有**：在现有 `mihomo_projection_write(db)` 命名锁内，fresh-read → manifest → allocate/reuse → 调用现有 `enqueue_mihomo_reconciliation()`，**两者同一个 DB transaction 提交**；`enqueue_mihomo_reconciliation()` 的签名**不改**（它只 `db.add` + `flush`，不 commit，天然可被复用） | ADR-025 §5；`mihomo_reconciliation.py:154-195` |
@@ -410,6 +410,231 @@ repository-standard precise timestamp 一致（MySQL 下即 `DATETIME(fsp=6)`
 
 ---
 
+#### 三类 DB authority 的精确分类（**2026-09-20 架构裁决，B2-B2 照此实现**）
+
+> **为什么要有这一节。** 上面那一行原文是一个平铺的表名清单
+> （「……`EgressBinding`；……`EgressTransportAssignment`……」），它**只说了读哪些表，
+> 没说每张表的哪些列真正进入 projection**。ADR-025 §4 的判据是
+> **“every effective input that can affect the repo-owned Mihomo projection”**——
+> 判据是「**是否影响 Mihomo 文档**」，不是「是否被 SELECT 过」。
+>
+> 连续两轮实现都卡在这里：第一轮查了表但把结果 `del` 掉，第二轮为了「消费掉」
+> 而发明了 `subscription-{subscription_id}` proxy-group。**两次都是规格的错，不是
+> 执行者的错**——清单给了表名却没给语义，任何人都只能猜。
+>
+> **我写那一行时的具体失误**：把 ADR-025 §4 的 manifest bullet 逐条映射到「仓库里
+> 名字最像的模型」，**没有沿「这张表的变化会不会改变 Mihomo 文档」这条轴走一遍**。
+> 这与 S07 两次漏项、以及我在 #157/#162 上各犯一次的，是同一个失误类型。
+
+##### 先确定链路：这条产品链的每一段分别由谁表达
+
+**按仓库实测，不是按表名猜。**
+
+```
+客户端
+  → Xray（VPS 上的 per-user 路由；gateway 层）
+  → 住宅 ISP egress（EgressEndpoint.host:port，socks5，需要 username/password）
+  → 目标网站
+```
+
+| 段 | 由什么表达 | 证据 |
+|---|---|---|
+| per-user 路由 | `GatewayRouteBinding` → `XrayOutboundDTO(tag=outbound_tag)` | `infra/provisioning_state.py:398-403` |
+| **住宅 ISP 出口本身** | `EgressEndpoint.host` / `.port` / `.protocol`（socks/socks5） | `models/egress.py:181-183`；`xray_composition.py:383` 限定 `{"socks","socks5"}` |
+| **住宅出口的认证凭据** | `EgressBinding.credential_secret_ref`（缺省回落 `EgressEndpoint.credential_secret_ref`） | `provisioning_state.py:388-394` → `XrayOutboundDTO` → `xray_file.py:130` → `xray_composition.py:385-389` 写进 **Xray** socks outbound 的 `users` |
+| **Mihomo 的位置** | 每个住宅出口一个 listener：`127.0.0.1:{EgressEndpoint.mihomo_listen_port}` → proxy `{endpoint.code}` → `endpoint.host:port` | `models/egress.py:194`（`unique=True`）；`ARCHITECTURE.md` §8 验收：**「Mihomo listener 数 == 数据库出口数」「每个 listener 出口 IP == 数据库记录 IP」** |
+| **transport（订阅节点）** | `TransportProviderRecord` / `TransportEndpointRecord` → 订阅 cache → receipt → **Mihomo 的额外 proxies** | `mihomo_projection.py:411-421`：`effective_proxies = desired.proxies + materialized_proxies` |
+
+> **一个必须纠正的误读**：有一种描述是
+> 「客户端 → VPS/transport → Mihomo → 住宅 egress」，即 transport 在 Mihomo **之前**。
+> **仓库实测不是这样。** transport materialization 的产物是 `content["proxies"]`，
+> 被**追加进 Mihomo 的 proxies**，也就是 Mihomo 的**出站**候选，位于 Mihomo **之后**。
+> 「客户端接入的 VPS」在当前模型里是 **Xray**，不是 transport record。
+> **这两个概念不得混用**，混用正是上一轮发明 proxy-group 的起点。
+
+##### 分类表（**这就是 B2-B2 的全部答案，逐行照做**）
+
+| 表 / 列 | 分类 | B2-B2 必须怎么做 |
+|---|---|---|
+| `RouteGroup`（ACTIVE） | **effective** | → proxy-group 的 `name` |
+| `RouteEgressBinding`（enabled） | **effective** | → proxy-group 的 `proxies` 成员 |
+| `TrafficRule`（enabled） | **effective** | → `rules`；末尾必须是 `MATCH,BLOCK`（铁律 2） |
+| `EgressGroup`（ACTIVE） | **validation-only** | 只用于筛 `EgressEndpoint.group_id`；自身不进 manifest |
+| `EgressEndpoint.code` / `.protocol` / `.host` / `.port` | **effective** | → `proxies` 条目 |
+| `EgressEndpoint.mihomo_listen_port` | **effective** | → `listener_specs` 的 `port` |
+| `EgressEndpoint.credential_secret_ref` | **validation-only（B2-B2）** | 见下面「Q2 裁决」。**不进 manifest** |
+| `EgressEndpoint` 其余列（`location`/`isp`/`ip_type`/`notes`/`capacity`/`current_count`/`purpose`/时间戳） | **非输入** | 一律不读进 snapshot |
+| `EgressBinding.egress_id` | **validation-only** | ACTIVE binding 的 `egress_id` 必须落在本次 in-scope 的 endpoint 集合内，否则 fail closed |
+| `EgressBinding.subscription_id` | **非输入** | **禁止**进入 Mihomo 文档（见下面「必须撤掉的东西」） |
+| `EgressBinding.credential_secret_ref` | **validation-only（B2-B2）** | 见「Q2 裁决」。**不进 manifest** |
+| `TransportProviderRecord`（enabled，被 RouteBinding 引用） | **effective** | → receipt 查找 + `transport_references` |
+| `TransportEndpointRecord` | **validation-only** | 只用于校验 assignment 的 `(provider_id, node_id)` 关系一致；**自身不进 manifest**——进 Mihomo 的是 **receipt 校验过的 cache 内容**，不是这张表 |
+| `EgressTransportAssignment`（任何 state） | **unsupported（必须不存在）** | 见「Q1 裁决」。**发现 ACTIVE 行必须 fail closed** |
+| `MihomoTransportMaterialization`（receipt） | **effective** | 六字段绑定元组 → `transport_materializations` + `transport_references` |
+| `Secret`（controller，仅 `secret_ref` + `revision`） | **effective** | → `deployment_constants` 的 `api-secret-ref` / `api-secret-revision`。**loader 不解密** |
+
+##### Q1 裁决 —— `EgressTransportAssignment.transport_node_id` A→B：**manifest 不变（NO）**
+
+**但「不变」不等于「忽略」。**
+
+**理由（全部可实测）：**
+
+1. **这张表在整个仓库里没有任何 writer、reader、测试或 ADR。** 唯一出现处是
+   `models/egress.py:110` 的定义、`infrastructure/alembic/versions/0018_transport_assignment_placeholders.py`
+   （文件名自己写着 **placeholders**），以及本 TASK 被我写错的那一行。模型 docstring 原文：
+   **“Persistent placeholder for future Transport-side node allocation.”**
+2. **`DesiredForwarderState` 没有任何字段能表达「egress E 经由 transport node T 出站」。**
+   要表达它需要在 egress proxy 上挂 `dialer-proxy` 之类的链式语义，而
+   `providers/base.py` 与 `mihomo_projection.py` 里**都不存在**这个概念。
+3. 因此它**不是 effective input**——**不是因为它不重要，而是因为它的「effect」从未被定义**。
+   ADR-025 §4 的判据是「能影响 projection 的输入」；一个没有定义效果的行，影响为零。
+
+**ADR-023 §1.1 已经写死了这种情况的处理方式（原文）**：
+
+> 「不能表达或验证完整 ownership 的字段必须在 wiring 前**明确归类为** deployment
+> constant、transport materialization input **或 unsupported**；**不得用「保留未知字段」
+> 掩盖 ownership 缺口。**」
+
+所以**正确动作不是静默忽略，而是显式拒绝**：
+
+> **B2-B2 的 loader 在发现任何 `state == ACTIVE` 的 `EgressTransportAssignment` 时，
+> 必须抛 `MIHOMO_TRANSPORT_ASSIGNMENT_UNSUPPORTED` 并 fail closed。**
+
+**为什么必须是拒绝而不是忽略**：静默忽略等于让 Mihomo 渲染出一份**声称实现了某条
+路由决策、实际却没实现**的配置。那正是铁律 2「不得回落 DIRECT」所防的失效方向。
+由于当前没有任何代码写这张表，这条断言在真实数据上**恒为真、不会误伤**。
+
+**这条裁决没有改变任何已接受 ADR 的结论**：它是 ADR-023 §1.1 + ADR-025 §4 在本场景下
+的唯一推论，**不需要新 ADR**。
+
+> **什么时候会翻成 YES**：当仓库真的引入「egress 经由 transport node 出站」这条链路时。
+> 那是一个**新的架构决定**（需要 `DesiredForwarderState` 新字段 + Mihomo 链式 proxy 语义），
+> **必须先有 ADR**。**不属于 B2-B2**，也不允许在 B2-B2 里顺手发明。见下面「已记录的
+> S04-C 前置缺口」第 2 条。
+
+##### Q2 裁决 —— `EgressBinding.credential_secret_ref` A→B：**manifest 不变（NO）**
+
+**理由（全部可实测）：这个凭据属于 gateway（Xray）层，不属于 Mihomo 层。**
+
+实测调用链，逐跳可查：
+
+```
+EgressBinding.credential_secret_ref
+  → provisioning_state.py:388-394   selected_ref（binding 覆盖 endpoint 缺省）
+  → provisioning_state.py:398-403   XrayOutboundDTO(credential_secret_ref=selected_ref)
+  → xray_file.py:130-131            resolver.resolve(outbound.credential_secret_ref)
+  → xray_composition.py:385-389     写进 Xray socks outbound 的 users[username/password]
+```
+
+**Mihomo 侧没有任何一跳读它。** 当前 Mihomo 的唯一密钥消费点是 **controller
+api-secret**（`credential_resolver.py` 的 `SqlMihomoControllerSecretResolver`），
+与住宅出口凭据无关。
+
+**所以：**
+
+- 这个 credential 使用层 = **gateway（Xray）**；
+- **Mihomo 当前不需要解析它**；
+- 因此它**不是** Mihomo 的 effective projection input，**不进 manifest**；
+- TASK 之所以把 `EgressBinding` 列为 loader authority，**正确的理由只有一个**：
+  **关系完整性校验**——ACTIVE binding 指向的 egress 必须在本次 in-scope 的
+  endpoint 集合内。`egress_id` 是 validation-only，
+  `subscription_id` 与 `credential_secret_ref` 是**非输入**。
+
+> **⚠️ 但这里有一个真实的模型缺口，必须记下来，不能靠 proxy-group 命名技巧掩盖。**
+>
+> `ARCHITECTURE.md` §8 的验收写着**「每个 listener 出口 IP == 数据库记录 IP」**，
+> 而 `EgressEndpoint.protocol` 被限定为 `socks/socks5` 且 Xray 侧**必须**提供
+> username/password 才能拨通。这意味着：**一旦 Mihomo 真的接管住宅出口的拨号，
+> Mihomo 就必须拿到这个凭据**——而当前 B2-B2 渲染出的 Mihomo proxy 条目
+> （`{name,type,server,port}`）**没有任何凭据字段**。
+>
+> **这不是 B2-B2 的 blocker**（B2-B 不激活、不部署、`FORWARDER_PROVIDER=mihomo`
+> 仍被拒绝），**但它是 S04-C 的 blocker**。见下面「已记录的 S04-C 前置缺口」第 1 条。
+>
+> **届时的 plaintext 边界已经由现有 ADR 唯一确定，不需要重新设计**：
+> 与 controller secret 完全同形——**manifest 只放 `ref` + `Secret.revision`，明文只在
+> forwarder finalize 边界解析**，绝不进 loader / desired row / manifest / generation row /
+> receipt / 日志 / runtime-independent snapshot（ADR-025 §4、ADR-035 §6）。
+
+##### `EgressEndpoint` 的 in-scope status（**原规格漏了，必须补**）
+
+**当前 PR #163 用的是 `status == "AVAILABLE"`，这是错的，且在真实数据上必然失败。**
+
+实测：`provisioning_state.py:93` 在把出口分配给客户时会把
+`endpoint.status` 置为 **`"ASSIGNED"`**。所以只取 `AVAILABLE` 会把**每一个正在服务
+客户的出口**排除在 Mihomo projection 之外——直接违反
+`ARCHITECTURE.md` §8 的「Mihomo listener 数 == 数据库出口数」，
+并且紧接着会让 `EgressBinding` 的关系校验对**每一条真实 ACTIVE binding**
+抛 `MIHOMO_EGRESS_BINDING_INVALID`。
+
+> **定死：Mihomo projection 的 in-scope 出口集合是
+> `EgressEndpoint.status IN ("AVAILABLE", "ASSIGNED", "DEGRADED")`。**
+
+依据是仓库里唯一的 forwarder listener 先例
+`provisioning_state.py:187` 的 `current_forwarder_state()`，它用的正是这三个状态。
+（`drift_check.py:18` 的 `("AVAILABLE","ASSIGNED")` 是 **drift 检查**的口径，不是
+listener 口径；`DEGRADED` 的出口仍然挂着客户，**摘掉它的 listener 会静默断掉那个客户**，
+所以取更保守的三状态集合。）
+
+##### 必须撤掉的东西（PR #163 当前实现）
+
+| 要撤掉的 | 为什么 |
+|---|---|
+| `subscription-{subscription_id}` proxy-group | ① 没有任何 TASK/ADR 授权这个表示形状；② 它把 **`subscription_id`（客户标识）写进 Mihomo 配置文件**，而 Mihomo 根本不做 per-subscription 路由（那是 Xray 按 `gateway_principal` 做的）；③ 这些 group **没有任何 rule 引用**，属于死配置，违反 ADR-023 §1.1「未被 fresh desired snapshot 引用的旧 proxy/listener/rule 必须从候选中消失」 |
+| `EgressEndpoint.status == "AVAILABLE"` 单状态过滤 | 见上一节，真实数据上必然失败 |
+| 把 `EgressTransportAssignment` 仅做关系校验后放行 | 见 Q1，必须改为 **ACTIVE 即 fail closed** |
+
+##### B2-B2 的允许文件：**不扩展**
+
+**本次裁决的结论之一就是：B2-B2 不需要任何新文件。**
+
+**不需要**改 `backend/app/providers/base.py`；
+**不需要**改 `backend/app/providers/forwarder/mihomo_projection.py`；
+**不需要**新增 egress credential resolver；
+**不需要** `DesiredForwarderState` 新字段；
+**不需要** `dialer-proxy` / transport assignment projection / 新的 proxy-provider 链接语义。
+
+**允许文件仍然是 B2-B2 原有那五个。** 上一轮审查里那条
+`TASK_SCOPE_BLOCKER`（第 5 点「如果要改 base.py / mihomo_projection.py 就停下来上报」）
+**已由本节裁决解除**：答案是 **NO**，所以**根本不需要碰那两个文件**。
+
+##### B2-B2 必须新增的测试（**精确名称与断言**）
+
+全部放 `backend/tests/unit/test_mihomo_reconciliation.py`：
+
+| 测试名 | 必须断言什么 |
+|---|---|
+| `test_active_transport_assignment_is_rejected_as_unsupported` | 种一条 `state=ACTIVE` 的 `EgressTransportAssignment`（关系完全合法），loader 必须抛 `MIHOMO_TRANSPORT_ASSIGNMENT_UNSUPPORTED`；**不得**静默忽略 |
+| `test_released_transport_assignment_does_not_block_projection` | `state=RELEASED` / `DRAINING` 的行**不**阻断，且**不**进 manifest |
+| `test_egress_binding_credential_ref_is_not_a_manifest_input` | 同一份 DB，仅把 ACTIVE `EgressBinding.credential_secret_ref` 由 secret-A 改成 secret-B，`build_projection_source_manifest()` 的输出与 `manifest_fingerprint()` **逐字节相同** |
+| `test_egress_binding_egress_id_mismatch_fails_closed` | ACTIVE binding 指向 in-scope 集合之外的 egress → `MIHOMO_EGRESS_BINDING_INVALID` |
+| `test_subscription_identifier_never_enters_projection` | 渲染出的 `proxy_groups` / `proxies` / `listener_specs` / manifest 的任何键值里**都不出现** `subscription_id`，且不存在名为 `subscription-*` 的 proxy-group |
+| `test_assigned_and_degraded_endpoints_are_in_scope` | 三个出口分别为 `AVAILABLE` / `ASSIGNED` / `DEGRADED` → 三个都必须出现在 `listener_specs` 与 `proxies`；`listener` 数量 == 出口数量 |
+| `test_transport_endpoint_record_is_not_a_manifest_input` | 仅改动 `TransportEndpointRecord` 的非关系列（如 `latency_ms` / `region`）→ manifest fingerprint 不变 |
+
+> 上一轮审查要求的 `test_sql_desired_loader_consumes_all_authoritative_bindings`
+> **不要再写**——它的前提（三张表都必须「被语义消费」）已被本裁决推翻：
+> 其中两张是 validation-only / unsupported。**用上表的测试取代它。**
+
+##### 已记录的 S04-C 前置缺口（**不在 B2-B2 范围，但不许遗忘**）
+
+1. **Mihomo 拨住宅出口需要 socks5 凭据，当前 projection 里没有。**
+   `ARCHITECTURE.md` §8 要求「每个 listener 出口 IP == 数据库记录 IP」，
+   而 Mihomo proxy 条目没有 username/password。**S04-C 放行 `FORWARDER_PROVIDER=mihomo`
+   之前必须先解决**：要么 Mihomo 获得凭据（则需一条 ADR 定义 egress credential 进入
+   `DesiredForwarderState` 的 provider-neutral 表示，plaintext 边界照 controller secret 同形），
+   要么明确 Xray 继续独占住宅出口拨号、Mihomo 不承担该段（则 `mihomo_listen_port` 的
+   语义需要重新说明）。**两种都是架构决定，都需要 ADR，不得在 TASK 里直接裁定。**
+2. **`EgressTransportAssignment` 的 projection 语义从未定义。**
+   要让它成为 effective input，需要一条 ADR 定义「egress 经由 transport node 出站」
+   在 `DesiredForwarderState` 里的 provider-neutral 表示。**在那条 ADR 存在之前，
+   本 TASK 的裁决是 unsupported + fail closed。**
+
+**按 ADR-036 §2：这两条都不是 B2-B2 的停止条件，但当它们真的要被实现时，
+必须先停止自行推进、报告 User，由 User 决定是否叫 Claude 写那条 ADR。**
+
+---
+
 #### B2-B2 —— concrete DB desired loader + preparation transaction
 
 **前置条件：B2-B1 已合并（PR #156，已满足）。** deployment constants 的落点
@@ -424,6 +649,11 @@ identifier-only `MIHOMO_RECONCILE` intent 在**同一事务**提交。
 `reconcile_mihomo_job()` 的参数上（替换注入式 fake）；preparation 成为
 generation + intent 的**唯一**生产者。
 
+> **⛔ 开工前先读上面「三类 DB authority 的精确分类」整节（2026-09-20 裁决）。**
+> 它逐列裁定了哪些是 effective input、哪些只做校验、哪些必须 fail closed，
+> 并定死了 `EgressEndpoint` 的 in-scope status 集合。**不要从表名重新推导语义**——
+> 连续两轮实现正是栽在这里。
+
 **允许修改的文件**：`backend/app/infra/mihomo_reconciliation.py`、
 `backend/app/infra/credential_resolver.py`、
 `backend/tests/unit/test_mihomo_reconciliation.py`、
@@ -436,7 +666,8 @@ generation + intent 的**唯一**生产者。
 loader 全量 DB 重建与稳定排序的覆盖、
 `mihomo_external_controller` 为空时 `forwarder_provider="mihomo"`
 的 `validate_runtime_safety()` fail-closed 覆盖（放 `test_registry.py`，
-与那里已有的 `test_xray_runtime_safety_requirements_fail_closed` 同形）。
+与那里已有的 `test_xray_runtime_safety_requirements_fail_closed` 同形），
+**外加上面裁决节「B2-B2 必须新增的测试」表里的 7 条**。
 
 **明确不做**：不做 freshness 二次/三次复核；不做 recovery；不做 runtime readback；
 不改 `mihomo_projection_lock.py` / `mihomo_blocker.py` 的公开签名。
