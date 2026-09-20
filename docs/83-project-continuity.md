@@ -427,9 +427,12 @@ different contents) and the PR #128 version won.
   (`ADR-025-mihomo-projection-generation-authority.md`) and the S-series
   implementation TASK (`TASK-S04-mihomo-activation.md`). Architecture and
   documentation only — no Python, no ORM, no migration, as specified.
-- **S04-B2-B:** **IN FLIGHT. Current order (2026-09-20, after ADR-037):
-  `B2-B1 -> B2-B2a -> B2-B2 -> B2-B2c -> B2-B2d -> B2-B3 -> B2-B4`.**
-  The 2026-09-19 four-checkpoint split is history; ADR-037 extended it to six.
+- **S04-B2-B:** **IN FLIGHT. Current order (2026-09-20, after the fourth
+  revision — B2-B2 was re-split):
+  `B2-B1 ✅ -> B2-B2a ✅ -> B2-B2.1 -> .2 -> .3 -> .4 -> .5 -> .6
+  -> B2-B2c -> B2-B2d -> B2-B3 -> B2-B4`.**
+  The 2026-09-19 four-checkpoint split is history; ADR-037 extended it to six,
+  and the 2026-09-20 re-split broke `B2-B2` itself into six sub-checkpoints.
   Both
   original gates are satisfied: ADR-025 reads `Accepted` and
   `TASK-S04-mihomo-activation.md` is merged. **ADR-025's status is no longer
@@ -437,13 +440,44 @@ different contents) and the PR #128 version won.
 
   **B2-B1** (receipt binding, SQL controller-secret resolver, canonical
   manifest + generation allocator, DNS candidate gate) **merged as PR #156 on
-  2026-09-19**. **B2-B2a is next**; #163 (B2-B2) waits for B2-B2a to merge,
-  then rebases and its loader must populate `egress_proxies` — see the ADR-037
-  entry below for why the order changed. The checkpoints' union
+  2026-09-19**. **B2-B2a (contract substrate: `ForwarderEgressProxyDTO`,
+  `DesiredForwarderState.egress_proxies`, the manifest key, and
+  `MANIFEST_VERSION` "1"->"2") merged as PR #167 on 2026-09-20.**
+  The checkpoints' union
   equals the original B2-B; nothing was deferred to S04-C and no acceptance
   criterion was lowered. The split followed the §6.1 breaker: Codex failed the
   same Round 1 finding set twice, so retrying it unchanged was not allowed —
   and the split worked: the first checkpoint landed.
+
+  **⚠️ `B2-B2` itself hit the same breaker and was re-split on 2026-09-20.**
+  Its 12 precise tests went two full rounds without converging; the second
+  round already tried splitting the 11 outstanding ones into batches A/B/C and
+  still did not finish. The root cause is a **spec defect, not a prompting
+  one**: those 12 tests are not 12 independent units — every one of them first
+  has to rebuild the same ~130-line fixture graph (12 tables, a transport
+  cache file on disk whose sha256 must equal the receipt's `content_hash`, a
+  `Secret` whose `revision` must equal the receipt's `source_revision`), so
+  batching merely made each batch pay the full fixture cost again. `B2-B2` is
+  now six checkpoints: **`.1`** loader implementation plus a *parameterizable
+  fixture base* (PR #163, deliberately **not** wired to production),
+  **`.2`–`.5`** tests-only checkpoints that may touch
+  `backend/tests/unit/test_mihomo_reconciliation.py` and nothing else, and
+  **`.6`** the preparation transaction plus production wiring. Precise
+  per-checkpoint allowed files, tests and preconditions live in the TASK's
+  「B2-B2 的再切分」section; the dispatch queue is `docs/85` §5.1.
+
+  **Why ADR-037 §5a still holds under that order** (measured on `main`
+  `5ae40a6`, not inferred): `allocate_generation()` has **no non-test caller**,
+  and `prepare_mihomo_reconciliation()` / `SqlMihomoDesiredSnapshotLoader` do
+  **not exist on `main` at all**. Deferring `prepare` and
+  `reconcile_mihomo_job()`'s `None`-default wiring to **`.6`** therefore makes
+  `.1`–`.5` *structurally incapable* of producing a generation, and by the time
+  `.6` merges the manifest has been complete since B2-B2a and the ADR's three
+  core invariants have been proven by `.4` and `.5`. There is no window in
+  which a generation producer is live while an effective input is missing from
+  the manifest. The cost paid on purpose: #163 must **delete ~50 lines of
+  already-passing code** (`prepare` + the wiring + its two tests) and re-add
+  them verbatim in `.6`.
 
 - **✅ S04-B2-B2 unblocked — `ADR-035` is written and accepted (2026-09-20).**
   **The authority class was never what was open.** ADR-025 §3's taxonomy rules
@@ -520,10 +554,12 @@ different contents) and the PR #128 version won.
   opaque ref + `Secret.revision` in the manifest with plaintext resolved only
   at the forwarder render boundary.
 
-  **Four consequences worth carrying in.** B2-B2 (PR #163) keeps its original
+  **Four consequences worth carrying in.** B2-B2 keeps its original
   five allowed files but **no longer stays free of this** — after the ordering
-  fix its loader must populate `egress_proxies`, because it is the first
-  checkpoint that can produce a generation. `providers/base.py` belongs to
+  fix its loader must populate `egress_proxies`. (After the 2026-09-20
+  re-split those five files are the *union* of `.1`…`.6`, not any one PR's
+  list, and the first checkpoint that can produce a generation is `.6`, not
+  #163.) `providers/base.py` belongs to
   B2-B2a (the DTO) and B2-B2d (the Xray outbound change), not to B2-B2c, which
   is render/finalization only. `dialer-proxy` has **not** been tested
   against the pinned `metacubex/mihomo:v1.19.27` — B2-B2c must confirm it
@@ -562,11 +598,18 @@ different contents) and the PR #128 version won.
 
   The invariant is now stated: **any merged checkpoint able to produce a
   generation must already cover every ADR-037 effective input.** The order is
-  B2-B2a (types + manifest key + `MANIFEST_VERSION` "1"->"2", producing
-  nothing) -> B2-B2 (#163, rebased, loader populates `egress_proxies`) ->
-  B2-B2c (render/finalization) -> B2-B2d (Xray handoff) -> B2-B3 -> B2-B4 ->
-  writer -> S04-C. The version bump matters on its own: leaving it at "1"
-  would make one version string mean two manifest shapes.
+  B2-B2a ✅ (types + manifest key + `MANIFEST_VERSION` "1"->"2", producing
+  nothing) -> B2-B2 -> B2-B2c (render/finalization) -> B2-B2d (Xray handoff)
+  -> B2-B3 -> B2-B4 -> writer -> S04-C. The version bump matters on its own:
+  leaving it at "1" would make one version string mean two manifest shapes.
+
+  **Updated 2026-09-20 (fourth revision):** `B2-B2` is now `.1` … `.6`, and
+  the generation producer moved from #163 to **`.6`**, so the sentence above
+  about "#163's `prepare_mihomo_reconciliation()` is the production-wired
+  generation producer" describes the *pre-re-split* plan. Under the current
+  plan #163 (`.1`) lands the loader but not `prepare` and not the
+  `reconcile_mihomo_job()` `None`-default wiring. The invariant itself is
+  unchanged and is satisfied more strongly — see the S04-B2-B entry above.
 
 - **S04-C:** **NOT STARTED.** `FORWARDER_PROVIDER=mihomo` remains NOT
   selectable; no deployment authorization exists.
