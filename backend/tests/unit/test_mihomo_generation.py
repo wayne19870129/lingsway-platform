@@ -1,5 +1,5 @@
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import cast
 
@@ -78,18 +78,41 @@ def test_manifest_excludes_materialized_raw_content_and_plaintext_secret() -> No
 
 
 def test_manifest_datetime_and_order_are_canonical() -> None:
-    first = build_projection_source_manifest(_desired())
-    second = build_projection_source_manifest(_desired())
+    instant = datetime(2026, 1, 1, 12, tzinfo=UTC)
+    first_material = TransportMaterialization(
+        1, "provider", 2, "cache", "a" * 64, instant, {"z": 1, "a": 2}
+    )
+    second_material = TransportMaterialization(
+        1,
+        "provider",
+        2,
+        "cache",
+        "a" * 64,
+        instant.astimezone(timezone(timedelta(hours=8))),
+        {"a": 2, "z": 1},
+    )
+    first = build_projection_source_manifest(
+        replace(_desired(), transport_materializations=(first_material,))
+    )
+    second = build_projection_source_manifest(
+        replace(_desired(), transport_materializations=(second_material,))
+    )
     assert manifest_fingerprint(first) == manifest_fingerprint(second)
 
 
 def test_sql_controller_secret_resolver_requires_exact_purpose_and_revision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    seen: list[str] = []
+
+    def helper(_db: object, _ref: str, purpose: str) -> SimpleNamespace:
+        seen.append(purpose)
+        return SimpleNamespace(value="secret", revision=7)
+
     monkeypatch.setattr(
         credential_resolver,
         "reveal_secret_snapshot_for_purpose",
-        lambda db, ref, purpose: SimpleNamespace(value="secret", revision=7),
+        helper,
     )
     resolver = credential_resolver.SqlMihomoControllerSecretResolver(
         cast(Session, SimpleNamespace())
@@ -97,3 +120,4 @@ def test_sql_controller_secret_resolver_requires_exact_purpose_and_revision(
     result = resolver.resolve("controller-ref")
     assert result.ref == "controller-ref"
     assert result.revision == 7
+    assert seen == ["MIHOMO_CONTROLLER_API_SECRET"]

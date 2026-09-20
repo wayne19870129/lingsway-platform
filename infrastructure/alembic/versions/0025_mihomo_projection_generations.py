@@ -4,6 +4,9 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects import mysql
+
+PRECISE_DATETIME = sa.DateTime(timezone=True).with_variant(mysql.DATETIME(fsp=6), "mysql")
 
 revision: str = "0025_mihomo_projection_generations"
 down_revision: str | None = "0024_usage_period_queue"
@@ -18,7 +21,7 @@ def upgrade() -> None:
             sa.Column("revision", sa.BigInteger(), primary_key=True, autoincrement=True),
             sa.Column("manifest_version", sa.String(32), nullable=False),
             sa.Column("desired_fingerprint", sa.String(64), nullable=False),
-            sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+            sa.Column("created_at", PRECISE_DATETIME, nullable=False),
         )
 
 

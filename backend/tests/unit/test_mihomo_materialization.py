@@ -101,3 +101,26 @@ def test_verified_materialization_repr_redacts_raw_content() -> None:
     assert "SECRET_YAML" not in rendered
     assert "secret-token-path" not in rendered
     assert "<redacted>" in rendered
+
+
+def test_receipt_verification_refreshes_identity_mapped_current_row(tmp_path: Path) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'receipts.db'}")
+    Base.metadata.tables["mihomo_transport_materializations"].create(engine)
+    path = tmp_path / "provider.yaml"
+    path.write_bytes(b"proxies: []\n")
+    with Session(engine) as db:
+        _receipt(db, path, source_revision=3)
+    with Session(engine) as session_a, Session(engine) as session_b:
+        old = session_a.scalar(select(MihomoTransportMaterialization))
+        assert old is not None
+        current = session_b.scalar(select(MihomoTransportMaterialization))
+        assert current is not None
+        current.source_revision = 4
+        session_b.commit()
+        old_content = old.content_hash
+        with pytest.raises(MaterializationVerificationError, match="IDENTITY_MISMATCH"):
+            verify_materialization(session_a, 1, path, "provider-a", source_revision=3)
+        refreshed = session_a.scalar(select(MihomoTransportMaterialization))
+        assert refreshed is not None
+        assert refreshed.source_revision == 4
+        assert refreshed.content_hash == old_content

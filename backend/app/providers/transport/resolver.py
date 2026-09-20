@@ -76,9 +76,7 @@ class SubscriptionTransportResolver:
             old_descriptor, old_revision, provider = existing
             if old_descriptor != descriptor:
                 raise TransportResolutionError("TRANSPORT_DESCRIPTOR_DRIFT")
-            snapshot = secret_loader(
-                descriptor.secret_ref, "TRANSPORT_SUBSCRIPTION_URL"
-            )
+            snapshot = secret_loader(descriptor.secret_ref, "TRANSPORT_SUBSCRIPTION_URL")
             if snapshot.revision != old_revision:
                 raise TransportResolutionError("TRANSPORT_SECRET_REVISION_DRIFT")
             return provider
@@ -95,6 +93,7 @@ class SubscriptionTransportResolver:
             descriptor.code,
             snapshot.value,
             cache_path=cache_path,
+            source_revision=snapshot.revision,
         )
         self._providers[descriptor.record_id] = (descriptor, snapshot.revision, provider)
         self._codes[descriptor.code] = descriptor.record_id

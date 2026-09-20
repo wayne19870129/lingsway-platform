@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import httpx
 import pytest
 
 from backend.app.core.secrets import SecretSnapshot
@@ -13,6 +14,7 @@ from backend.app.providers.transport.resolver import (
 def test_resolver_uses_full_descriptor_and_isolates_cache(tmp_path: Path) -> None:
     def loader(_ref: str, _purpose: str) -> SecretSnapshot:
         return SecretSnapshot("https://provider.invalid/private", 1)
+
     resolver = SubscriptionTransportResolver(tmp_path)
     first = TransportProviderDescriptor(1, "A", "SUBSCRIPTION", "transport/a/url")
     second = TransportProviderDescriptor(2, "B", "SUBSCRIPTION", "transport/b/url")
@@ -56,6 +58,7 @@ def test_resolver_validates_descriptor_at_trust_boundary(
 
 def test_resolver_rejects_resolution_after_shutdown(tmp_path: Path) -> None:
     resolver = SubscriptionTransportResolver(tmp_path)
+
     def loader(_ref: str, _purpose: str) -> SecretSnapshot:
         return SecretSnapshot("https://provider.invalid/private", 1)
 
@@ -64,9 +67,7 @@ def test_resolver_rejects_resolution_after_shutdown(tmp_path: Path) -> None:
     resolver.close()
 
     with pytest.raises(TransportResolutionError, match="SHUTDOWN"):
-        resolver.resolve(
-            TransportProviderDescriptor(2, "B", "SUBSCRIPTION", "ref-b"), loader
-        )
+        resolver.resolve(TransportProviderDescriptor(2, "B", "SUBSCRIPTION", "ref-b"), loader)
 
 
 def test_resolver_partial_close_is_truthful_and_idempotent_for_successes(
@@ -85,8 +86,10 @@ def test_resolver_partial_close_is_truthful_and_idempotent_for_successes(
         close,
     )
     resolver = SubscriptionTransportResolver(tmp_path)
+
     def loader(_ref: str, _purpose: str) -> SecretSnapshot:
         return SecretSnapshot("https://provider.invalid/private", 1)
+
     resolver.resolve(TransportProviderDescriptor(1, "A", "SUBSCRIPTION", "a"), loader)
     resolver.resolve(TransportProviderDescriptor(2, "B", "SUBSCRIPTION", "b"), loader)
 
@@ -97,3 +100,41 @@ def test_resolver_partial_close_is_truthful_and_idempotent_for_successes(
     with pytest.raises(ExceptionGroup, match="close failed"):
         resolver.close()
     assert calls == ["A", "B", "A"]
+
+
+def test_resolved_provider_materialization_proof_uses_bound_secret_revision(
+    tmp_path: Path,
+) -> None:
+    resolver = SubscriptionTransportResolver(tmp_path)
+    provider = resolver.resolve(
+        TransportProviderDescriptor(1, "A", "SUBSCRIPTION", "ref"),
+        lambda _ref, _purpose: SecretSnapshot("https://provider.invalid/private", 9),
+    )
+    provider._client = httpx.Client(  # noqa: SLF001
+        transport=httpx.MockTransport(
+            lambda _: httpx.Response(
+                200,
+                content=b"proxies:\n  - {name: A, type: trojan, server: a.invalid, port: 443}\n",
+            )
+        )
+    )
+    provider.sync_nodes()
+    assert provider.materialization_proof() is not None
+    assert provider.materialization_proof()[2] == 9  # type: ignore[index]
+
+
+def test_reused_transport_provider_keeps_bound_source_revision(tmp_path: Path) -> None:
+    resolver = SubscriptionTransportResolver(tmp_path)
+    descriptor = TransportProviderDescriptor(1, "A", "SUBSCRIPTION", "ref")
+    provider = resolver.resolve(descriptor, lambda _ref, _purpose: SecretSnapshot("url", 9))
+    reused = resolver.resolve(descriptor, lambda _ref, _purpose: SecretSnapshot("url", 9))
+    assert reused is provider
+    assert provider._source_revision == 9  # noqa: SLF001
+
+
+def test_transport_secret_revision_drift_still_fails_closed(tmp_path: Path) -> None:
+    resolver = SubscriptionTransportResolver(tmp_path)
+    descriptor = TransportProviderDescriptor(1, "A", "SUBSCRIPTION", "ref")
+    resolver.resolve(descriptor, lambda _ref, _purpose: SecretSnapshot("url", 9))
+    with pytest.raises(TransportResolutionError, match="SECRET_REVISION_DRIFT"):
+        resolver.resolve(descriptor, lambda _ref, _purpose: SecretSnapshot("url", 10))

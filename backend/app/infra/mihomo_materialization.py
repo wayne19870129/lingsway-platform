@@ -51,6 +51,7 @@ def verify_materialization(
         select(MihomoTransportMaterialization)
         .where(MihomoTransportMaterialization.owner_record_id == owner_record_id)
         .with_for_update()
+        .execution_options(populate_existing=True)
     )
     if receipt is None:
         raise MaterializationVerificationError("MIHOMO_MATERIALIZATION_RECEIPT_MISSING")

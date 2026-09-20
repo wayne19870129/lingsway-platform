@@ -12,7 +12,6 @@ from sqlalchemy.orm import Session
 from backend.app.models import (
     MihomoTransportMaterialization,
     ProviderStatus,
-    Secret,
     TransportCapacityAlert,
     TransportEndpointRecord,
     TransportProviderRecord,
@@ -100,10 +99,7 @@ def refresh_provider_inventory(
     provider_record.last_health_at = now
     proof = getattr(provider, "materialization_proof", lambda: None)()
     if proof is not None:
-        secret = db.scalar(select(Secret).where(Secret.secret_ref == provider_record.secret_ref))
-        if secret is None or secret.revision <= 0:
-            raise RuntimeError("Transport materialization source secret is unavailable")
-        cache_identity, content_hash = proof
+        cache_identity, content_hash, source_revision = proof
         receipt = db.scalar(
             select(MihomoTransportMaterialization)
             .where(MihomoTransportMaterialization.owner_record_id == provider_record.id)
@@ -119,7 +115,7 @@ def refresh_provider_inventory(
             receipt = MihomoTransportMaterialization(owner_record_id=provider_record.id)
             db.add(receipt)
         receipt.provider_code = provider_record.code
-        receipt.source_revision = secret.revision
+        receipt.source_revision = source_revision
         receipt.cache_identity = cache_identity
         receipt.content_hash = content_hash
         receipt.freshness_deadline = deadline

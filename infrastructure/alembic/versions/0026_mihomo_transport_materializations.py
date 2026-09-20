@@ -4,6 +4,9 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects import mysql
+
+PRECISE_DATETIME = sa.DateTime(timezone=True).with_variant(mysql.DATETIME(fsp=6), "mysql")
 
 revision: str = "0026_mihomo_transport_materializations"
 down_revision: str | None = "0025_mihomo_projection_generations"
@@ -23,9 +26,9 @@ def upgrade() -> None:
         sa.Column("source_revision", sa.BigInteger(), nullable=False),
         sa.Column("cache_identity", sa.String(160), nullable=False),
         sa.Column("content_hash", sa.String(64), nullable=False),
-        sa.Column("freshness_deadline", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("freshness_deadline", PRECISE_DATETIME, nullable=False),
+        sa.Column("created_at", PRECISE_DATETIME, nullable=False),
+        sa.Column("updated_at", PRECISE_DATETIME, nullable=False),
         sa.ForeignKeyConstraint(["owner_record_id"], ["transport_providers.id"]),
         sa.UniqueConstraint("owner_record_id", name="uq_mihomo_materialization_owner"),
     )
