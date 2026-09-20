@@ -2,13 +2,23 @@ from pathlib import Path
 
 import httpx
 import pytest
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
 
+from backend.app.core.database import Base
 from backend.app.core.secrets import SecretSnapshot
+from backend.app.models import (
+    MihomoTransportMaterialization,
+    Secret,
+    TransportProviderRecord,
+)
 from backend.app.providers.transport.resolver import (
     SubscriptionTransportResolver,
     TransportProviderDescriptor,
     TransportResolutionError,
 )
+from backend.app.workers.transport_sync import refresh_provider_inventory
 
 
 def test_resolver_uses_full_descriptor_and_isolates_cache(tmp_path: Path) -> None:
@@ -138,3 +148,66 @@ def test_transport_secret_revision_drift_still_fails_closed(tmp_path: Path) -> N
     resolver.resolve(descriptor, lambda _ref, _purpose: SecretSnapshot("url", 9))
     with pytest.raises(TransportResolutionError, match="SECRET_REVISION_DRIFT"):
         resolver.resolve(descriptor, lambda _ref, _purpose: SecretSnapshot("url", 10))
+
+
+def test_refresh_inventory_uses_bound_proof_revision_not_current_secret_revision(
+    tmp_path: Path,
+) -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    resolver = SubscriptionTransportResolver(tmp_path)
+    try:
+        with Session(engine) as db:
+            provider_record = TransportProviderRecord(
+                code="A",
+                slug="a",
+                name="A",
+                secret_ref="transport/a/url",
+            )
+            db.add(provider_record)
+            db.add(
+                Secret(
+                    secret_ref="transport/a/url",
+                    ciphertext="current-secret",
+                    purpose="TRANSPORT_SUBSCRIPTION_URL",
+                    revision=10,
+                )
+            )
+            db.commit()
+            db.refresh(provider_record)
+
+            provider = resolver.resolve(
+                TransportProviderDescriptor(1, "A", "SUBSCRIPTION", "transport/a/url"),
+                lambda _ref, _purpose: SecretSnapshot("https://provider.invalid/private", 9),
+            )
+            provider._client = httpx.Client(  # noqa: SLF001
+                transport=httpx.MockTransport(
+                    lambda _: httpx.Response(
+                        200,
+                        content=(
+                            b"proxies:\n  - {name: A, type: trojan, "
+                            b"server: a.invalid, port: 443}\n"
+                        ),
+                    )
+                )
+            )
+
+            assert refresh_provider_inventory(db, provider_record, provider) == 1
+            receipt = db.scalar(
+                select(MihomoTransportMaterialization).where(
+                    MihomoTransportMaterialization.owner_record_id == provider_record.id
+                )
+            )
+            proof = provider.materialization_proof()
+            assert proof is not None
+            assert receipt is not None
+            assert receipt.source_revision == 9
+            assert receipt.source_revision != 10
+            assert (receipt.cache_identity, receipt.content_hash) == proof[:2]
+    finally:
+        resolver.close()
+        engine.dispose()

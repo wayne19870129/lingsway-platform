@@ -4,7 +4,7 @@ from hashlib import sha256
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine, func, select
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from backend.app.core.database import Base
@@ -47,6 +47,22 @@ def _receipt(
     db.commit()
 
 
+def _receipt_state(db: Session) -> tuple[int, tuple[object, ...] | None]:
+    db.expire_all()
+    rows = db.scalars(select(MihomoTransportMaterialization)).all()
+    if not rows:
+        return 0, None
+    receipt = rows[0]
+    return 1, (
+        receipt.owner_record_id,
+        receipt.provider_code,
+        receipt.source_revision,
+        receipt.cache_identity,
+        receipt.content_hash,
+        receipt.freshness_deadline,
+    )
+
+
 def test_receipt_hash_mismatch_fails_closed_without_remint(
     tmp_path: Path, materialization_db: Session
 ) -> None:
@@ -54,12 +70,10 @@ def test_receipt_hash_mismatch_fails_closed_without_remint(
     path.write_bytes(b"proxies: []\n")
     _receipt(materialization_db, path)
     path.write_bytes(b"proxies: [tampered]\n")
+    before = _receipt_state(materialization_db)
     with pytest.raises(MaterializationVerificationError, match="HASH_MISMATCH"):
         verify_materialization(materialization_db, 1, path, "provider-a", source_revision=3)
-    assert (
-        materialization_db.scalar(select(func.count()).select_from(MihomoTransportMaterialization))
-        == 1
-    )
+    assert _receipt_state(materialization_db) == before
 
 
 def test_receipt_cache_identity_mismatch_fails_closed(
@@ -69,8 +83,10 @@ def test_receipt_cache_identity_mismatch_fails_closed(
     first.write_bytes(b"proxies: []\n")
     second.write_bytes(first.read_bytes())
     _receipt(materialization_db, first)
+    before = _receipt_state(materialization_db)
     with pytest.raises(MaterializationVerificationError, match="IDENTITY_MISMATCH"):
         verify_materialization(materialization_db, 1, second, "provider-a", source_revision=3)
+    assert _receipt_state(materialization_db) == before
 
 
 def test_missing_or_expired_receipt_fails_closed(
@@ -80,17 +96,22 @@ def test_missing_or_expired_receipt_fails_closed(
     path.write_bytes(b"proxies: []\n")
     with pytest.raises(MaterializationVerificationError, match="RECEIPT_MISSING"):
         verify_materialization(materialization_db, 1, path, "provider-a", source_revision=3)
+    assert _receipt_state(materialization_db) == (0, None)
     _receipt(materialization_db, path, freshness_deadline=datetime.now(UTC) - timedelta(seconds=1))
+    before = _receipt_state(materialization_db)
     with pytest.raises(MaterializationVerificationError, match="EXPIRED"):
         verify_materialization(materialization_db, 1, path, "provider-a", source_revision=3)
+    assert _receipt_state(materialization_db) == before
 
 
 def test_source_revision_mismatch_fails_closed(materialization_db: Session, tmp_path: Path) -> None:
     path = tmp_path / "provider.yaml"
     path.write_bytes(b"proxies: []\n")
     _receipt(materialization_db, path)
+    before = _receipt_state(materialization_db)
     with pytest.raises(MaterializationVerificationError, match="IDENTITY_MISMATCH"):
         verify_materialization(materialization_db, 1, path, "provider-a", source_revision=4)
+    assert _receipt_state(materialization_db) == before
 
 
 def test_verified_materialization_repr_redacts_raw_content() -> None:

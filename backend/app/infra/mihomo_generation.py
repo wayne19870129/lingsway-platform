@@ -40,7 +40,11 @@ def _manifest_value(value: object) -> object:
     if isinstance(value, Enum):
         return value.value
     if isinstance(value, datetime):
-        return value.astimezone(UTC).isoformat()
+        if value.tzinfo is None or value.utcoffset() is None:
+            normalized = value.replace(tzinfo=UTC)
+        else:
+            normalized = value.astimezone(UTC)
+        return normalized.isoformat()
     if isinstance(value, Mapping):
         return {str(key): _manifest_value(item) for key, item in value.items()}
     if isinstance(value, (tuple, list)):

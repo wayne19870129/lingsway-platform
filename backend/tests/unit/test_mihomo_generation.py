@@ -92,12 +92,37 @@ def test_manifest_datetime_and_order_are_canonical() -> None:
         {"a": 2, "z": 1},
     )
     first = build_projection_source_manifest(
-        replace(_desired(), transport_materializations=(first_material,))
+        replace(
+            _desired(),
+            transport_materializations=(first_material,),
+            dns={"enable": True, "ipv6": False},
+        )
     )
     second = build_projection_source_manifest(
-        replace(_desired(), transport_materializations=(second_material,))
+        replace(
+            _desired(),
+            transport_materializations=(second_material,),
+            dns={"ipv6": False, "enable": True},
+        )
     )
     assert manifest_fingerprint(first) == manifest_fingerprint(second)
+    naive = build_projection_source_manifest(
+        replace(
+            _desired(),
+            transport_materializations=(
+                replace(first_material, freshness_deadline=datetime(2026, 1, 1, 12)),
+            ),
+        )
+    )
+    aware = build_projection_source_manifest(
+        replace(
+            _desired(),
+            transport_materializations=(
+                replace(first_material, freshness_deadline=datetime(2026, 1, 1, 12, tzinfo=UTC)),
+            ),
+        )
+    )
+    assert manifest_fingerprint(naive) == manifest_fingerprint(aware)
 
 
 def test_sql_controller_secret_resolver_requires_exact_purpose_and_revision(
