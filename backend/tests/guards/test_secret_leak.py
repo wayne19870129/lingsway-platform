@@ -9,7 +9,7 @@ from backend.app.infra import credential_resolver
 from backend.app.infra.mihomo_generation import build_projection_source_manifest
 from backend.app.infra.mihomo_materialization import VerifiedMaterialization
 from backend.app.models import MihomoProjectionGeneration, MihomoTransportMaterialization
-from backend.app.providers.base import DesiredForwarderState
+from backend.app.providers.base import DesiredForwarderState, ForwarderEgressProxyDTO
 from backend.app.providers.forwarder.mihomo import ControllerSecretSnapshot
 from backend.app.providers.forwarder.mihomo_projection import TransportMaterialization
 
@@ -78,6 +78,17 @@ def test_mihomo_b2_b1_sensitive_values_never_render_or_log(
     for sentinel in (materialized, controller, token):
         assert sentinel not in rendered
         assert sentinel not in caplog.text
+
+
+def test_egress_proxy_repr_redacts_credential_ref() -> None:
+    value = ForwarderEgressProxyDTO(
+        name="egress-a",
+        protocol="socks5",
+        host="192.0.2.10",
+        port=1080,
+        credential_secret_ref="OPAQUE_REF_SENTINEL",
+    )
+    assert "OPAQUE_REF_SENTINEL" not in repr(value)
 
 
 def test_mihomo_controller_resolver_failure_is_secret_safe(
