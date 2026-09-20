@@ -498,6 +498,30 @@ different contents) and the PR #128 version won.
   `TASK-T16` is explicitly **not** the execution vehicle — its allowed-file
   list does not authorize `backend/app/models/`, `backend/app/infra/`, or
   `infrastructure/alembic/versions/`.
+- **✅ S04-B2-B2c added (2026-09-20, ADR-037).** The final chain is decided:
+  **client -> Xray (per-user routing) -> Mihomo listener
+  (127.0.0.1:{mihomo_listen_port}, one per egress) -> transport node ->
+  residential ISP egress -> target.** The rejected alternative had Mihomo
+  dialing the residential egress directly, which would have left transport
+  materialization and `EgressTransportAssignment` as dead weight.
+
+  Two questions that PR #164 first answered NO are now both **YES**, and the
+  reasons they were wrong differ. For the credential, the trace to the Xray
+  path was correct but it answered an implementation question in place of an
+  architecture one. For the assignment, "the semantics were never defined"
+  was a fact used as a conclusion — defining them is what an ADR is for.
+  ADR-037 defines both: `ForwarderEgressProxyDTO` +
+  `DesiredForwarderState.egress_proxies`, `dialer-proxy` as the only chain
+  encoding, ADR-019 §7's precedence reused verbatim for the credential, and
+  opaque ref + `Secret.revision` in the manifest with plaintext resolved only
+  at the forwarder render boundary.
+
+  **Two consequences worth carrying in.** B2-B2 (PR #163) stays free of all
+  of this and keeps its original five allowed files; B2-B2c has its own list
+  and may touch `providers/base.py`. And `dialer-proxy` has **not** been
+  tested against the pinned `metacubex/mihomo:v1.19.27` — B2-B2c must confirm
+  it during candidate validation and stop rather than substitute an encoding.
+
 - **S04-C:** **NOT STARTED.** `FORWARDER_PROVIDER=mihomo` remains NOT
   selectable; no deployment authorization exists.
 

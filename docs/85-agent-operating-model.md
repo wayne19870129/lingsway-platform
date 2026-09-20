@@ -627,6 +627,13 @@ Claude 的产出形态是：ADR、`docs/81-reviews/REVIEW-*.md`、以及直接�
 | **S04-B2-B2** concrete DB desired loader + preparation transaction | **可以直接派** —— 没有任何待解除的阻塞项。deployment 常量落点已由 **ADR-035** 裁定并逐条写进 TASK |
 | **S04-B2-B3 / B4** | 依次排在 B2-B2 之后（单向依赖，见 TASK） |
 
+> **2026-09-20（第二次更新，ADR-037）：链路与 Q1/Q2 已最终裁定。**
+> 最终链路是 **客户端 → Xray → Mihomo listener → transport node → 住宅 egress**。
+> **ACTIVE `EgressTransportAssignment` 与 egress credential 都是 effective input**，
+> A→B 都必须改变 fingerprint。`dialer-proxy` 是唯一允许的链式编码。
+> 契约写死在 ADR-037 §2/§4，**不要让 Codex 自己选抽象**。
+> **B2-B2 与 B2-B2c 的 allowed files 不同**，派活时不要混。
+>
 > **2026-09-20：原来写在这里的 "⛔ 被 ADR-035 阻塞" 已经解除。**
 > ADR-035 裁定：`external-controller` → validated `Settings` 新字段
 > `mihomo_external_controller`；`api-secret-ref` → repo-owned constant
@@ -723,9 +730,10 @@ S07 一个任务里，「允许修改的文件」漏项**连续发生两次**：
 
 | # | 任务 | TASK 文件 | 闸门状态 |
 |---|---|---|---|
-| 1 | **S04-B2-B2** concrete DB desired loader + preparation transaction | `docs/82-tasks/TASK-S04-mihomo-activation.md` | ✅ **无阻塞，可直接派**。B2-B1 已合并（#156），ADR-035 已裁定落点。**一个 checkpoint 一个 PR，且必须与 S04-C 分开** |
-| 2 | **S04-B2-B3** freshness 三点复核 / recovery / runtime exact readback | 同上 | 等 B2-B2 合并 |
-| 3 | **S04-B2-B4** 完整 integration / guard / migration / concurrency 验收 | 同上 | 等 B2-B3 合并 |
+| 1 | **S04-B2-B2** concrete DB desired loader + preparation transaction | `docs/82-tasks/TASK-S04-mihomo-activation.md` | **在途：PR #163**。按 ADR-037 需返工（撤 `subscription-*` group、status 三状态、assignment 改为 effective、rollback 自持）。**先合规格 PR，再派返工** |
+| 2 | **S04-B2-B2c** egress 链路与凭据契约 | 同上 | ⛔ **前置：`ADR-037` 已合并**。新增 `ForwarderEgressProxyDTO` / `egress_proxies` / `dialer-proxy` / render 边界凭据解析。**allowed files 与 B2-B2 不同，见 TASK** |
+| 3 | **S04-B2-B3** freshness 三点复核 / recovery / runtime exact readback | 同上 | 等 B2-B2c 合并 |
+| 4 | **S04-B2-B4** 完整 integration / guard / migration / concurrency 验收 | 同上 | 等 B2-B3 合并 |
 
 （**S07 已于 2026-09-19 完成并合并**，PR #152 / `a9d5bd2`；
 **S04-B2-B1 已于 2026-09-19 合并**，PR #156；
@@ -890,11 +898,12 @@ User 全权授权 Claude 决定，结论写在 ADR-027 §7.1–7.4。
 其中只有一个被 git 判为冲突，另一个差点静默合入。**认领新的 ADR / TASK 编号
 时，要对着当前 `main` 加上所有 open PR 一起查，不能只看 `main`。**
 
-当前已用到：**ADR-036**、**TASK-S11**。下一个分别是 **ADR-037**、**TASK-S12**。
+当前已用到：**ADR-037**、**TASK-S11**。下一个分别是 **ADR-038**、**TASK-S12**。
 
-> **2026-09-20 更新**：`ADR-035`（Mihomo deployment 常量落点）与
-> `ADR-036`（取消每阶段回 Claude 的固定卡点）**都已落地**。
-> 下一个可用的 ADR 编号是 **ADR-037**。
+> **2026-09-20 更新**：`ADR-035`（Mihomo deployment 常量落点）、
+> `ADR-036`（取消每阶段回 Claude 的固定卡点）与
+> `ADR-037`（Mihomo 出站链路 + egress credential 契约）**都已落地**。
+> 下一个可用的 ADR 编号是 **ADR-038**。
 >
 > **ADR 仍由 Claude 独占撰写**（ADR-036 没有改这一条）；**TASK 编号现在由你
 > 认领**，认领时按下面那条规则对着 `main` **加上所有 open PR** 一起查。
