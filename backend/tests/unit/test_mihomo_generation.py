@@ -60,11 +60,16 @@ def test_manifest_includes_egress_proxies_without_reordering() -> None:
     egress_manifest = cast(list[dict[str, object]], manifest["egress_proxies"])
     assert MANIFEST_VERSION == "2"
     assert [item["name"] for item in egress_manifest] == ["egress-a", "egress-b"]
-    assert egress_manifest[0]["transport_proxy_name"] == "transport-node"
-    assert egress_manifest[0]["transport_node_identity"] == [
-        "node", "192.0.2.20", 443
-    ]
-    assert egress_manifest[0]["credential_secret_ref"] == "egress/ref"
+    assert egress_manifest[0] == {
+        "name": "egress-a",
+        "protocol": "socks5",
+        "host": "192.0.2.10",
+        "port": 1080,
+        "credential_secret_ref": "egress/ref",
+        "credential_revision": 3,
+        "transport_proxy_name": "transport-node",
+        "transport_node_identity": ["node", "192.0.2.20", 443],
+    }
 
 
 def test_manifest_version_is_bumped_for_egress_proxies_shape() -> None:
