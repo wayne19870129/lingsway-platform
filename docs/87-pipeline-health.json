@@ -6,7 +6,7 @@
     "breaker": "false",
     "merged_without_user_since_breaker_on": 0
   },
-  "generated_at": "2026-09-20T00:28:08.276Z",
+  "generated_at": "2026-09-20T02:20:00.605Z",
   "judgement_only_signals": [
     "SAME_FINDING_FAILED_TWICE",
     "PASS_BUT_CRITICAL"
@@ -14,23 +14,7 @@
   "main": {
     "ci_conclusion": "success",
     "commits_since_last_digest": 0,
-    "sha": "0622f5e5719dcd265105113b9a3ac0871759a754"
+    "sha": "192373f0644a2793193cbe6bfdb84248856911ee"
   },
-  "open_prs": [
-    {
-      "age_hours": 14.03,
-      "ci": "success",
-      "head_sha": "dd9fd1a3e4dc4fdca90cee791102ac25e882ba6f",
-      "hours_since_last_commit": 0.23,
-      "labels": [
-        "risk:high",
-        "no-automerge"
-      ],
-      "latest_verdict_on_head": "NEEDS_CHANGES",
-      "mergeable": null,
-      "number": 156,
-      "review_rounds": 2,
-      "touches_high_risk_paths": true
-    }
-  ]
+  "open_prs": []
 }
