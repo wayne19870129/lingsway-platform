@@ -732,8 +732,10 @@ S07 一个任务里，「允许修改的文件」漏项**连续发生两次**：
 |---|---|---|---|
 | 1 | **S04-B2-B2** concrete DB desired loader + preparation transaction | `docs/82-tasks/TASK-S04-mihomo-activation.md` | **在途：PR #163**。按 ADR-037 需返工（撤 `subscription-*` group、status 三状态、assignment 改为 effective、rollback 自持）。**先合规格 PR，再派返工** |
 | 2 | **S04-B2-B2c** egress 链路与凭据契约 | 同上 | ⛔ **前置：`ADR-037` 已合并**。新增 `ForwarderEgressProxyDTO` / `egress_proxies` / `dialer-proxy` / render 边界凭据解析。**allowed files 与 B2-B2 不同，见 TASK** |
-| 3 | **S04-B2-B3** freshness 三点复核 / recovery / runtime exact readback | 同上 | 等 B2-B2c 合并 |
-| 4 | **S04-B2-B4** 完整 integration / guard / migration / concurrency 验收 | 同上 | 等 B2-B3 合并 |
+| 3 | **S04-B2-B2d** Xray → Mihomo 交接 | 同上 | ⛔ 前置：ADR-037 + B2-B2c。Xray outbound 改指 `127.0.0.1:{mihomo_listen_port}`，该跳无凭据。**没有这一段链路 B 不可达** |
+| 4 | **S04-B2-B3** freshness 三点复核 / recovery / runtime exact readback | 同上 | 等 B2-B2d 合并 |
+| 5 | **S04-B2-B4** 完整 integration / guard / migration / concurrency 验收 | 同上 | 等 B2-B3 合并 |
+| — | **ACTIVE assignment 的 writer** | **待定** | ⛔ **S04-C 激活的硬前置，且尚无 owner**。分配策略未被任何 ADR 决定 —— 按 ADR-036 §2 **报告 User**，不要自行发明 |
 
 （**S07 已于 2026-09-19 完成并合并**，PR #152 / `a9d5bd2`；
 **S04-B2-B1 已于 2026-09-19 合并**，PR #156；

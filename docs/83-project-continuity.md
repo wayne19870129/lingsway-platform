@@ -516,11 +516,31 @@ different contents) and the PR #128 version won.
   opaque ref + `Secret.revision` in the manifest with plaintext resolved only
   at the forwarder render boundary.
 
-  **Two consequences worth carrying in.** B2-B2 (PR #163) stays free of all
+  **Four consequences worth carrying in.** B2-B2 (PR #163) stays free of all
   of this and keeps its original five allowed files; B2-B2c has its own list
-  and may touch `providers/base.py`. And `dialer-proxy` has **not** been
-  tested against the pinned `metacubex/mihomo:v1.19.27` — B2-B2c must confirm
-  it during candidate validation and stop rather than substitute an encoding.
+  and may touch `providers/base.py`. `dialer-proxy` has **not** been tested
+  against the pinned `metacubex/mihomo:v1.19.27` — B2-B2c must confirm it
+  during candidate validation and stop rather than substitute an encoding.
+
+  Third, chain B **requires changing Xray**, which the ADR's first draft
+  denied in the same breath as choosing chain B.
+  `provisioning_state.py:398-403` still builds
+  `XrayOutboundDTO(host=endpoint.host, port=endpoint.port, ...)`, so Xray
+  dials the residential egress directly and never reaches
+  `127.0.0.1:{mihomo_listen_port}` — chain B was unreachable as specified.
+  ADR-037 §1a now pins it: under Mihomo mode the outbound targets the
+  loopback listener with **no credential on that hop**, and
+  `XrayOutboundDTO.credential_secret_ref` becomes `str | None`, which
+  supersedes that one clause of ADR-019 §1 while everything else in ADR-019
+  is carried over unchanged. That work is its own checkpoint, **B2-B2d**.
+
+  Fourth, and the one with no owner: **nothing writes
+  `egress_transport_assignments`**. ADR-037 §2.1b deliberately does not
+  invent an allocation policy — capacity, health, region and rebalancing are
+  undecided. It is not deferred, though: §2.1a makes "exactly one ACTIVE
+  assignment per in-scope egress" a fail-closed gate on activation, so
+  Mihomo cannot go to production until a writer exists. Per ADR-036 §2 that
+  writer's spec goes to the user, not straight to Claude.
 
 - **S04-C:** **NOT STARTED.** `FORWARDER_PROVIDER=mihomo` remains NOT
   selectable; no deployment authorization exists.

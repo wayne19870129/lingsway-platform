@@ -7,14 +7,16 @@
   `EgressBinding.credential_secret_ref` 的 provider-neutral 表示；
   它们进入 `DesiredForwarderState` / canonical manifest 的方式；
   plaintext resolve 边界；Mihomo document 的链式表达
-- 承接：**ADR-019**（Xray desired state 与 credential boundary）——
-  credential 部分逐条对齐它，不另起一套
+- 承接 / 部分 supersede：**ADR-019**（Xray desired state 与 credential boundary）——
+  credential 部分逐条对齐它；**但 §1 的 `credential_secret_ref` 非可空结论
+  在 Mihomo 模式下被本 ADR §1a.4 supersede**，逐条对照见 §1a.3
 - 补充：ADR-023（全量渲染与三类输入）、ADR-024（transport 多 provider 所有权）、
   ADR-025（generation authority + canonical manifest）、ADR-035（deployment 常量）。
   **不取代其中任何一条**
 - 触发：`AGENTS.md` 铁律 5 —— 本决定会修改 `backend/app/providers/base.py`
   的 provider-neutral contract，必须先有 ADR
-- 实施 TASK：`docs/82-tasks/TASK-S04-mihomo-activation.md`（**B2-B2c**）
+- 实施 TASK：`docs/82-tasks/TASK-S04-mihomo-activation.md`
+  （**B2-B2c** forwarder 侧契约、**B2-B2d** Xray 交接、**S04-C** 激活闸门）
 
 > **本 ADR 不实现任何代码。** B2-B2c 在本 ADR 合并进 `main` 之后才可开工。
 
@@ -70,6 +72,131 @@ B（采纳）  客户端 → Xray → Mihomo listener → transport node → 住
 > **不由 Mihomo 决定**。Mihomo 不做 per-subscription 路由 ——
 > 这就是 PR #163 里 `subscription-{id}` proxy-group 必须撤掉的根本原因。
 
+## 1a. Xray → Mihomo 的交接契约（**链路 B 必须改 Xray，这一节把它定死**）
+
+> **这一节是 2026-09-20 审查补上的。** 初稿选了链路 B，却同时在 §8 写着
+> 「不改 Xray 既有行为」—— **两句不能同时成立**，而且 §1 的链路在当前代码下
+> **根本不可达**。
+
+### 1a.1 当前实现（实测，不是推测）
+
+`backend/app/infra/provisioning_state.py::full_desired_routing_snapshot()`
+（`:296`）构造的是：
+
+```python
+# provisioning_state.py:398-403
+outbound = XrayOutboundDTO(
+    tag=route.outbound_tag,
+    host=endpoint.host,        # ← 住宅 egress 的 host
+    port=endpoint.port,        # ← 住宅 egress 的 port
+    protocol=endpoint.protocol,
+    credential_secret_ref=selected_ref,
+)
+```
+
+**Xray 直接拨住宅 egress，永远不会去 `127.0.0.1:{mihomo_listen_port}`。**
+因此即使 B2-B2c 与当前定义的 S04-C 全部实现完，**链路 B 仍然不可达**。
+
+### 1a.2 裁决：Mihomo 模式下 Xray outbound 指向 loopback
+
+> **`FORWARDER_PROVIDER=mihomo` 生效时，每个 active route 的 Xray outbound
+> 必须指向 `127.0.0.1:{该 route 对应 EgressEndpoint.mihomo_listen_port}`，
+> protocol 为 `socks`，且 `credential_secret_ref` 为 `None`。**
+>
+> **住宅 egress 的 `host`/`port`/凭据不再出现在 Xray 这一跳** ——
+> 它们属于 **Mihomo → 住宅**那一跳，由 §3 的 `egress_proxies` 承载。
+
+**非 Mihomo 模式（`FORWARDER_PROVIDER != "mihomo"`）保持现状不变**：
+Xray 直拨住宅并解析凭据。两种模式的边界必须由测试证明，见 §1a.5。
+
+### 1a.3 凭据归属：本 ADR supersede 了 ADR-019 的哪一部分
+
+**必须逐条说清楚，不能笼统说「沿用 ADR-019」。**
+
+| ADR-019 的结论 | 在 Mihomo 模式下 |
+|---|---|
+| §1 `XrayOutboundDTO` 的 `tag` / `host` / `port` / `protocol` 语义 | **沿用**，只是 `host`/`port` 现在指向 loopback Mihomo listener |
+| §1 `credential_secret_ref: str`（**非可空**） | **被 supersede** —— 见 §1a.4 |
+| §4 plaintext lifecycle（明文只在 resolver→renderer→runtime 文件） | **沿用**，一个字不改 |
+| §7 credential precedence（binding override → endpoint 回落） | **沿用**，但它现在服务的是 **Mihomo→住宅**那一跳（本 ADR §3.2），**不再**是 Xray→住宅 |
+| §2 full-snapshot invariant / current-read / lock span | **沿用**，一个字不改 |
+| §5 CandidateConfig redaction、§6 secret payload 格式 | **沿用** |
+
+> **为什么 Xray→Mihomo 这一跳不需要凭据**：Mihomo 的 `mixed` listener 绑在
+> `127.0.0.1`，**外部不可达**；能连到它的进程已经在这台机器上了。
+> 给这一跳再造一份 secret 只增加轮换面与误配置面，**换不到任何安全性**。
+
+### 1a.4 `XrayOutboundDTO.credential_secret_ref` 变为 `str | None`
+
+```python
+credential_secret_ref: str | None = field(repr=False, default=None)
+```
+
+**`None` 的合法性由一条硬规则约束，不是想省就省：**
+
+| 条件 | 要求 |
+|---|---|
+| `host` 是 loopback（`127.0.0.1`）且 port 等于某个 `mihomo_listen_port` | `credential_secret_ref` **必须**为 `None` |
+| 其它任何 outbound | `credential_secret_ref` **必须**非空；为 `None` ⇒ `XRAY_OUTBOUND_CREDENTIAL_REQUIRED` fail closed |
+
+**composer 与 resolver 的相应改动：**
+
+- `xray_composition.py:385-389` 当前对每个 outbound 强制要求可解析的
+  username/password ⇒ 必须改为：`credential_secret_ref is None` 时渲染
+  **不带 `users` 的 socks outbound**；非 `None` 时行为完全不变。
+- `xray_file.py:129-134` 当前对**每个** outbound 都 `resolver.resolve()` ⇒
+  必须跳过 `None`，**且不得因此放宽对非 `None` 的解析失败处理**。
+
+### 1a.5 这条改动的四轴范围闭包（**已实测，不要重做**）
+
+沿四条轴各走一遍，对着 `main` 实测 `XrayOutboundDTO` 的**全部**出现处：
+
+| 轴 | 结果 |
+|---|---|
+| **函数 / 协议** | `providers/base.py`（DTO 定义）、`provisioning_state.py`（唯一生产构造点）、`xray_composition.py`（消费）、`xray_file.py`（消费）、`ops/gateway/render_xray_routes.py`（ops 入口，**也构造 DTO**） |
+| **数据库列** | 不新增、不修改任何列。`mihomo_listen_port` 已存在且 `unique=True` |
+| **API 契约** | 无 API 表面变化 |
+| **渲染字段** | Xray outbound 的 `settings.servers[].users` 在 loopback 跳上消失；其余不变 |
+
+**实测到的 `XrayOutboundDTO` 构造/引用文件共 13 个**：
+
+```
+backend/app/providers/base.py
+backend/app/infra/provisioning_state.py
+backend/app/providers/gateway/xray_composition.py       # 经 DesiredRoutingState 消费
+backend/app/providers/gateway/xray_file.py              # 经 DesiredRoutingState 消费
+ops/gateway/render_xray_routes.py
+backend/tests/unit/test_desired_routing_snapshot.py
+backend/tests/unit/test_xray_composition.py
+backend/tests/unit/test_xray_render.py
+backend/tests/unit/test_xray_provider_standalone_parity.py
+backend/tests/unit/test_credential_infra.py
+backend/tests/unit/test_domain.py
+backend/tests/unit/test_services_wiring.py
+backend/tests/guards/test_xray_writer_guard.py
+backend/tests/guards/test_safe_reload.py
+backend/tests/integration/test_provisioning_phase_boundary.py
+```
+
+> **默认值 `= None` 是刻意的**：它让上面十几个只关心 tag/host/port 的构造点
+> **不需要逐个改**。只有真正涉及 loopback 语义的地方才需要动。
+
+**另有一条已知的连带约束**：
+`backend/tests/unit/test_gateway_reconciliation_contract.py:39` 断言源码里存在
+字面量 `"full_desired_routing_snapshot(db)"` —— **不要重命名这个函数**。
+
+### 1a.6 这属于哪个 checkpoint
+
+**不属于 B2-B2，也不属于 B2-B2c。** 它是一个独立的 checkpoint（TASK 里命名为
+**B2-B2d**），因为它动的是 **gateway（Xray）侧**，与 forwarder 侧的
+`egress_proxies` 是两组互不重叠的文件。
+
+**依赖**：`B2-B2c`（egress_proxies 存在）→ `B2-B2d`（Xray 交接）→ `S04-C`（激活）。
+
+**B2-B2d 不放行 registry**，`FORWARDER_PROVIDER=mihomo` 在它结束时**仍被拒绝**；
+它只保证「一旦放行，链路 B 是通的」。
+
+
 ## 2. `EgressTransportAssignment` 的语义与表示（Q1 = YES）
 
 ### 2.1 ACTIVE assignment 表示什么
@@ -91,8 +218,46 @@ B（采纳）  客户端 → Xray → Mihomo listener → transport node → 住
 
 **每个 in-scope egress 至多一条 ACTIVE assignment**；出现两条即
 `MIHOMO_TRANSPORT_ASSIGNMENT_AMBIGUOUS` fail closed。
-**没有 ACTIVE assignment 的 egress 允许存在**，其 proxy 不带 dialer（直连住宅），
-这是合法的过渡态，不是错误。
+
+**关于「没有 ACTIVE assignment 的 egress」——分阶段，且终点是 fail closed：**
+
+| 阶段 | 语义 |
+|---|---|
+| **B2-B2 / B2-B2c / B2-B3 / B2-B4（未激活）** | **允许**。该 egress 的 proxy 不带 `dialer-proxy`。这是**未激活阶段的过渡状态**，便于分段实现与测试 |
+| **S04-C 生产激活及其之后** | **禁止**。见 §2.1a 的激活闸门 |
+
+> **⚠️ 这条限定是 2026-09-20 审查补上的，原文只写了「允许，不是错误」。**
+> 那样写会让过渡态一路带进生产：激活后部分出口绕过 transport 直连住宅，
+> **实际退回被否决的链路 A**，而且没有任何机制会报错。
+
+### 2.1a 生产激活闸门（fail closed）
+
+> **在 `FORWARDER_PROVIDER=mihomo` 被 registry 放行之前，必须机械验证：
+> 每个 in-scope egress（`status IN (AVAILABLE, ASSIGNED, DEGRADED)`）
+> 有且仅有一条 `state == ACTIVE` 的 `EgressTransportAssignment`。**
+>
+> 缺失或多于一条 ⇒ **拒绝激活**，不得放行 registry。
+
+**这条闸门属于 S04-C，不属于 B2-B。**
+
+### 2.1b ACTIVE assignment 的 writer —— **尚无 owner，这是一条已命名的未决项**
+
+**必须说清楚，不能含糊过去：** 本 ADR 定义的是 **reader 语义**。
+**当前仓库里没有任何代码写这张表**（实测：除 model 定义与迁移外零引用），
+本 ADR **也不定义 writer**。
+
+**不定义的原因是它是一个独立的决策，不是因为不重要**：
+「哪个 egress 配哪个 transport node」涉及容量、健康度、地域、重平衡策略——
+这些都没有被任何 ADR 或 TASK 决定过。**我不在这里发明一套分配算法。**
+
+**但这不是「以后再看」**，因为 §2.1a 的闸门把它变成了硬约束：
+
+> **在 writer 存在并真正产出 ACTIVE assignment 之前，Mihomo 生产激活被 §2.1a
+> 机械阻断。** 不存在「先激活、assignment 以后补」的路径。
+
+**依赖关系**：`writer checkpoint` → `S04-C 激活`。
+**禁止**：人工改库、隐藏 seed、或「表以后自然会有数据」。
+writer 的分配策略需要它自己的规格（TASK 或 ADR，由 User 决定何时做）。
 
 ### 2.2 assignment 如何对应到一个 materialized proxy
 
@@ -346,7 +511,14 @@ structured logging、runtime-independent snapshot、PR 与文档正文。
 - **不改 `SqlAlchemyCredentialResolver` 的 purpose-unbound 现状**（ADR-019 的既有属性）。
   要给 egress credential 加 purpose 绑定，需单独评估——它会同时影响 Xray 路径。
 - **不授权**生产激活、不授权 `build_registry()` 放行 `FORWARDER_PROVIDER=mihomo`、
-  不授权部署、不授权创建或轮换任何真实 Secret、不改 Xray 既有行为。
+  不授权部署、不授权创建或轮换任何真实 Secret。
+
+> **⚠️ 本节初稿写着「不改 Xray 既有行为」，那句话是错的，已删除（2026-09-20 审查指出）。**
+> §1 选定链路 B **必然**要求改 Xray 的 outbound 目标——两句不能同时成立。
+> 正确的契约见 §1a。**我的失误很具体**：我读了
+> `provisioning_state.py:398-403` 并把它当作 credential 归属的证据，
+> 却没注意**同一段代码同时约束了链路走向**。用一处代码回答了一个问题，
+> 忘了它对另一个问题同样有约束力。
 - **不重新讨论 ADR-035 已裁定的 deployment constants。**
 
 ## 9. Testing requirements
