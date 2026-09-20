@@ -1,8 +1,9 @@
 from pathlib import Path
+from typing import cast
 
 import httpx
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import Table, create_engine, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
@@ -11,6 +12,7 @@ from backend.app.core.secrets import SecretSnapshot
 from backend.app.models import (
     MihomoTransportMaterialization,
     Secret,
+    TransportEndpointRecord,
     TransportProviderRecord,
 )
 from backend.app.providers.transport.resolver import (
@@ -158,7 +160,18 @@ def test_refresh_inventory_uses_bound_proof_revision_not_current_secret_revision
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
-    Base.metadata.create_all(engine)
+    Base.metadata.create_all(
+        engine,
+        tables=cast(
+            list[Table],
+            [
+                TransportProviderRecord.__table__,
+                TransportEndpointRecord.__table__,
+                MihomoTransportMaterialization.__table__,
+                Secret.__table__,
+            ],
+        ),
+    )
     resolver = SubscriptionTransportResolver(tmp_path)
     try:
         with Session(engine) as db:
