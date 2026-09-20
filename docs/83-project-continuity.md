@@ -11,6 +11,77 @@ state, reviews, and checks. Do not rely on an older chat or SHA snapshot.
 
 ## 2. Roles and workflow
 
+> ## ADR-036 (2026-09-20) is the current split — read this before the rest
+>
+> **The fixed per-stage checkpoint back to Claude is gone.** ChatGPT now owns
+> day-to-day execution end to end: it writes the TASK files, maintains the
+> dispatch queue, splits the execution stages, dispatches Codex desktop,
+> reviews the result, handles rework, and **moves straight on to the next
+> stage in the already-accepted plan** when one finishes. Claude owns the
+> overall architecture, the overall plan, and the ADRs, and runs **only when
+> the user triggers it**. Every PR is merged by the user by hand.
+>
+> | Role | Owns |
+> |---|---|
+> | **Claude** | overall architecture; overall plan; **ADRs**; stage review/adjustment **when the user asks**. No per-checkpoint gate back to Claude. |
+> | **ChatGPT** | drives execution within the accepted architecture/plan; splits stages; **writes TASK files**; dispatches Codex; reviews Codex PRs; handles rework; proceeds to the next planned stage |
+> | **Codex** | implements; tests; opens PRs; reworks per review; **never widens architectural scope on its own** |
+> | **User** | final decisions; **manual merge**; decides when to call Claude |
+>
+> **What moved**: `docs/82-tasks/**` (Claude-exclusive → ChatGPT writes it),
+> the "must have a TASK file first" threshold (was a gate on Claude → ChatGPT
+> judges it), `docs/85` §5's dispatch queue, and the end-of-stage
+> confirmation. **What did not move**: `docs/80-decisions/**` and
+> `docs/81-reviews/**` stay Claude-exclusive; `AGENTS.md`'s iron rule 5 (an
+> ADR before any architecture change) is untouched.
+>
+> **The one remaining architectural stop does not point at Claude.** When
+> ChatGPT concludes an accepted ADR's conclusion must change, it **stops
+> pushing that change forward, reports to the user**, and the user decides
+> whether to wake Claude. The old "every checkpoint automatically goes back to
+> Claude" is **not** restored. Nothing else is a stop: how to split a task,
+> how fine an instruction card should be, which file list to authorize, which
+> implementation to pick, whether to write a TASK at all, how to handle
+> rework, which planned stage to start next — ChatGPT decides.
+>
+> **The cost, stated rather than hidden** (ADR-036 §4): the paragraph below
+> about "the specifier and the reviewer are still different agents" **is no
+> longer true**. ChatGPT now specifies, dispatches and reviews, so spec-level
+> defects have lost their independent finder. Historically that class of
+> defect appeared three times (S07's allowed-file list twice, S11's missing
+> `risk-classify.yml` checkout premise) and **none of the three was caught by
+> review** — two by CI, one by the executor stopping and reporting. What still
+> backstops it: the implementer is a different agent; ADRs stay
+> Claude-exclusive so ChatGPT cannot self-authorize an architecture change;
+> **the user merges every PR by hand** (mechanical since PR #158); nine
+> required status checks; and the user's occasional stage review. Consequence
+> for ChatGPT: the four-axis scope-closure check when writing a TASK matters
+> more than before, not less.
+>
+> **`AGENTS.md` and `CLAUDE.md` were not edited** (both require the user's
+> confirmation). `AGENTS.md` lines 99 and 112 and `CLAUDE.md`'s "Before
+> implementation" item 3 still say `docs/82-tasks/**` is Claude-exclusive;
+> ADR-036 overrides them under the repository's own ADR > AGENTS.md order, and
+> ADR-036 §3 records the exact three-line edit if the user wants them cleaned
+> up.
+>
+> **No background Claude exists, and none may be added** (verified 2026-09-20,
+> ADR-036 §5): zero Routines; `claude.yml` triggers only on an
+> `issue_comment` containing `@claude` from the user; `pipeline-health.yml`
+> runs every two hours but contains no LLM and no Claude credential, by
+> deliberate design. ADR-036 forbids adding any Claude-side Routine, schedule,
+> auto-wake or periodic review.
+>
+> **Unchanged by ADR-036**: one task / one PR; `AGENTS.md`'s 禁止自主执行
+> table; credential and secret boundaries; the auto-merge breaker at `false`;
+> manual production deployment; and every technical conclusion in ADR-035 and
+> S04.
+>
+> ---
+>
+> **The rest of this section is the pre-ADR-036 state.** It is kept because its
+> reasoning is still the reason the current arrangement costs what it costs.
+>
 > **ADR-032 + ADR-033 (both 2026-09-19) are the current split; together they
 > supersede ADR-030's.** **ChatGPT directs and reviews; Codex *desktop*
 > implements; Claude Code designs the architecture, writes the ADRs/TASKs,
@@ -36,7 +107,11 @@ state, reviews, and checks. Do not rely on an older chat or SHA snapshot.
 > staying Claude-exclusive: ChatGPT reviews against a TASK it did not write, so
 > the specifier and the reviewer are still different agents even though the
 > dispatcher and the reviewer are the same one. Relaxing that write boundary
-> silently removes the only thing making the review independent. Second,
+> silently removes the only thing making the review independent.
+> **→ ADR-036 (2026-09-20) relaxed exactly that boundary, deliberately and
+> with the cost stated. This sentence is therefore no longer a description of
+> the current arrangement — it is the reason ADR-036 costs what it costs. See
+> the box at the top of this section.** Second,
 > **unattended operation is off the table** (ADR-032 §4) — Codex desktop runs
 > on the user's machine, so nothing advances while it is off. CI, auto-merge
 > and the health digest still run without it. Third, **nobody reads the health
@@ -591,6 +666,13 @@ not the invariants.
 > point**. The user's plan is to accumulate a large batch of implementation
 > work before calling for a review, so the further apart the rows, the more
 > this matters.
+>
+> **2026-09-20 (ADR-036) makes this table matter more, not less.** ChatGPT now
+> writes the specs it reviews against, so the user-triggered stage review is
+> the only place a spec-level defect gets an independent reader. Verified the
+> same day: nothing wakes Claude on a schedule — zero Routines, `claude.yml`
+> fires only on the user's `@claude` comment, and `pipeline-health.yml` holds
+> no LLM and no Claude credential (ADR-036 §5, which also forbids adding one).
 
 Every audit appends a row: **date, the `main` SHA audited, what was actually
 run, what was found, whether the breaker was pulled.** An audit that only
