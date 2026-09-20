@@ -210,7 +210,7 @@ authority、第二个 writer、临时 runtime fallback、或"先用 runtime 兜�
 - DNS candidate schema gate **立即生效**（它在 `_validate_sections()` 内，
   是既有渲染路径的一部分）。
 
-**允许修改的文件**（均已在 B2-B 总清单内，无新增）：
+**允许修改的文件**：
 ```
 backend/app/infra/mihomo_materialization.py
 backend/app/infra/mihomo_generation.py
@@ -218,6 +218,7 @@ backend/app/infra/credential_resolver.py
 backend/app/models/ops.py
 backend/app/models/__init__.py
 backend/app/providers/transport/subscription.py
+backend/app/providers/transport/resolver.py              # 2026-09-19 补入，依据见下
 backend/app/providers/forwarder/mihomo_projection.py     # 仅 DNS schema gate
 backend/app/workers/transport_sync.py
 infrastructure/alembic/versions/0025_mihomo_projection_generations.py
@@ -225,11 +226,117 @@ infrastructure/alembic/versions/0026_mihomo_transport_materializations.py
 backend/tests/unit/test_mihomo_materialization.py
 backend/tests/unit/test_mihomo_generation.py
 backend/tests/unit/test_transport_provider.py
+backend/tests/unit/test_transport_resolver.py            # 2026-09-19 补入，依据见下
 backend/tests/unit/test_mihomo_projection.py
 backend/tests/guards/test_mihomo_reconciliation_safety.py
 backend/tests/guards/test_secret_leak.py
 backend/tests/integration/test_models.py
 ```
+
+##### 2026-09-19 闭包补入：`resolver.py` 与它的单测（source revision 的生产边界）
+
+**触发**：PR #156（head `9c2067383f1d5f832f2a663d04c0dbb0b740ebb4`）实现的
+receipt 会**谎报 bytes 的来源 revision**。实测当前调用链：
+
+| 步 | 代码 | 发生了什么 |
+|---|---|---|
+| 3 | `resolver.py:93` | 用 purpose-bound `SecretSnapshot` 解析订阅 URL，**revision = N** |
+| 4 | `subscription.py:270` | 用那个 URL 发起网络 fetch |
+| 5 | `subscription.py:284` | cache 写盘成功 |
+| 6 | `transport_sync.py:103` | **fetch 之后重新查当前 `Secret`** |
+| 7 | `transport_sync.py:122` | `receipt.source_revision = secret.revision` ← **可能已是 N+1** |
+
+**只要 secret 在第 3 步与第 6 步之间轮换，receipt 就会给"用 revision N 取回的
+bytes"盖上 revision N+1 的章。** 这违反 ADR-025 §3a：`source_revision` 必须是
+**实际产生这批 materialized bytes 的那个 revision**，不能在网络 I/O 之后重新
+查询当前值猜出来。
+
+**这不是新架构问题，正确边界由 ADR-025 §3a 加现有 resolver 唯一推出**——
+理由是 resolver **已经**持有并校验着那个值：
+
+```python
+# resolver.py:99  —— 新建时把 revision 存进自己的表
+self._providers[descriptor.record_id] = (descriptor, snapshot.revision, provider)
+
+# resolver.py:82-84 —— 复用时校验它没漂移
+if snapshot.revision != old_revision:
+    raise TransportResolutionError("TRANSPORT_SECRET_REVISION_DRIFT")
+```
+
+**resolver 已经是"这个 provider 绑定在哪个 revision 上"的权威**，
+缺的只是**把这个已知值传下去**——第 95-98 行构造
+`SubscriptionTransportProvider(code, snapshot.value, cache_path=...)` 时
+**没有把 `snapshot.revision` 一起给它**，所以
+`materialization_proof()`（`subscription.py:289`）只能返回二元组
+`(cache_identity, content_hash)`，worker 只好回头自己去查。
+
+**因此补入两个文件**：
+
+| 文件 | 依据 |
+|---|---|
+| `backend/app/providers/transport/resolver.py` | **只有它知道**实际用于构造/复用 provider 的 purpose-bound `SecretSnapshot.revision`。不把它传下去，worker 就只能在 fetch 后重查当前值——那正是本缺陷 |
+| `backend/tests/unit/test_transport_resolver.py` | 该文件是 resolver 的既有单测所在，绑定行为必须在这里被断言 |
+
+##### source-revision 生产契约（**写死，不要重新设计**）
+
+1. **`SubscriptionTransportResolver.resolve()` 是 transport source revision
+   的唯一生产边界。** 别处不得产生或改写它。
+2. **新建 provider 时**，把用于取 URL 的那个 `SecretSnapshot.revision`
+   **一并绑定给 provider**。
+3. **复用 provider 时**，继续使用 resolver 已校验过的**同一个 bound
+   revision**（复用路径已有 `TRANSPORT_SECRET_REVISION_DRIFT` 校验，
+   **不要改它的语义**）。
+4. **`SubscriptionTransportProvider.materialization_proof()` 必须同时携带**：
+   `cache identity`、`content hash`、**bound source revision**。
+5. **`refresh_provider_inventory()` 直接消费 proof 里的 bound revision。**
+6. **worker 不得在 fetch 之后重新查询 `Secret.revision` 来生成 receipt 的
+   source revision。** 现有 `transport_sync.py:103` 那次查询必须去掉。
+7. **secret 在 resolve 之后轮换时**：
+   - 本次 receipt **仍诚实记录这次 fetch 实际用的那个旧 revision**；
+   - 后续 loader / current-authority 比对会发现 revision stale 并 **fail closed**；
+   - 下一次 `resolve()` 会按**现有** revision-drift 规则拒绝旧 provider，
+     直到受控 replacement / restart。
+   **这三条合起来才是正确行为：诚实记录 + 下游 fail closed，
+   而不是在 receipt 里把它"修正"成当前值。**
+8. **不得让 secret 的 DB transaction / row lock 穿过网络 I/O。**
+
+##### proof 发布时序（同一边界，现状有缺陷）
+
+实测 `subscription.py:282-287`：
+
+```python
+self._last_content_hash = hashlib.sha256(response.content).hexdigest()   # 写盘前
+self._last_cache_identity = str(self._cache_path)                        # 写盘前
+write_provider_cache(self._cache_path, response.content)                 # 可能抛错
+# Publish the new snapshot only after parsing and cache persistence succeed.
+```
+
+**`write_provider_cache()` 抛错时，两个 proof 字段已经被新值覆盖**——
+上一份 last-known-good proof 就此丢失。**而紧跟其后的注释恰恰说的是相反的事**
+（"只在解析与落盘都成功之后才发布"），它当前只对 `_endpoints` / `_capacity`
+成立，**对 proof 不成立**。
+
+**要求**：
+
+- **hash 可以在写盘前计算**（必须对**传给 `write_provider_cache()` 的同一份
+  bytes** 计算，这一条不变）；
+- **但对外可消费的 proof 只能在 `write_provider_cache()` 成功返回之后发布**；
+- **cache write 抛错时**：不得发布新 proof，**已有的 last-known-good proof
+  不得被这次失败的结果覆盖**。
+
+##### `test_transport_resolver.py` 必须断言的性质
+
+（测试名自定，但下面四条性质缺一不可）
+
+1. provider / materialization proof 拿到的，**正是 resolver 实际读取的那个
+   `SecretSnapshot.revision`**；
+2. **同一 provider 被复用时 revision 不漂移**；
+3. secret revision 变化后，**现有 drift 规则仍然 fail closed**；
+4. **source revision 不是由 worker 在 fetch 之后查 `Secret.revision` 得来的**
+   —— 断言那条查询不再决定 receipt 的 `source_revision`。
+
+另需一条**写失败**测试（放 `test_transport_provider.py`）：
+`write_provider_cache()` 抛错时不发布新 proof，且上一份 proof 未被覆盖。
 
 **必须新增/通过的测试**（名称照抄，不要改名）：
 - `test_mihomo_materialization.py`：`test_receipt_hash_mismatch_fails_closed_without_remint`、
@@ -260,8 +367,43 @@ backend/tests/integration/test_models.py
 > 「或新建」会诱导执行者越出 allowed-file list。**已固定到上面那个已授权
 > 的文件，不留开放式"新建"。** 同类表述以后一律不写。
 
+##### 其余 B2-B1 修订要求（2026-09-19 审查确认，**不新增允许文件**）
+
+**这些都落在已列出的文件里，不扩大 checkpoint。**
+
+**1. receipt 必须是 current read** —— `backend/app/infra/mihomo_materialization.py`
+
+receipt 查询必须带 `.with_for_update()` 与
+`.execution_options(populate_existing=True)`，否则 Session 的 identity map
+会把旧值当成当前值返回。测试必须覆盖这个具体场景：
+
+- Session A 已经缓存了一份旧 receipt；
+- Session B 更新并提交了 receipt；
+- **Session A 的 verifier 再读时必须看到新值**，不是 identity-map 里的旧值。
+
+**2. 两个迁移的时间列精度** —— `0025` / `0026`
+
+`created_at`、`updated_at`、`freshness_deadline` 必须与 ORM 的
+repository-standard precise timestamp 一致（MySQL 下即 `DATETIME(fsp=6)`
+的等价写法）。**不改迁移编号、不改任何历史 revision**，只修这两个尚未合并的
+新迁移本身。
+
+**3. 验收测试要断到"性质"，不是只对上名字**
+
+上一轮出现过"测试名存在、但没测到它该测的性质"。**逐条写死：**
+
+| 测试 | 必须真正断言的 |
+|---|---|
+| `test_manifest_datetime_and_order_are_canonical` | 必须**真的构造 semantic datetime**；证明**等价时区 → 同一个 UTC canonical 表示**；证明 **mapping key 的插入顺序不影响 fingerprint** |
+| `test_sql_controller_secret_resolver_requires_exact_purpose_and_revision` | 必须**捕获传给 helper 的 purpose**，断言它**恰好等于** `MIHOMO_CONTROLLER_API_SECRET`；断言返回的 revision 与 helper snapshot 的 revision **完全一致** |
+| receipt 的 mismatch / missing / expired / source-revision 四类测试 | **每一条都要比较 verifier 调用前后的 receipt**：行数与字段内容**都不得被 verifier 改写** |
+| `test_mihomo_projection.py` | 必须包含 TASK 已要求的**负向 DNS 用例**：`{"enable": "true"}` 必须 fail closed |
+| `test_secret_leak.py` | 必须**实际放入** materialized YAML sentinel **与** controller-secret sentinel；覆盖 receipt / generation / verified materialization 的 `repr()`；覆盖相关**错误文本与日志**；断言 sentinel、URL、token **一个都不出现** |
+
 **明确不做**：不写 concrete DB loader；不写 preparation/recovery；不改
-`mihomo_reconciliation.py`；不改 `mihomo.py`；不改 registry；不做 S04-C。
+`mihomo_reconciliation.py`；不改 `mihomo.py`；不改 registry；不做 S04-C；
+**不碰 `scheduler` / `main.py` / `core/config.py`**——本次补入的只有
+`resolver.py` 与它的单测，**不得借机扩大到调用它的上游**。
 
 ---
 
