@@ -462,6 +462,33 @@ egress_proxies: tuple[ForwarderEgressProxyDTO, ...] = ()
 > 直到别的原因触发新 generation。**凭据轮换路径必须递增 `Secret.revision`。**
 > 这是既有契约的推论，本 ADR 只是点名。
 
+## 5a. 落地顺序的不变式（**2026-09-20 审查补充，必须遵守**）
+
+本 ADR 把 assignment 与 credential 定义为 **effective canonical-manifest
+inputs**。这立刻产生一条对**实施顺序**的硬约束：
+
+> **任何「已合并且能生产 generation」的 checkpoint，其 canonical manifest
+> 必须已经覆盖本 ADR 定义的全部 effective inputs。**
+
+**为什么这不是纸面问题**：`allocate_generation()` 在 `manifest_version` 与
+`desired_fingerprint` 都相同时**复用**上一代（`mihomo_generation.py:104-109`）。
+若先合入一个「已接线但 manifest 缺 `egress_proxies`」的生产者，则
+**assignment 或 credential 改变 → fingerprint 不变 → 复用旧 generation**，
+且这些 row 会**持久留在库里**。这违反 ADR-025 §4，也违反 `docs/85`
+「每个 checkpoint 结束时已接线部分必须是 fail-closed 终态」。
+
+### 5a.1 `MANIFEST_VERSION` 必须升版
+
+manifest 新增 `egress_proxies` 键时，**`MANIFEST_VERSION` 必须由 `"1"` 升到
+`"2"`**。否则同一个 `"1"` 会同时指代两种 manifest 语义，既有 row 会被按新契约
+解读。升版后旧 row 明确属于「ADR-037 之前的形状」，**永远不会被新契约复用**。
+
+### 5a.2 顺序由 TASK 固定，本 ADR 只给不变式
+
+具体 checkpoint 划分写在
+`docs/82-tasks/TASK-S04-mihomo-activation.md` 的「执行切分与唯一安全依赖顺序」。
+本 ADR 只要求：**契约与 manifest 形状必须先于任何生产 generation 的接线落地。**
+
 ## 6. plaintext 边界（与 ADR-019 §4 同一条流水线）
 
 ```text

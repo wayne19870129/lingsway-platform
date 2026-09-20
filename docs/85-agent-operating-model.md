@@ -632,7 +632,13 @@ Claude 的产出形态是：ADR、`docs/81-reviews/REVIEW-*.md`、以及直接�
 > **ACTIVE `EgressTransportAssignment` 与 egress credential 都是 effective input**，
 > A→B 都必须改变 fingerprint。`dialer-proxy` 是唯一允许的链式编码。
 > 契约写死在 ADR-037 §2/§4，**不要让 Codex 自己选抽象**。
-> **B2-B2 与 B2-B2c 的 allowed files 不同**，派活时不要混。
+> **四个 checkpoint 的 allowed files 各不相同**，派活时不要混。
+>
+> **⚠️ 顺序有一条硬不变式（ADR-037 §5a）**：**任何已合并且能生产 generation 的
+> checkpoint，其 canonical manifest 必须已覆盖 assignment + credential。**
+> 所以 **B2-B2a（纯契约）必须先于 #163**，而 #163 合并时其 loader 必须已经
+> 填充 `egress_proxies`。**不得出现「#163 已合并、能分配 generation，但
+> assignment/credential 还没进 manifest」的 `main` 状态。**
 >
 > **2026-09-20：原来写在这里的 "⛔ 被 ADR-035 阻塞" 已经解除。**
 > ADR-035 裁定：`external-controller` → validated `Settings` 新字段
@@ -730,12 +736,17 @@ S07 一个任务里，「允许修改的文件」漏项**连续发生两次**：
 
 | # | 任务 | TASK 文件 | 闸门状态 |
 |---|---|---|---|
-| 1 | **S04-B2-B2** concrete DB desired loader + preparation transaction | `docs/82-tasks/TASK-S04-mihomo-activation.md` | **在途：PR #163**。按 ADR-037 需返工（撤 `subscription-*` group、status 三状态、assignment 改为 effective、rollback 自持）。**先合规格 PR，再派返工** |
-| 2 | **S04-B2-B2c** egress 链路与凭据契约 | 同上 | ⛔ **前置：`ADR-037` 已合并**。新增 `ForwarderEgressProxyDTO` / `egress_proxies` / `dialer-proxy` / render 边界凭据解析。**allowed files 与 B2-B2 不同，见 TASK** |
-| 3 | **S04-B2-B2d** Xray → Mihomo 交接 | 同上 | ⛔ 前置：ADR-037 + B2-B2c。Xray outbound 改指 `127.0.0.1:{mihomo_listen_port}`，该跳无凭据。**没有这一段链路 B 不可达** |
-| 4 | **S04-B2-B3** freshness 三点复核 / recovery / runtime exact readback | 同上 | 等 B2-B2d 合并 |
-| 5 | **S04-B2-B4** 完整 integration / guard / migration / concurrency 验收 | 同上 | 等 B2-B3 合并 |
-| — | **ACTIVE assignment 的 writer** | **待定** | ⛔ **S04-C 激活的硬前置，且尚无 owner**。分配策略未被任何 ADR 决定 —— 按 ADR-036 §2 **报告 User**，不要自行发明 |
+| 1 | **S04-B2-B2a** contract substrate | `docs/82-tasks/TASK-S04-mihomo-activation.md` | ⛔ 前置：`ADR-037` 已合并。`ForwarderEgressProxyDTO` + `egress_proxies` + manifest 键 + `MANIFEST_VERSION "1"→"2"`。**纯契约，不生产 generation** |
+| 2 | **S04-B2-B2** concrete DB desired loader + preparation transaction | 同上 | **在途：PR #163，需 rebase 到 B2-B2a 之后**。返工项：撤 `subscription-*` group、status 三状态、assignment 改为 effective、**填充 `egress_proxies`**、rollback 自持 |
+| 3 | **S04-B2-B2c** render / finalization | 同上 | ⛔ 前置：B2-B2a + B2-B2。`dialer-proxy` 渲染 + 明文在 render 边界解析 |
+| 4 | **S04-B2-B2d** Xray → Mihomo 交接 | 同上 | ⛔ 前置：B2-B2c。Xray outbound 改指 `127.0.0.1:{mihomo_listen_port}`，该跳无凭据。**没有这一段链路 B 不可达** |
+| 5 | **S04-B2-B3** freshness 三点复核 / recovery / runtime exact readback | 同上 | 等 B2-B2d 合并 |
+| 6 | **S04-B2-B4** 完整 integration / guard / migration / concurrency 验收 | 同上 | 等 B2-B3 合并 |
+| 7 | **ACTIVE assignment 的 writer** | **待定** | ⛔ **S04-C 激活的硬前置，且尚无 owner**。分配策略未被任何 ADR 决定 —— 按 ADR-036 §2 **报告 User**，不要自行发明 |
+| 8 | **S04-C** registry 放行 + 激活闸门 | 同上 | ⛔ 前置：B2-B4 + writer。闸门：每个 in-scope egress 恰好一条 ACTIVE assignment |
+
+> **S04-C 的前置风险不止 `dialer-proxy` 镜像验证一条。** 还有
+> **assignment writer（尚无 owner）** 与 **completeness gate**，见 TASK。
 
 （**S07 已于 2026-09-19 完成并合并**，PR #152 / `a9d5bd2`；
 **S04-B2-B1 已于 2026-09-19 合并**，PR #156；

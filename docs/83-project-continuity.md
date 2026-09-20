@@ -542,6 +542,25 @@ different contents) and the PR #128 version won.
   Mihomo cannot go to production until a writer exists. Per ADR-036 §2 that
   writer's spec goes to the user, not straight to Claude.
 
+  **The checkpoint order was wrong and is now fixed (ADR-037 §5a).** Because
+  this ADR makes assignment and credential effective manifest inputs, and
+  #163's `prepare_mihomo_reconciliation()` is the production-wired generation
+  producer, the old order (B2-B2 then B2-B2c) would have left a `main` where a
+  live producer allocates fingerprints that knowingly omit those inputs. That
+  is not cosmetic: `allocate_generation()` reuses the latest generation when
+  `manifest_version` and fingerprint both match
+  (`mihomo_generation.py:104-109`), so an assignment or credential change
+  would not move the fingerprint and the stale generation would be reused --
+  and those rows persist.
+
+  The invariant is now stated: **any merged checkpoint able to produce a
+  generation must already cover every ADR-037 effective input.** The order is
+  B2-B2a (types + manifest key + `MANIFEST_VERSION` "1"->"2", producing
+  nothing) -> B2-B2 (#163, rebased, loader populates `egress_proxies`) ->
+  B2-B2c (render/finalization) -> B2-B2d (Xray handoff) -> B2-B3 -> B2-B4 ->
+  writer -> S04-C. The version bump matters on its own: leaving it at "1"
+  would make one version string mean two manifest shapes.
+
 - **S04-C:** **NOT STARTED.** `FORWARDER_PROVIDER=mihomo` remains NOT
   selectable; no deployment authorization exists.
 
