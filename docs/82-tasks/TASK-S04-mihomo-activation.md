@@ -1010,9 +1010,18 @@ transport node」涉及容量、健康度、地域、重平衡——**那是一�
 
 ##### 已记录的 S04-C 前置缺口
 
-1. ~~Mihomo 拨住宅出口需要 socks5 凭据~~ **✅ 已由 `ADR-037` §3 裁定，实施在 B2-B2c。**
+1. ~~Mihomo 拨住宅出口需要 socks5 凭据~~ **✅ 已由 `ADR-037` §3 裁定。
+   实施分三段，不是「全在 B2-B2c」**：
+   **`B2-B2a`** 建契约（`ForwarderEgressProxyDTO.credential_secret_ref` /
+   `credential_revision` + manifest 键）→
+   **`B2-B2`** loader 填充这两个字段并锁住 fingerprint 不变式（**不解密**）→
+   **`B2-B2c`** render/finalization 解析明文并写进候选 document。
 2. ~~`EgressTransportAssignment` 的 projection 语义从未定义~~
-   **✅ 已由 `ADR-037` §2 裁定，实施在 B2-B2c。**
+   **✅ 已由 `ADR-037` §2 裁定。同样分三段**：
+   **`B2-B2a`** 建 `transport_proxy_name` / `transport_node_identity` 字段与
+   manifest 表示 → **`B2-B2`** loader 解析 ACTIVE assignment、
+   定位 materialized proxy、锁住 node A→B ⇒ fingerprint 变 →
+   **`B2-B2c`** 渲染 `dialer-proxy`。
 3. **`dialer-proxy` 在钉住的 `metacubex/mihomo:v1.19.27` 上未实测。**
    B2-B2c 的 candidate validation 必须确认它被接受；**不被接受则停止并报告 User**
    （ADR-036 §2），**不得自行改用其它编码**。
@@ -1318,9 +1327,13 @@ assert len(Base.metadata.tables) == 38
   `providers/transport/subscription.py` 与 `workers/transport_sync.py` 内部
   （"仅为计算 `content_hash`" / "仅为同事务提交 receipt"），没有证据表明需要改
   Protocol；要改它属于 `AGENTS.md` 铁律 5 的范围，停下来上报。
-  **现状**：铁律 5 已经走完 —— `ADR-037` 就是那条 ADR，它授权 **B2-B2c**
-  新增 `ForwarderEgressProxyDTO` 与 `DesiredForwarderState.egress_proxies`。
-  **B2-B1 与 B2-B2 仍然不得改它**；只有 B2-B2c 可以，且只能做 ADR-037 §4 写死的那些。
+  **现状**：铁律 5 已经走完 —— `ADR-037` 就是那条 ADR。但**授权的不是 B2-B2c**：
+
+  | checkpoint | 对 `providers/base.py` 的授权 |
+  |---|---|
+  | **B2-B2a** | ✅ **新增 `ForwarderEgressProxyDTO` 与 `DesiredForwarderState.egress_proxies`**（ADR-037 §4 写死的那些，不多不少） |
+  | **B2-B2d** | ✅ **仅** `XrayOutboundDTO.credential_secret_ref: str \| None`（ADR-037 §1a.4），不碰 forwarder 侧任何字段 |
+  | **B2-B1 / B2-B2 / B2-B2c** | ❌ **一个字都不许改**。B2-B2 与 B2-B2c **使用** B2-B2a 建好的类型，不修改其定义 |
 
 > **一条给执行者的补充规则（这次闭包检查的副产品）：**
 > `backend/tests/integration/test_mihomo_projection_lock.py` **不在清单里**，

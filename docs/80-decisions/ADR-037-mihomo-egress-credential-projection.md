@@ -555,12 +555,22 @@ structured logging、runtime-independent snapshot、PR 与文档正文。
 
 ## 9. Testing requirements
 
-见 TASK-S04 的 B2-B2c 测试表（本 ADR 与它逐条对应，不在此重复列名）。
-其中三条是本 ADR 的核心不变式，**缺一不可**：
+精确测试名与断言见 TASK-S04 各 checkpoint 自己的测试表（本 ADR 不重复列名）。
+**归属按 §5a 的顺序切分，不要都记在 B2-B2c 名下：**
 
-1. assignment node A→B ⇒ fingerprint 变；
-2. credential ref A→B（及 revision 轮换）⇒ fingerprint 变；
-3. manifest / snapshot / generation row 的任何序列化与 `repr()` **均不含明文**。
+| 归属 | 覆盖什么 |
+|---|---|
+| **B2-B2a** | DTO / manifest 契约本身：`egress_proxies` 按 `name` 排序进 manifest、`MANIFEST_VERSION` 由 `"1"` 升到 `"2"` 后旧 row 不被复用、`ForwarderEgressProxyDTO.__repr__()` 不含 `credential_secret_ref` |
+| **B2-B2** | **fingerprint 不变式**：assignment node A→B ⇒ fingerprint 变 + 新 generation；credential ref A→B 及 `Secret.revision` 轮换 ⇒ 同上；credential precedence（override / 回落 / malformed 不回落）；loader 填充 `egress_proxies` **全程不解密** |
+| **B2-B2c** | **render / finalization**：`dialer-proxy` 出现与省略、明文只在 render 边界出现、revision 漂移作废候选、协议白名单、跨来源重名 |
+| **B2-B2d** | **Xray 交接**：Mihomo 模式下 outbound 指向 loopback + 对应 `mihomo_listen_port`、该跳不解析住宅凭据、非 Mihomo 模式边界、非 loopback 缺凭据 fail closed |
+
+其中三条是本 ADR 的核心不变式，**缺一不可**（归属见上表）：
+
+1. assignment node A→B ⇒ fingerprint 变（**B2-B2**）；
+2. credential ref A→B（及 revision 轮换）⇒ fingerprint 变（**B2-B2**）；
+3. manifest / snapshot / generation row 的任何序列化与 `repr()` **均不含明文**
+   （**B2-B2a** 覆盖 DTO 层，**B2-B2c** 覆盖 render 层）。
 
 ## 10. 重新评估条件
 
