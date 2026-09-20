@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from backend.app.models import MihomoProjectionGeneration
 from backend.app.providers.base import DesiredForwarderState
 
-MANIFEST_VERSION = "1"
+MANIFEST_VERSION = "2"
 
 
 def canonical_manifest(value: Mapping[str, object]) -> str:
@@ -79,6 +79,7 @@ def build_projection_source_manifest(
         "listeners": _manifest_value(desired.listeners),
         "listener_specs": _manifest_value(desired.listener_specs),
         "proxies": _manifest_value(desired.proxies),
+        "egress_proxies": _manifest_value(desired.egress_proxies),
         "proxy_groups": _manifest_value(desired.proxy_groups),
         "rules": _manifest_value(desired.rules),
         "dns": _manifest_value(desired.dns),

@@ -233,12 +233,25 @@ class ForwarderListenerDTO:
 
 
 @dataclass(frozen=True, slots=True)
+class ForwarderEgressProxyDTO:
+    name: str
+    protocol: str
+    host: str
+    port: int
+    credential_secret_ref: str = field(repr=False)
+    credential_revision: int = 0
+    transport_proxy_name: str | None = None
+    transport_node_identity: tuple[str, str, int] | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class DesiredForwarderState:
     listeners: Mapping[str, str] = field(default_factory=dict)
     listener_specs: tuple[ForwarderListenerDTO, ...] = ()
     # Provider-neutral full-projection inputs.  Mihomo-specific validation and
     # composition live at the forwarder boundary, never in the domain.
     proxies: tuple[Mapping[str, object], ...] = ()
+    egress_proxies: tuple[ForwarderEgressProxyDTO, ...] = ()
     proxy_groups: tuple[Mapping[str, object], ...] = ()
     rules: tuple[Mapping[str, object], ...] = ()
     dns: Mapping[str, object] = field(default_factory=dict)
@@ -267,6 +280,9 @@ class DesiredForwarderState:
             raise TypeError("desired listener specs must use ForwarderListenerDTO")
         object.__setattr__(self, "listener_specs", tuple(self.listener_specs))
         object.__setattr__(self, "proxies", freeze(self.proxies))
+        if not all(isinstance(item, ForwarderEgressProxyDTO) for item in self.egress_proxies):
+            raise TypeError("desired egress proxies must use ForwarderEgressProxyDTO")
+        object.__setattr__(self, "egress_proxies", tuple(self.egress_proxies))
         object.__setattr__(self, "proxy_groups", freeze(self.proxy_groups))
         object.__setattr__(self, "rules", freeze(self.rules))
         object.__setattr__(self, "dns", freeze(self.dns))
@@ -279,6 +295,7 @@ class DesiredForwarderState:
             f"snapshot_revision={self.snapshot_revision!r}, "
             f"snapshot_identity={self.snapshot_identity!r}, "
             f"listener_count={len(self.listener_specs)}, proxy_count={len(self.proxies)}, "
+            f"egress_proxy_count={len(self.egress_proxies)}, "
             f"proxy_group_count={len(self.proxy_groups)}, rule_count={len(self.rules)}, "
             f"content=<redacted>)"
         )
