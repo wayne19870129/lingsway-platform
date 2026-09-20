@@ -34,6 +34,15 @@ durable transport materialization receipt 的 producer/commit/crash 契约、
 >
 > **不要再把 ADR-025 的状态当作 blocker。** 开工前仍要读 ADR-025 正文，
 > 但那是读**内容**，不是等**状态**。
+>
+> **2026-09-20 进度：B2-B1 已完成并合并（PR #156）。下一个是 B2-B2，
+> 它没有任何待解除的阻塞项**——deployment 常量的落点已由 **ADR-035** 裁定，
+> 结论逐条写死在下面。
+>
+> **本文件自 ADR-036 起由 ChatGPT 维护**（`docs/82-tasks/**` 不再是 Claude
+> 独占）。ChatGPT 可以直接修订本文件的切分、粒度、允许文件与验收标准；
+> **唯一不能自己改的是它引用的那些 ADR 结论**——那需要新 ADR，路由见
+> ADR-036 §2（交给 User，不是回头找 Claude）。
 
 交付：
 
@@ -76,7 +85,7 @@ B2-B1  receipt / secret resolver / manifest / allocator / DNS gate
    │        ← 不依赖任何其它 checkpoint
    ▼
 B2-B2  concrete DB desired loader + preparation transaction
-   │        ← ⛔ 被 ADR-035 阻塞（deployment-owned 常量的落点，见下）
+   │        ← 只依赖 B2-B1（#156 已合并）。deployment 常量落点见 ADR-035
    ▼
 B2-B3  freshness 复核 / recovery / runtime exact readback
    │
@@ -92,82 +101,81 @@ authority、第二个 writer、临时 runtime fallback、或"先用 runtime 兜�
 
 ---
 
-#### ⛔ 必须先补一条 ADR：deployment-owned 常量的**具体落点**
+#### deployment-owned 常量的落点 —— **ADR-035 已裁定，照抄即可**
 
-> **2026-09-19 更正（ChatGPT Round 1 审查 · Major 1/2，均已核实成立）。**
-> 本节初稿把「新建版本化 deployment-constant DB 表」列为三个并列候选之一，
-> 并说"两条 ADR 都提到它却都没定位它"。**两句都是错的：**
+> **2026-09-20：本节原来是一个 ⛔ 阻塞项（"必须先补一条 ADR"）。
+> `ADR-035-mihomo-deployment-constant-placement.md` 已给出结论，
+> 阻塞解除。B2-B2 / B2-B3 / B2-B4 不再等待任何人再确认一次。**
 >
-> **ADR-025 §3 的 authority taxonomy 已经裁定了 authority class**——
-> deployment-owned validated constants 的 authority 是
-> **`deployment, not DB`**，读取边界是
-> **validated `Settings` / repo-owned deployment constants**，
-> 并且紧跟着明写：**"Deployment constants are never migrated into the
-> database"**。
->
-> **所以"版本化 DB 表"不是一个合法候选。** 本 checkpoint 重构声明
-> "只改执行粒度、不改架构结论"，而 DB authority 方案需要**先 supersede
-> ADR-025**——那已经不是"架构不变"。**不要再把它当普通选项提出来。**
->
-> **我错在哪**：只读了 ADR-025 §4（manifest 覆盖范围）就下结论，
-> 没读 §3 那张 taxonomy 表——**而那张表正是答案所在**。
-> 一找到能自圆其说的解释就停止搜索，是这次的实际失误。
+> 下面是结论本身，**不要重新推导，也不要重新讨论候选方案**。
+> 完整论证与被否决的替代方案见 ADR-035 §2–§5。
 
-**B2-B2 仍然被阻塞，但缺口比初稿窄得多，而且性质不同。**
+##### 已定的 authority class（ADR-025 §3，本节不重开）
 
-##### 已经定了的（不要再讨论）
+| 项 | 已定的结论 |
+|---|---|
+| authority class | **deployment，不是 DB**；**永不迁入数据库** |
+| 读取边界 | **validated `Settings` / repo-owned deployment constants** |
+| 进 manifest 的方式 | 已验证的值**逐字（verbatim）**进 manifest，因而被 fingerprint 覆盖 |
+| `api-secret-revision` 的来源 | **fresh 的 purpose-bound `Secret.revision`**，**不是**另一个配置来源 |
 
-| 项 | 已定的结论 | 依据 |
+> **"版本化 DB 表"不是合法候选**，走它必须先 supersede ADR-025。
+> 本节初稿曾把它列为并列候选（2026-09-19 经审查更正）——**不要再提出来**。
+
+##### 七个 key 各自的落点（**这就是全部答案**）
+
+`_validate_deployment_constants()` 白名单 7 个 key，**4 个有默认值、3 个没有**：
+
+| key | 落点 | 取值 |
 |---|---|---|
-| authority class | **deployment，不是 DB**；**永不迁入数据库** | ADR-025 §3 |
-| 读取边界 | **validated `Settings` / repo-owned deployment constants** | ADR-025 §3 |
-| 进 manifest 的方式 | 已验证的值**逐字（verbatim）**进 manifest，因而被 fingerprint 覆盖 | ADR-025 §3/§4 |
-| **`api-secret-revision` 的来源** | **fresh 的 purpose-bound `Secret.revision`**，**不是**另一个配置来源 | ADR-025 §4/§8 |
+| `mode` | 函数内默认值 | `"rule"` |
+| `mixed-port` | 函数内默认值 | `7890` |
+| `allow-lan` | 函数内默认值 | `False` |
+| `log-level` | 函数内默认值 | `"warning"` |
+| **`external-controller`** | **validated `Settings`** | 新字段 `mihomo_external_controller: str = ""`（ADR-035 §3） |
+| **`api-secret-ref`** | **repo-owned constant** | `MIHOMO_CONTROLLER_SECRET_REF = "mihomo/api-secret"`，放在 `credential_resolver.py` 里 `MIHOMO_CONTROLLER_SECRET_PURPOSE` 旁边（ADR-035 §4） |
+| `api-secret-revision` | resolver 读出的 `Secret.revision` | 不来自任何常量或 `Settings` |
 
-##### 真正未定的：deployment-owned class **内部**的落点
+##### `external-controller` 的两处校验（**职责不重叠，都不许省**）
 
-`_validate_deployment_constants()` 的白名单有 7 个 key。**有默认值的只有 4 个**
-（`mode`="rule"、`mixed-port`=7890、`allow-lan`=False、`log-level`="warning"）。
-**三个没有默认值、必须由调用方提供**：
+| 位置 | 只做什么 |
+|---|---|
+| `Settings.validate_runtime_safety()` | **只查"有没有"**：`forwarder_provider == "mihomo"` 时，`mihomo_external_controller.strip()` 不得为空 |
+| `mihomo_projection.py` 的 `_validate_controller_address()` | **格式的唯一权威**（IP 字面量 / 端口范围 / loopback / unspecified / IPv6 方括号），**已经存在，不要改** |
 
-| key | 校验位置 | 现状 |
+**禁止**：`core/config.py` 不得 import `providers/forwarder/mihomo_projection.py`
+（反向依赖），**也不得**把格式规则在 `config.py` 里抄一遍（双事实来源）。
+
+##### 因此 B2-B2 的允许文件比原清单多两个
+
+**新增 `backend/app/core/config.py` 与 `backend/tests/unit/test_registry.py`。**
+这两个文件原本只在 S04-C 清单里，现在两份清单**都有**——按下面的边界切开，
+不是从 S04-C 拿走：
+
+| | B2-B2 做 | S04-C 做 |
 |---|---|---|
-| `external-controller` | `_validate_controller_address()`，`None` 直接抛 `MIHOMO_CONTROLLER_ADDRESS_INVALID` | **无落点** |
-| `api-secret-ref` | `_controller_identity()`，要求非空、无前后空白的安全字符串 | **无落点** |
-| `api-secret-revision` | `_controller_identity()`，要求正整数（`bool` 不算） | 来源**已定**（purpose-bound `Secret.revision`），但要**经由哪个 deployment-owned 字段拿到 ref** 仍未定 |
+| `core/config.py` | 加 `mihomo_external_controller` 字段 + `forwarder_provider == "mihomo"` 闸门下的**非空**校验 | `build_registry()` 放行、lifecycle/factory、S04-C 自己新引入字段的校验 |
+| `test_registry.py` | 上面那条校验的单测（空值 fail-closed / 非空通过） | 放行后的注册表行为 |
+| `.env.example` | **不碰** | 补 `MIHOMO_EXTERNAL_CONTROLLER=`（空值），见 S04-C 段 |
 
-> **初稿写的"7 个 key 里 6 个有默认值、只有 `external-controller` 没有"是错的。**
-> 实际是 **4 个有默认值、3 个没有**；`api-secret-ref` 与 `api-secret-revision`
-> 同样由 `_controller_identity()` 强制要求。**缺口不止 controller 地址。**
+**为什么字段和它的校验必须同一个 PR**：ADR-025 §3 的措辞是 **validated**
+`Settings`，而这个值**逐字进 manifest 并被 fingerprint 覆盖**；拆成
+"B2-B2 加字段、S04-C 加校验"会留出一段时间，让一个未经校验的部署常量参与
+fingerprint。理由见 ADR-035 §3.2。
 
-**所以未决问题只有一个，而且限定在 ADR-025 已画好的框内：**
+**B2-B2 期间这条校验不会真的触发**（`build_registry()` 还不接受 `mihomo`），
+**这是允许的**——与 B2-B1"resolver 已交付但尚无生产调用点"同一性质：
+正确性由本 checkpoint 的单测完整覆盖。
 
-> **`external-controller` 与 `api-secret-ref` 这两个 deployment-owned 必填值，
-> 分别落在 validated `Settings` 还是 repo-owned fixed constants？**
+**已实测，不会误伤**：`backend/tests/unit/test_mihomo_generation.py:25` 的
+`build_registry(Settings(forwarder_provider="mihomo"))` 不受影响——
+`validate_runtime_safety()` 只在 `Settings.from_env()` 里调用，直接构造
+`Settings(...)` 不走它。
 
-两边都合法（ADR-025 §3 把两者并列为读取边界），但**代价不同**：
+##### 这条红线没有放宽
 
-1. **validated `Settings`** —— 仓库已有同类先例（`core/config.py:62` 的
-   `transport_cache_root`，并在 `validate_runtime_safety()` 里校验），
-   **是最贴合 ADR-025 §3 措辞的一条**。代价：`core/config.py` 属 **S04-C**
-   的允许清单，B2-B2 用它会把 S04-C 的范围提前拉进来，与"三阶段不得合并成
-   一个 PR"冲突——**这是 TASK 层面的范围问题，不是架构问题**。
-2. **repo-owned fixed constants** —— 不碰 `core/config.py`，B2-B2 可以独立完成。
-   代价：`external-controller` 是环境相关的 `host:port`，写死不适合生产；
-   B2-B 不做生产激活所以**本阶段**可行，但等于承认一个 S04-C 必须再改一次的
-   临时落点，**必须明确记录而不是默认**。
-
-> **需要的 ADR：`ADR-035 — Mihomo deployment-owned 常量的落点`。**
-> 范围**仅限**在 ADR-025 §3 已裁定的 deployment-owned class 内部决定：
-> `external-controller` 与 `api-secret-ref` 各自落在 validated `Settings`
-> 还是 repo-owned fixed constants；若选 `Settings`，同时裁定 B2-B2 是否
-> 破例动 `core/config.py`，还是等到 S04-C。
->
-> **ADR-035 不得重新讨论 authority class，也不得引入 DB 落点**——
-> 那需要先 supersede ADR-025，属另一件事。
->
-> **在 ADR-035 被接受之前，B2-B2 / B2-B3 / B2-B4 不得开工。**
-> **B2-B1 完全不受此阻塞**（它不构造 desired state，只消费传入的）。
+B2-B 结束时必须仍有测试证明 `FORWARDER_PROVIDER=mihomo` **被
+`build_registry()` 拒绝**。ADR-035 加的是一个地址字段，**不是一个开关**。
 
 ---
 
@@ -195,7 +203,7 @@ authority、第二个 writer、临时 runtime fallback、或"先用 runtime 兜�
 算出 canonical manifest 与 generation、以及 DNS candidate 校验"这四件**互不依赖**
 的事做完做透。**本 checkpoint 不构造 desired state**——它消费调用方传入的。
 
-**前置条件**：无（ADR-025 已 Accepted，TASK 已合并）。**不被 ADR-035 阻塞。**
+**前置条件**：无。**已于 2026-09-19 由 PR #156 完成并合并。**
 
 **必须完成的 production wiring**：
 - receipt **producer** 侧完成接线：`sync_nodes()` 对**传给 `write_provider_cache()`
@@ -409,7 +417,9 @@ repository-standard precise timestamp 一致（MySQL 下即 `DATETIME(fsp=6)`
 
 #### B2-B2 —— concrete DB desired loader + preparation transaction
 
-**⛔ 前置条件：ADR-035 已 Accepted**（deployment constants 来源）**且 B2-B1 已合并。**
+**前置条件：B2-B1 已合并（PR #156，已满足）。** deployment constants 的落点
+由 **ADR-035** 裁定，结论已写死在上面「deployment-owned 常量的落点」一节。
+**没有别的等待项。**
 
 **目标**：`SqlMihomoDesiredSnapshotLoader` 从 DB 全量重建 `DesiredForwarderState`
 （铁律 1），`prepare_mihomo_reconciliation()` 在锁内把 generation 与
@@ -421,11 +431,17 @@ generation + intent 的**唯一**生产者。
 
 **允许修改的文件**：`backend/app/infra/mihomo_reconciliation.py`、
 `backend/app/infra/credential_resolver.py`、
-`backend/tests/unit/test_mihomo_reconciliation.py`（均已在总清单内）。
+`backend/tests/unit/test_mihomo_reconciliation.py`、
+**`backend/app/core/config.py`**、**`backend/tests/unit/test_registry.py`**
+（前三个原本就在总清单内；后两个是 ADR-035 的后果，已补进总清单，
+**只做上面那张 B2-B2/S04-C 边界表里 B2-B2 那一列**）。
 
 **必须新增的测试**：`test_prepare_generation_and_intent_commit_together`、
 `test_sql_controller_secret_resolver_requires_exact_purpose_and_revision`、
-loader 全量 DB 重建与稳定排序的覆盖。
+loader 全量 DB 重建与稳定排序的覆盖、
+`mihomo_external_controller` 为空时 `forwarder_provider="mihomo"`
+的 `validate_runtime_safety()` fail-closed 覆盖（放 `test_registry.py`，
+与那里已有的 `test_xray_runtime_safety_requirements_fail_closed` 同形）。
 
 **明确不做**：不做 freshness 二次/三次复核；不做 recovery；不做 runtime readback；
 不改 `mihomo_projection_lock.py` / `mihomo_blocker.py` 的公开签名。
@@ -488,16 +504,33 @@ A→B→A 新 revision、**两个并发 writer 只有一个 runtime apply**。
   consumer 与 resolver 已交付且被测试完整覆盖但尚无生产调用点，
   `reconcile_mihomo_job()` 仍走 B1 的注入式边界，**没有半接线、没有临时 fallback、
   `FORWARDER_PROVIDER=mihomo` 仍被拒绝**。
-- **B2-B2 起新开 PR**，因为它被 ADR-035 阻塞，不能让 #156 无限期挂着。
+- **B2-B2 起新开 PR。** 当时的理由是"它被 ADR-035 阻塞，不能让 #156 无限期
+  挂着"；**#156 已于 2026-09-19 合并，ADR-035 已于 2026-09-20 裁定，
+  两个理由都已消失**，但"一个 checkpoint 一个 PR"这条仍然照办。
 
 ---
 
 ### S04-C — 注册表放行与生产选择（NOT STARTED）
 
 `build_registry()` 接受 `FORWARDER_PROVIDER=mihomo`，
-`Settings.validate_runtime_safety()` 加入与 Marzban 同级的 fail-closed 校验，
 `.env.example` 补齐变量，lifecycle/factory 边界。**生产激活本身仍需 User
 明确批准，不由本任务授权。**
+
+> **2026-09-20 修订（ADR-035）：`mihomo_external_controller` 的 fail-closed
+> 校验已划给 B2-B2，不再是 S04-C 的活。** 原文写的"`validate_runtime_safety()`
+> 加入与 Marzban 同级的 fail-closed 校验"指的就是它。S04-C 在这个函数里仍
+> 负责 **S04-C 自己新引入的字段**（如果有）的校验，**不重复实现 controller
+> 地址那一条**。
+>
+> **`.env.example` 具体要补的那一行，写死在这里，免得以后重新推导**：
+>
+> ```
+> # Mihomo external controller, host:port. Empty until Mihomo is selected.
+> MIHOMO_EXTERNAL_CONTROLLER=
+> ```
+>
+> 为什么它留在 S04-C 而字段的校验去了 B2-B2：`.env.example` 是纯文档，
+> **不参与 fingerprint、不影响 fail-closed 行为**；而校验参与（ADR-035 §3.2）。
 
 ## 约束
 
@@ -547,6 +580,7 @@ backend/app/infra/mihomo_blocker.py
 backend/app/infra/mihomo_generation.py              # 新增：manifest/fingerprint/allocator
 backend/app/infra/mihomo_materialization.py         # 新增：receipt 读取与校验
 backend/app/infra/credential_resolver.py
+backend/app/core/config.py                          # 2026-09-20 补入（ADR-035）：仅 mihomo_external_controller 字段 + 非空校验
 backend/app/providers/forwarder/mihomo.py
 backend/app/providers/forwarder/mihomo_projection.py
 backend/app/providers/transport/subscription.py     # 仅为 receipt producer 计算 content_hash
@@ -563,10 +597,21 @@ backend/tests/guards/test_secret_leak.py
 backend/tests/integration/test_mihomo_reconciliation_mysql.py
 backend/tests/integration/test_db_adapters.py
 backend/tests/integration/test_models.py                # 2026-09-19 补入，依据见下
+backend/tests/unit/test_registry.py                     # 2026-09-20 补入（ADR-035）：仅上面那条非空校验的单测
 docs/80-decisions/ADR-025-mihomo-projection-generation-authority.md      # 仅状态改为 Accepted
 docs/82-tasks/TASK-S04-mihomo-activation.md
 docs/83-project-continuity.md
 ```
+
+> **两份清单有两处刻意重叠（2026-09-20，ADR-035）。**
+> `backend/app/core/config.py` 与 `backend/tests/unit/test_registry.py`
+> **同时**出现在 S04-B2-B 和 S04-C 清单里。**这不是漏改，也不是把它们从
+> S04-C 拿走**——B2-B2 只做 `mihomo_external_controller` 字段与它的非空校验
+> （加上单测），S04-C 仍然独占 `build_registry()` 放行、lifecycle/factory、
+> `.env.example`。精确切分见上面 B2-B2 那张边界表。
+>
+> **重叠意味着这两个文件上可能出现先后两次改动**，这是允许的；
+> 不允许的是某一边越过边界表去做对方那一列。
 
 ### 迁移编号：**已更新为 `0025` / `0026`**（2026-09-19）
 
@@ -692,6 +737,11 @@ python -m pytest backend/tests                # 需 TEST_DATABASE_URL（MySQL 8.
 - **迁移幂等**：两个新迁移在已存在对象时可重复执行（铁律 7）。
 - **边界证明**：一条测试断言本阶段结束时 `FORWARDER_PROVIDER=mihomo`
   **仍然**被 `build_registry()` 拒绝。
+- **deployment 常量 fail-closed（2026-09-20 补入，ADR-035）**：一条测试断言
+  `forwarder_provider="mihomo"` 且 `mihomo_external_controller` 为空白时，
+  `validate_runtime_safety()` 抛 `ValueError`；一条断言非空时通过。
+  另断言 `api-secret-ref` 取自 `MIHOMO_CONTROLLER_SECRET_REF` 常量，
+  **不来自** `Settings`。
 
 ### S04-C
 

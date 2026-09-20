@@ -11,6 +11,62 @@ state, reviews, and checks. Do not rely on an older chat or SHA snapshot.
 
 ## 2. Roles and workflow
 
+> ## ADR-036 (2026-09-20) is the current split — read this before the rest
+>
+> **ChatGPT now owns planning and execution end to end: it writes the TASK
+> files, maintains the dispatch queue, sets the granularity, dispatches Codex
+> desktop, and reviews the result. Claude Code writes ADRs and nothing else on
+> the routine path, and runs only when the user asks. Every PR is merged by
+> the user by hand.**
+>
+> The user's instruction, verbatim: 「别设置卡点啦，把权利都下放给 ChatGPT。
+> 你只负责整体架构设计和阶段性审核，这个我会不定时让你执行。让 ChatGPT 能够
+> 完全自主的根据你的架构和计划执行，而不是做一段任务之后，又得回来找你确认
+> 架构和计划。」
+>
+> **What actually moved**: `docs/82-tasks/**` (Claude-exclusive → ChatGPT
+> writes it), the "must have a TASK file first" threshold (was a gate on
+> Claude → ChatGPT judges it), and `docs/85` §5's dispatch queue.
+> **What did not move**: `docs/80-decisions/**` and `docs/81-reviews/**` stay
+> Claude-exclusive; `AGENTS.md`'s iron rule 5 (an ADR before any architecture
+> change) is untouched.
+>
+> **The one remaining stop condition does not point at Claude.** When ChatGPT
+> concludes that an accepted ADR's conclusion must change, it goes to **the
+> user**, who decides whether to wake Claude — consistent with ADR-034's "the
+> user's word is the only entry point." Nothing else is a stop: how to split a
+> task, how fine an instruction card should be, which file list to authorize,
+> which implementation to pick, whether to write a TASK at all — ChatGPT
+> decides.
+>
+> **The cost, stated rather than hidden** (ADR-036 §4): the paragraph below
+> about "the specifier and the reviewer are still different agents" **is no
+> longer true**. ChatGPT now specifies, dispatches and reviews, so
+> spec-level defects have lost their independent finder. Historically that
+> class of defect appeared three times (S07's allowed-file list twice, S11's
+> missing `risk-classify.yml` checkout premise) and **none of the three was
+> caught by review** — two by CI, one by the executor stopping and reporting.
+> What still backstops it: the implementer is a different agent; ADRs stay
+> Claude-exclusive so ChatGPT cannot self-authorize an architecture change;
+> **the user merges every PR by hand** (mechanical since PR #158); nine
+> required status checks; and the user's occasional stage review.
+>
+> **`AGENTS.md` was not edited** (it requires the user's confirmation). Lines
+> 99 and 112 there still say `docs/82-tasks/**` is Claude-exclusive; ADR-036
+> overrides them under the repository's own ADR > AGENTS.md order, and ADR-036
+> §3 records the exact two-line edit if the user wants the file cleaned up.
+>
+> **No background Claude exists** (verified 2026-09-20, ADR-036 §5): zero
+> Routines; `claude.yml` triggers only on an `issue_comment` containing
+> `@claude` from the user; `pipeline-health.yml` runs every two hours but
+> contains no LLM and no Claude credential, by deliberate design. There was
+> nothing to turn off.
+>
+> ---
+>
+> **The rest of this section is the pre-ADR-036 state.** It is kept because its
+> reasoning is still the reason the current arrangement costs what it costs.
+>
 > **ADR-032 + ADR-033 (both 2026-09-19) are the current split; together they
 > supersede ADR-030's.** **ChatGPT directs and reviews; Codex *desktop*
 > implements; Claude Code designs the architecture, writes the ADRs/TASKs,
@@ -36,7 +92,11 @@ state, reviews, and checks. Do not rely on an older chat or SHA snapshot.
 > staying Claude-exclusive: ChatGPT reviews against a TASK it did not write, so
 > the specifier and the reviewer are still different agents even though the
 > dispatcher and the reviewer are the same one. Relaxing that write boundary
-> silently removes the only thing making the review independent. Second,
+> silently removes the only thing making the review independent.
+> **→ ADR-036 (2026-09-20) relaxed exactly that boundary, deliberately and
+> with the cost stated. This sentence is therefore no longer a description of
+> the current arrangement — it is the reason ADR-036 costs what it costs. See
+> the box at the top of this section.** Second,
 > **unattended operation is off the table** (ADR-032 §4) — Codex desktop runs
 > on the user's machine, so nothing advances while it is off. CI, auto-merge
 > and the health digest still run without it. Third, **nobody reads the health
@@ -327,7 +387,8 @@ different contents) and the PR #128 version won.
   freshness proof. It does not activate
   Mihomo, wire `FORWARDER_PROVIDER=mihomo` into production, deploy, or authorize
   real-provider production use.
-- **S04-B:** ACTIVE. B1 merged; B2-A merged (PR #128); B2-B not started —
+- **S04-B:** ACTIVE. B1 merged; B2-A merged (PR #128); **B2-B1 merged
+  (PR #156, 2026-09-19); B2-B2 next and unblocked** —
   see `TASK-S04-mihomo-activation.md` for the authorized scope of each stage.
 - **S04-B1:** COMPLETE / merged from `task/s04-b1-mihomo-durable-reconciliation`.
   Merge commit: `c494ade7d40419afd1a812c8b5ddefb154b1c14c`. It adds only
@@ -357,35 +418,52 @@ different contents) and the PR #128 version won.
   a blocker; do not cite it as one.**
 
   **B2-B1** (receipt binding, SQL controller-secret resolver, canonical
-  manifest + generation allocator, DNS candidate gate) is on **PR #156** and
-  depends on nothing else. **B2-B2 / B2-B3 / B2-B4 are blocked on a new ADR**
-  — see the next bullet. The four checkpoints' union equals the original
-  B2-B; nothing was deferred to S04-C and no acceptance criterion was
-  lowered. The split followed the §6.1 breaker: Codex failed the same Round 1
-  finding set twice, so retrying it unchanged was not allowed.
+  manifest + generation allocator, DNS candidate gate) **merged as PR #156 on
+  2026-09-19**. **B2-B2 is next and has no open blocker** — the ADR it was
+  waiting on now exists; see the next bullet. The four checkpoints' union
+  equals the original B2-B; nothing was deferred to S04-C and no acceptance
+  criterion was lowered. The split followed the §6.1 breaker: Codex failed the
+  same Round 1 finding set twice, so retrying it unchanged was not allowed —
+  and the split worked: the first checkpoint landed.
 
-- **⛔ S04-B2-B2 blocker — `ADR-035` is needed and does not exist yet.**
-  **The authority class is already settled and is not what is open.** ADR-025
-  §3's taxonomy rules deployment-owned validated constants as
-  **`deployment, not DB`**, read from **validated `Settings` / repo-owned
-  deployment constants**, and states outright that **"Deployment constants are
-  never migrated into the database."** A DB table is therefore not an
-  available option; proposing one would require superseding ADR-025.
+- **✅ S04-B2-B2 unblocked — `ADR-035` is written and accepted (2026-09-20).**
+  **The authority class was never what was open.** ADR-025 §3's taxonomy rules
+  deployment-owned validated constants as **`deployment, not DB`**, read from
+  **validated `Settings` / repo-owned deployment constants**, and states
+  outright that **"Deployment constants are never migrated into the
+  database."** A DB table was therefore never an available option; proposing
+  one would require superseding ADR-025.
 
-  What is genuinely open sits *inside* that class. Three of the seven
+  What was genuinely open sat *inside* that class: three of the seven
   `_validate_deployment_constants()` keys have no default and must be supplied
   by the caller — `external-controller`, `api-secret-ref` and
   `api-secret-revision`; only `mode`, `mixed-port`, `allow-lan` and
-  `log-level` default. `api-secret-revision`'s source is already decided (the
-  fresh purpose-bound `Secret.revision`), so the open question is narrow:
-  **do `external-controller` and `api-secret-ref` live in validated `Settings`
-  or in repo-owned fixed constants?** Both are legal under ADR-025 §3.
-  `Settings` has the closer precedent (`core/config.py:62`'s
-  `transport_cache_root`) but that file belongs to S04-C, which is a TASK
-  scoping problem rather than an architectural one; fixed constants keep B2-B2
-  self-contained but pin an environment-specific `host:port` that S04-C would
-  have to move. ADR-035 decides only that, and may not reopen the authority
-  class.
+  `log-level` default. `api-secret-revision`'s source was already decided (the
+  fresh purpose-bound `Secret.revision`), leaving two.
+
+  **ADR-035's answers, so nobody re-derives them:**
+
+  | key | placement |
+  |---|---|
+  | `external-controller` | **validated `Settings`** — new field `mihomo_external_controller: str = ""`, non-blank check in `validate_runtime_safety()` gated on `forwarder_provider == "mihomo"`; the **format** authority stays `_validate_controller_address()` and is not duplicated into `config.py` |
+  | `api-secret-ref` | **repo-owned constant** `MIHOMO_CONTROLLER_SECRET_REF = "mihomo/api-secret"` beside the existing `MIHOMO_CONTROLLER_SECRET_PURPOSE` in `infra/credential_resolver.py` |
+
+  The discriminator ADR-035 sets for any future case: **would two correct
+  deployments hold different values? Yes → `Settings`; no → repo constant.**
+  `api-secret-ref` is half of the composite `(secret_ref, purpose)` lookup in
+  `core/secrets.py:185-190`, and its other half is already a repo constant —
+  splitting the pair across two ownership domains would allow a mismatch that
+  no configuration check could detect, because `Settings` validation does not
+  touch the database.
+
+  **Consequence for the file lists**: B2-B2 gains `backend/app/core/config.py`
+  and `backend/tests/unit/test_registry.py`, which **also stay in S04-C's
+  list**. The overlap is deliberate and the TASK carries the exact boundary
+  table: B2-B2 adds only the field and its non-blank check; S04-C keeps
+  `build_registry()` acceptance, lifecycle/factory, and `.env.example` (whose
+  exact line is written into the TASK's S04-C section). The field and its
+  check must land together because ADR-025 §3 says **validated** `Settings`
+  and the value enters the fingerprinted manifest verbatim.
 
   > **An earlier version of this entry was wrong** and said both ADRs left the
   > constants unlocated, listing a versioned DB table as a candidate. ADR-025
@@ -573,6 +651,13 @@ not the invariants.
 > point**. The user's plan is to accumulate a large batch of implementation
 > work before calling for a review, so the further apart the rows, the more
 > this matters.
+>
+> **2026-09-20 (ADR-036) makes this table matter more, not less.** ChatGPT now
+> writes the specs it reviews against, so the user-triggered stage review is
+> the only place a spec-level defect gets an independent reader. Verified the
+> same day: nothing wakes Claude on a schedule — zero Routines, `claude.yml`
+> fires only on the user's `@claude` comment, and `pipeline-health.yml` holds
+> no LLM and no Claude credential (ADR-036 §5).
 
 Every audit appends a row: **date, the `main` SHA audited, what was actually
 run, what was found, whether the breaker was pulled.** An audit that only
