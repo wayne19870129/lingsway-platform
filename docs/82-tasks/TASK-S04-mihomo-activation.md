@@ -38,11 +38,6 @@ durable transport materialization receipt 的 producer/commit/crash 契约、
 > **2026-09-20 进度：B2-B1 已完成并合并（PR #156）。下一个是 B2-B2，
 > 它没有任何待解除的阻塞项**——deployment 常量的落点已由 **ADR-035** 裁定，
 > 结论逐条写死在下面。
->
-> **本文件自 ADR-036 起由 ChatGPT 维护**（`docs/82-tasks/**` 不再是 Claude
-> 独占）。ChatGPT 可以直接修订本文件的切分、粒度、允许文件与验收标准；
-> **唯一不能自己改的是它引用的那些 ADR 结论**——那需要新 ADR，路由见
-> ADR-036 §2（交给 User，不是回头找 Claude）。
 
 交付：
 
