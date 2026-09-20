@@ -24,3 +24,16 @@ def test_job_payload_contract_is_identifier_only() -> None:
     assert "secret" not in encoded.lower()
     assert "token" not in encoded.lower()
     assert "subscription_url" not in encoded.lower()
+
+
+def test_only_transport_sync_is_a_materialization_receipt_producer() -> None:
+    for path in (
+        Path("backend/app/infra/mihomo_materialization.py"),
+        Path("backend/app/infra/mihomo_reconciliation.py"),
+        Path("backend/app/providers/forwarder/mihomo.py"),
+    ):
+        source = path.read_text()
+        assert "MihomoTransportMaterialization(" not in source
+        assert ".add(MihomoTransportMaterialization" not in source
+    source = Path("backend/app/workers/transport_sync.py").read_text()
+    assert "MihomoTransportMaterialization(" in source

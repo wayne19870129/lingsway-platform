@@ -50,9 +50,7 @@ def endpoint_id(provider_code: str, protocol: str, host: str, port: int, name: s
     return hashlib.sha256(value).hexdigest()[:24]
 
 
-def normalize_clash_proxy(
-    provider_code: str, item: dict[str, object]
-) -> TransportEndpointDTO:
+def normalize_clash_proxy(provider_code: str, item: dict[str, object]) -> TransportEndpointDTO:
     protocol = str(item.get("type", "unknown")).lower()
     host = str(item.get("server", ""))
     port = int(cast(str | int, item.get("port", 0)))
@@ -194,6 +192,7 @@ class SubscriptionTransportProvider:
         subscription_url: str,
         client: httpx.Client | None = None,
         cache_path: Path | None = None,
+        source_revision: int | None = None,
     ) -> None:
         self.provider_code = provider_code
         self._url = subscription_url
@@ -204,10 +203,13 @@ class SubscriptionTransportProvider:
         self._owns_client = client is None
         self._client = client or httpx.Client(timeout=20.0, follow_redirects=True)
         self._cache_path = cache_path
+        self._source_revision = source_revision
         self._enabled = True
         self._endpoints: list[TransportEndpointDTO] = []
         self._capacity: TransportCapacityDTO | None = None
         self._close_failed = False
+        self._last_content_hash: str | None = None
+        self._last_cache_identity: str | None = None
 
     def __repr__(self) -> str:
         return (
@@ -265,9 +267,7 @@ class SubscriptionTransportProvider:
         # the Clash.Meta user agent. A generic "mihomo" UA may instead return
         # a base64 URI list, which cannot be consumed by a file provider.
         try:
-            response = self._client.get(
-                self._url, headers={"User-Agent": "clash.meta/1.19"}
-            )
+            response = self._client.get(self._url, headers={"User-Agent": "clash.meta/1.19"})
             response.raise_for_status()
         except httpx.HTTPError:
             raise RuntimeError("Subscription fetch failed") from None
@@ -277,10 +277,23 @@ class SubscriptionTransportProvider:
         endpoints = parse_subscription(self.provider_code, response.text)
         if self._cache_path is not None:
             validate_mihomo_provider_document(response.text)
+            local_hash = hashlib.sha256(response.content).hexdigest()
             write_provider_cache(self._cache_path, response.content)
+            self._last_content_hash = local_hash
+            self._last_cache_identity = str(self._cache_path)
         # Publish the new snapshot only after parsing and cache persistence succeed.
         self._endpoints = endpoints
         self._capacity = capacity
+
+    def materialization_proof(self) -> tuple[str, str, int] | None:
+        """Return proof for the bytes written by the most recent successful sync."""
+        if (
+            self._last_content_hash is None
+            or self._last_cache_identity is None
+            or self._source_revision is None
+        ):
+            return None
+        return self._last_cache_identity, self._last_content_hash, self._source_revision
 
     def list_endpoints(self) -> list[TransportEndpointDTO]:
         return list(self._endpoints)

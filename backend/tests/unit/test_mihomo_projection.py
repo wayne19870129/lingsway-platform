@@ -118,6 +118,7 @@ def test_canonical_mihomo_document_contract() -> None:
         "rules",
         "dns",
     }
+    document, _ = compose_mihomo_document(snapshot())
     assert "api-secret-ref" not in document
     assert "secret-ref" not in document
     assert document["mode"] == "rule"
@@ -126,6 +127,21 @@ def test_canonical_mihomo_document_contract() -> None:
     listeners = cast(list[dict[str, object]], document["listeners"])
     assert listeners[0]["port"] == 10001
     assert listeners[0]["proxy"] == "REJECT"
+
+
+def test_dns_enable_requires_boolean() -> None:
+    invalid = DesiredForwarderState(
+        listener_specs=snapshot().listener_specs,
+        proxies=snapshot().proxies,
+        proxy_groups=snapshot().proxy_groups,
+        rules=snapshot().rules,
+        dns={"enable": "true"},
+        transport_materializations=snapshot().transport_materializations,
+        transport_references=snapshot().transport_references,
+        deployment_constants=mihomo_constants(),
+    )
+    with pytest.raises(MihomoProjectionError, match="MIHOMO_DNS_INVALID"):
+        compose_mihomo_document(invalid)
 
 
 @pytest.mark.parametrize(

@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -6,6 +7,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+import backend.app.providers.transport.subscription as subscription_module
 from backend.app.core.config import Settings
 from backend.app.providers.registry import ProviderRegistry, build_registry
 from backend.app.providers.transport.subscription import (
@@ -82,10 +84,9 @@ def test_successful_sync_atomically_updates_mihomo_provider_file(tmp_path: Path)
     adapter = SubscriptionTransportProvider(
         "CAP",
         "https://provider.invalid/private",
+        source_revision=1,
         client=httpx.Client(
-            transport=httpx.MockTransport(
-                lambda _: httpx.Response(200, content=content.encode())
-            )
+            transport=httpx.MockTransport(lambda _: httpx.Response(200, content=content.encode()))
         ),
         cache_path=target,
     )
@@ -94,18 +95,71 @@ def test_successful_sync_atomically_updates_mihomo_provider_file(tmp_path: Path)
     assert not target.with_suffix(".yaml.tmp").exists()
 
 
+def test_subscription_sync_hashes_exact_bytes_before_atomic_cache_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    content = b"proxies:\n  - {name: US, type: trojan, server: us.invalid, port: 443}\n"
+    captured: list[bytes] = []
+    original = subscription_module.write_provider_cache
+
+    def capture(path: Path, value: bytes) -> None:
+        captured.append(value)
+        original(path, value)
+
+    monkeypatch.setattr(subscription_module, "write_provider_cache", capture)
+    adapter = SubscriptionTransportProvider(
+        "CAP",
+        "https://provider.invalid/private",
+        source_revision=1,
+        client=httpx.Client(
+            transport=httpx.MockTransport(lambda _: httpx.Response(200, content=content))
+        ),
+        cache_path=tmp_path / "provider.yaml",
+    )
+    adapter.sync_nodes()
+    assert captured == [content]
+    proof = adapter.materialization_proof()
+    assert proof is not None
+    assert proof[1] == hashlib.sha256(captured[0]).hexdigest()
+    assert proof[2] == 1
+
+
+def test_failed_cache_write_preserves_last_materialization_proof(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = b"proxies:\n  - {name: A, type: trojan, server: a.invalid, port: 443}\n"
+    second = b"proxies:\n  - {name: B, type: trojan, server: b.invalid, port: 443}\n"
+    responses = iter((first, second))
+    adapter = SubscriptionTransportProvider(
+        "CAP",
+        "https://provider.invalid/private",
+        source_revision=4,
+        client=httpx.Client(
+            transport=httpx.MockTransport(lambda _: httpx.Response(200, content=next(responses)))
+        ),
+        cache_path=tmp_path / "provider.yaml",
+    )
+    adapter.sync_nodes()
+    original = subscription_module.write_provider_cache
+    def fail_write(*_: object) -> None:
+        raise OSError("disk")
+
+    monkeypatch.setattr(subscription_module, "write_provider_cache", fail_write)
+    first_proof = adapter.materialization_proof()
+    with pytest.raises(OSError):
+        adapter.sync_nodes()
+    assert adapter.materialization_proof() == first_proof
+    monkeypatch.setattr(subscription_module, "write_provider_cache", original)
+
+
 def test_failed_sync_preserves_last_known_good_provider_file(tmp_path: Path) -> None:
     target = tmp_path / "provider.yaml"
-    target.write_text(
-        "proxies:\n  - {name: OLD, type: trojan, server: old.invalid, port: 443}\n"
-    )
+    target.write_text("proxies:\n  - {name: OLD, type: trojan, server: old.invalid, port: 443}\n")
     adapter = SubscriptionTransportProvider(
         "CAP",
         "https://provider.invalid/private",
         client=httpx.Client(
-            transport=httpx.MockTransport(
-                lambda _: httpx.Response(200, text="proxies: []\n")
-            )
+            transport=httpx.MockTransport(lambda _: httpx.Response(200, text="proxies: []\n"))
         ),
         cache_path=target,
     )
@@ -321,9 +375,7 @@ def test_cache_requires_mihomo_document_and_keeps_state_unpublished(tmp_path: Pa
     adapter = SubscriptionTransportProvider(
         "CAP",
         "https://provider.invalid/private",
-        client=httpx.Client(
-            transport=httpx.MockTransport(lambda _: httpx.Response(200, text=uri))
-        ),
+        client=httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(200, text=uri))),
         cache_path=target,
     )
 
