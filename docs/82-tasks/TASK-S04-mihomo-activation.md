@@ -787,7 +787,12 @@ backend/tests/unit/test_mihomo_generation.py
 backend/tests/guards/test_secret_leak.py
 ```
 
-**必须照抄的契约**：ADR-037 §4（DTO 字段与四条关系）、§5（manifest 键与排序）。
+**必须照抄的契约**：ADR-037 §4（DTO 字段、**loader 排序职责**与四条关系）、
+§5（manifest 键与序列化）。
+
+> **排序职责只有一个归属**：`egress_proxies` 按 `name` 升序**由 loader 保证**，
+> **manifest 与 render 都不得再次重排**（ADR-037 §4）。B2-B2a 只验证
+> 「不重排」，排序本身由 B2-B2 的 loader 测试覆盖。
 
 **`MANIFEST_VERSION` 必须由 `"1"` 升到 `"2"`（写死，不要跳过）：**
 
@@ -800,7 +805,7 @@ backend/tests/guards/test_secret_leak.py
 
 | 测试名 | 关键断言 |
 |---|---|
-| `test_manifest_includes_egress_proxies_sorted_by_name` | 乱序传入的 `egress_proxies` ⇒ manifest 里按 `name` 升序；八个字段齐全 |
+| `test_manifest_includes_egress_proxies_without_reordering` | 传入**已按 `name` 升序**的 `egress_proxies` ⇒ manifest **原样保持输入顺序，不再次排序**；八个字段完整进入 manifest。⚠️ **2026-09-20 更正**：原名 `..._sorted_by_name`、原断言「乱序传入 ⇒ manifest 自己排序」，**与 ADR-037 §4「由 loader 保证排序，渲染与 manifest 都不得再次重排」直接冲突**。排序职责在 loader（见 B2-B2 的测试），不在 manifest |
 | `test_manifest_version_is_bumped_for_egress_proxies_shape` | `MANIFEST_VERSION == "2"`；且用 v1 的 generation row 与 v2 manifest 比对时**不复用**，分配新 revision |
 | `test_egress_proxy_dto_repr_redacts_credential_ref` | `repr(ForwarderEgressProxyDTO(...))` **不含** `credential_secret_ref` 的值 |
 | `test_desired_forwarder_state_accepts_egress_proxies_and_freezes` | `egress_proxies` 通过 `__post_init__` 的 `freeze()`；`tuple[str,str,int]` 的 identity 三元组可被接受 |
@@ -855,7 +860,7 @@ backend/tests/guards/test_secret_leak.py
 | `test_assigned_and_degraded_endpoints_are_in_scope` | 三个出口分别 `AVAILABLE` / `ASSIGNED` / `DEGRADED` ⇒ 三者都出现在 `listener_specs`；`len(listener_specs) == 出口数` |
 | `test_transport_endpoint_record_non_identity_columns_are_not_inputs` | 只改 `region` / `latency_ms` / `status` / `raw_metadata_json` ⇒ manifest fingerprint **不变**（`name`/`host`/`port` 是 identity，其余不是） |
 | `test_prepare_rolls_back_generation_when_intent_enqueue_fails` | 在 `allocate_generation()` 已 flush 之后强制 `enqueue_mihomo_reconciliation()` 抛错 ⇒ **测试自身不得调用 `db.rollback()`**；断言 Session 已无活动 preparation 事务（或等价地：紧接着的 `db.commit()` 无法持久化那个 generation），并断言**没有**新的 `MihomoProjectionGeneration`、**没有**新的 `MIHOMO_RECONCILE` Job |
-| `test_loader_populates_egress_proxies_with_opaque_credential_identity` | **（顺序修订后新增）** loader 产出的 `egress_proxies` 每项带正确的 `credential_secret_ref`（按 ADR-019 §7 precedence 选出）与正整数 `credential_revision`；**全过程 `reveal_secret` / `decrypt_secret` 不得被调用**（monkeypatch 成调用即失败） |
+| `test_loader_populates_egress_proxies_with_opaque_credential_identity` | **（顺序修订后新增）** ① **数据源故意乱序**（种入的 egress 行顺序不等于 `name` 升序）⇒ loader 产出的 `DesiredForwarderState.egress_proxies` **必须按 `name` 升序** —— 排序职责在 loader（ADR-037 §4）；② 每项带正确的 `credential_secret_ref`（按 ADR-019 §7 precedence 选出）与正整数 `credential_revision`；③ **全过程 `reveal_secret` / `decrypt_secret` 不得被调用**（monkeypatch 成调用即失败） |
 | `test_assignment_node_change_changes_manifest_fingerprint` | **（顺序修订后前移到 B2-B2）** 只把 ACTIVE assignment 的 `transport_node_id` 由 node-A 改为同 provider 的合法 node-B ⇒ `transport_proxy_name` 与 `transport_node_identity` 变，`manifest_fingerprint()` **不同**，`allocate_generation()` 返回**新 revision** |
 | `test_binding_credential_ref_change_changes_manifest_fingerprint` | **（顺序修订后前移到 B2-B2）** 只把 ACTIVE `EgressBinding.credential_secret_ref` 由 secret-A 改为 secret-B ⇒ fingerprint **不同** + 新 revision。**另加一例**：同 ref 的 `Secret.revision` N→N+1 ⇒ 同样不同 + 新 revision |
 | `test_active_binding_credential_override_is_preserved_as_opaque_identity` | **（顺序修订后前移到 B2-B2）** override 非空 ⇒ `credential_secret_ref` **等于 override 的 ref**；`NULL`/空串 ⇒ **等于 endpoint 的 ref**；非空但 malformed ⇒ **fail closed 且不回落** |
