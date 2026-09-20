@@ -99,13 +99,15 @@ B2-B2a contract substrate  ✅ 已合并（#167）
    ▼
 B2-B2  concrete DB desired loader + preparation transaction
    │        ← **2026-09-20 再切分为 .1 → .2 → .3 → .4 → .5 → .6**
-   │          .1 loader 实现 + 测试基座（#163，不接线）
-   │          .2 in-scope 与文档形状   ┐
-   │          .3 assignment 校验        ├ tests-only，只动测试文件
-   │          .4 credential precedence  ┘
-   │          .5 fingerprint 不变式（依赖 .3 + .4 的变体）
+   │          .1 loader core + 测试基座 + whitespace fail-closed（#163，不接线）
+   │          .2 in-scope / document-shape              （tests-only）
+   │          .3 assignment 校验 + receipt-verified transport proxy 解析
+   │             ↑ **含生产实现**，必须早于 .6
+   │          .4 credential identity / precedence       （tests-only）
+   │          .5 fingerprint invariants（依赖 .3 + .4 的变体，tests-only）
    │          .6 preparation + production wiring
-   │        ← **只有 .6 能生产 generation**，此时 manifest 与三条不变式都已就位
+   │        ← **只有 .6 能生产 generation**，此时 manifest、三条不变式
+   │          与 assignment 的五条 fail-closed 都已就位
    ▼
 B2-B2c render / finalization（dialer-proxy + 明文在 render 边界）
    ▼
@@ -761,14 +763,16 @@ B2-B2  concrete DB desired loader + preparation transaction
    │      ⚠️ **2026-09-20 第四次修订：本段已再切分为 6 个 checkpoint**
    │         （返工熔断，见下方「B2-B2 的再切分」整节）
    │
-   ├─ B2-B2.1 loader 实现 + 测试基座（**不接生产路径**）  ← PR #163 收敛到这里
-   ├─ B2-B2.2 in-scope 集合与文档形状          （tests-only）
-   ├─ B2-B2.3 assignment 校验与 fail closed    （tests-only）
-   ├─ B2-B2.4 credential identity 与 precedence（tests-only）
-   ├─ B2-B2.5 fingerprint 不变式               （tests-only）
-   └─ B2-B2.6 preparation 事务 + production wiring
+   ├─ B2-B2.1 loader core + 测试基座 + whitespace fail-closed  ← PR #163
+   ├─ B2-B2.2 in-scope / document-shape              （tests-only）
+   ├─ B2-B2.3 assignment 校验 + receipt-verified transport proxy 解析
+   │            ↑ **含生产实现**（`mihomo_reconciliation.py`）
+   ├─ B2-B2.4 credential identity / precedence       （tests-only）
+   ├─ B2-B2.5 fingerprint invariants                 （tests-only）
+   └─ B2-B2.6 preparation + production wiring
    │      ← **只有 B2-B2.6 能生产 generation**；它合并时 manifest 早已完整、
-   │         且 ADR-037 的三条核心不变式已在 .2–.5 被证明 —— §5a 不变式成立
+   │         ADR-037 的三条核心不变式已在 .4/.5 被证明，且 assignment 的
+   │         五条 fail-closed（含 `TRANSPORT_PROXY_UNRESOLVED`）已在 .3 就位
    ▼
 B2-B2c render / finalization
    │      dialer-proxy 渲染 + 凭据明文在 render 边界解析 + 协议白名单
@@ -954,8 +958,10 @@ B2-B2 连续两轮未能收敛，第二轮已经把 11 条未完成测试分成 
 ##### 切分原则（三条，任何重排都必须满足）
 
 1. **先交付共享前置，再交付依赖它的证明。** 第一个 checkpoint 只做
-   loader 实现 + **可参数化的 fixture 基座**；之后四个 checkpoint
-   **只改测试文件**，各自只写自己那一组变体。
+   loader core + **可参数化的 fixture 基座**；之后的 checkpoint 各自只写
+   自己那一组变体。**`.2` / `.4` / `.5` 只改测试文件**；
+   **`.3` 例外**，它还要补上 receipt-verified transport proxy 解析的生产实现
+   （理由见 `.3` 那一节：`.6` 在 B2-B2c 之前接线，这条校验不能留到 B2-B2c）。
 2. **能生产 generation 的接线放到最后。** 实测依据：`main`
    （`5ae40a6`）上 `allocate_generation()` **没有任何非测试调用者**，
    `prepare_mihomo_reconciliation()` 与 `SqlMihomoDesiredSnapshotLoader`
@@ -968,17 +974,24 @@ B2-B2 连续两轮未能收敛，第二轮已经把 11 条未完成测试分成 
 3. **单向依赖，不得回环**：`.1 → .2 → .3 → .4 → .5 → .6`。
    `.2` / `.3` / `.4` 之间**没有**相互依赖（可并行，但仍按序合并以避免
    同一测试文件反复冲突）；`.5` 真正依赖 `.3` 与 `.4` 建好的变体。
+   **`.3` 必须早于 `.6`** —— 这是本次审查修正加上的硬顺序要求。
 
 ##### 六个 checkpoint 一览
 
 | # | checkpoint | 交付物 | allowed files | 能否生产 generation |
 |---|---|---|---|---|
-| .1 | **loader 实现 + 测试基座** | `SqlMihomoDesiredSnapshotLoader` 全量 + fixture 基座 + whitespace fail-closed | 5 个（见下） | ❌ 不接线 |
-| .2 | **in-scope 集合与文档形状** | 3 条测试 | 仅测试文件 | ❌ |
-| .3 | **assignment 校验与 fail closed** | 3 条测试 | 仅测试文件 | ❌ |
-| .4 | **credential identity 与 precedence** | 2 条测试 | 仅测试文件 | ❌ |
-| .5 | **fingerprint 不变式** | 3 条测试 | 仅测试文件 | ❌ |
-| .6 | **preparation 事务 + production wiring** | `prepare_mihomo_reconciliation()` + 接线 + 2 条测试 | 2 个（见下） | ✅ **唯一一个** |
+| .1 | **loader core + 测试基座 + whitespace fail-closed** | `SqlMihomoDesiredSnapshotLoader` 全量 + fixture 基座 | 5 个（见下） | ❌ 不接线 |
+| .2 | **in-scope / document-shape**（tests-only） | 3 条测试 | 仅测试文件 | ❌ |
+| .3 | **assignment 校验 + receipt-verified transport proxy 解析** | `(name, host, port)` 三元组解析**实现** + 4 条测试 | `mihomo_reconciliation.py` + 测试文件 | ❌ |
+| .4 | **credential identity / precedence**（tests-only） | 2 条测试 | 仅测试文件 | ❌ |
+| .5 | **fingerprint invariants**（tests-only） | 3 条测试 | 仅测试文件 | ❌ |
+| .6 | **preparation + production wiring** | `prepare_mihomo_reconciliation()` + 接线 + 2 条测试 | 2 个（见下） | ✅ **唯一一个** |
+
+> **到 `.6` 接线之前，loader 的 transport assignment 已经满足
+> ADR-037 §2.2 / §4 的完整 fail-closed 契约** —— 五条错误码
+> （`NODE_MISSING` / `PROVIDER_MISMATCH` / `EGRESS_UNKNOWN` / `AMBIGUOUS` /
+> **`TRANSPORT_PROXY_UNRESOLVED`**）全部在 `.3` 就位。
+> **`.3` 因此是唯一一个 tests-only 之外的中间 checkpoint**，这是刻意的。
 
 ---
 
@@ -1136,29 +1149,82 @@ backend/tests/unit/test_mihomo_reconciliation.py
 
 ---
 
-##### B2-B2.3 —— assignment 校验与 fail closed（**tests-only**）
+##### B2-B2.3 —— assignment 校验 + receipt-verified transport proxy 解析
+
+> **⚠️ 2026-09-20 审查修正：本 checkpoint 原为 "tests-only"，现在**含生产实现**。**
+> 原切分把 `(name, host, port)` 三元组解析与
+> `test_transport_proxy_unresolved_fails_closed` 留在 **B2-B2c**。
+> **那是错的**：新顺序里 `B2-B2.6` 在 B2-B2c **之前**接线
+> `prepare_mihomo_reconciliation()` 并开始生产 generation，于是会出现一个窗口 ——
+> **generation producer 已接线，但 ACTIVE assignment 指向的 transport proxy
+> 还没被验证确实存在于 receipt-verified cache 内容里**。
+> 这正是 ADR-037 §5a 要防的那类中间状态，所以校验必须前移到 `.3`。
 
 **⛔ 前置**：`B2-B2.2` 已合并。
 
-**精确 allowed files：**
+**精确 allowed files（**仍是原 B2-B2 五文件并集的子集，不扩总体 scope**）：**
 
 ```
+backend/app/infra/mihomo_reconciliation.py
 backend/tests/unit/test_mihomo_reconciliation.py
 ```
 
+**必须新增的生产实现（ADR-037 §2.2 + §4，照抄，不要重新设计）：**
+
+当前 #163（`e611a05`）的 `load_current()` 只是直接拿
+`TransportEndpointRecord.name / host / port` 生成 `transport_proxy_name` 与
+`transport_node_identity`（`mihomo_reconciliation.py:375-376`），
+**从未与 cache 内容比对过**。本 checkpoint 补上这一步：
+
+```
+EgressTransportAssignment.transport_node_id
+  → TransportEndpointRecord(id, provider_id, name, host, port)
+  → 在**该 provider 的 receipt-verified materialized cache 内容**里，
+    按 (name, host, port) 三项全等 定位唯一一个 materialized proxy
+```
+
+- ACTIVE assignment **先**解析 `TransportEndpointRecord`（既有的
+  `NODE_MISSING` / `PROVIDER_MISMATCH` / `EGRESS_UNKNOWN` / `AMBIGUOUS`
+  四条校验保持不变，顺序在前）；
+- **然后只能在对应 provider 的 receipt-verified cache 内容里**匹配 transport proxy；
+- identity 必须**同时**匹配 `name`、`host`、`port` **三项**；
+- **恰好 1 个匹配**才允许写 `transport_proxy_name` 与 `transport_node_identity`；
+- **0 个或 >1 个匹配 ⇒ 抛 `MIHOMO_TRANSPORT_PROXY_UNRESOLVED`**，整份候选失败；
+- **不得退化成仅按 `name` 匹配**；
+- **不得使用未经 receipt 验证的 cache 内容** —— 只能用
+  `verify_materialization()` / `load_transport_materialization()` 已经验过的那份。
+
+> **依据**：ADR-037 §2.2 的定位规则与 fail-closed 表，
+> 以及 §4「`transport_references` / `transport_materializations`」那一行的关系契约
+> ——「`transport_proxy_name` 必须落在某个 receipt 覆盖的 cache 内容里，
+> 否则 `MIHOMO_TRANSPORT_PROXY_UNRESOLVED`」。
+> **三项全等而非只看 name 的理由**（ADR-037 §2.2）：`transport_sync.py:42-75`
+> 把这三列直接写自 `provider.list_endpoints()`，与 cache 同源；
+> 要求三项一致是**为了不一致时立刻发现**，而不是静默接上一个错节点。
+
 **必须新增的测试：**
 
-| 测试名 | 用到基座的哪条轴 |
-|---|---|
-| `test_loader_rejects_assignment_with_missing_transport_endpoint` | 轴 5 |
-| `test_loader_rejects_assignment_provider_mismatch` | 轴 5 |
-| `test_released_transport_assignment_does_not_block_projection` | 轴 5 |
+| 测试名 | 用到基座的哪条轴 | 关键断言 |
+|---|---|---|
+| `test_loader_rejects_assignment_with_missing_transport_endpoint` | 轴 5 | 见「B2-B2 必须新增的测试」表 |
+| `test_loader_rejects_assignment_provider_mismatch` | 轴 5 | 同上 |
+| `test_released_transport_assignment_does_not_block_projection` | 轴 5 | 同上 |
+| `test_transport_proxy_unresolved_fails_closed` | 轴 5 + 轴 9 | **两档都必须覆盖**：`(name, host, port)` 在 receipt-verified cache 内容里匹配 **0 个**、以及匹配 **>1 个**；两档**都**抛 `MIHOMO_TRANSPORT_PROXY_UNRESOLVED`，且**不产出任何 snapshot** |
+
+> **`test_transport_proxy_unresolved_fails_closed` 放
+> `backend/tests/unit/test_mihomo_reconciliation.py`。**
+> **建议按匹配数量参数化 `[0, 2]`**（`@pytest.mark.parametrize`），
+> 避免为两档各复制一整套 fixture ——
+> **直接复用 B2-B2.1 新增的参数化基座**（轴 9 控制 cache 文件内容，
+> 轴 5 控制 assignment），两档之间只差 cache 里写几个同 `(name, host, port)` 的条目。
 
 > `MIHOMO_TRANSPORT_ASSIGNMENT_AMBIGUOUS`（同 egress 两条 ACTIVE）
 > **不在本 checkpoint**：它的验收在 S04-C 的激活闸门那一节，
 > 基座的轴 5 只是**提前把它做成可构造**，不要在这里补测试。
 
-**明确不做**：不改任何生产代码；不碰 fingerprint（属 .5）。
+**明确不做**：不碰 fingerprint（属 .5）；不碰 credential precedence（属 .4）；
+不落地 `prepare_mihomo_reconciliation()`、不改 `reconcile_mihomo_job()`（属 .6）；
+不碰 `mihomo_projection.py`（属 B2-B2c）；不渲染 `dialer-proxy`；不解密任何凭据。
 
 ---
 
@@ -1261,29 +1327,20 @@ readback（均属 B2-B3）；不改 `mihomo_projection_lock.py` / `mihomo_blocke
 
 ---
 
-##### 再切分后仍然未决的一条（**不在本次修订范围内**）
-
-`test_transport_proxy_unresolved_fails_closed` 在下面的
-「B2-B2c 必须新增的测试」表里被指定放进
-`backend/tests/unit/test_mihomo_reconciliation.py`，
-**但该文件不在 B2-B2c 的 allowed files 清单里**，而它断言的
-`MIHOMO_TRANSPORT_PROXY_UNRESOLVED`（按 `(name, host, port)` 三元组在
-receipt-verified cache 内定位唯一 materialized proxy）**也还没有实现**
-—— B2-B2.1 的 loader 只把 `transport_proxy_name` 取自
-`TransportEndpointRecord.name`，没有对 cache 内容做三元组比对。
-
-**这是一处已确认的规格不一致，本次修订刻意不处理**（本次只切 B2-B2 的粒度，
-不扩大到 B2-B2c）。**派 B2-B2c 之前必须先把它裁清楚**：
-是把这条测试与三元组比对一起移进 B2-B2 的某个 checkpoint，
-还是把 `test_mihomo_reconciliation.py` 加进 B2-B2c 的 allowed files。
-按 ADR-036 §2，**这是需要报告 User 的架构裁决，不要由执行者自行选一边。**
-
----
-
 ##### B2-B2c 必须新增的测试（**精确名称与关键断言**）
 
 > **2026-09-20 第三次修订**：原表里的三条 fingerprint / credential-identity 测试
 > **已前移到 B2-B2**（理由见那一节）。本表只剩 render / finalization 相关的。
+>
+> **2026-09-20 审查修正（第四次修订的补丁）**：
+> `test_transport_proxy_unresolved_fails_closed` **也已移出本表，正式归
+> `B2-B2.3`**，连同它的生产实现（`(name, host, port)` 三元组在
+> receipt-verified cache 内的唯一匹配）。
+> 理由：新顺序里 `.6` 在本 checkpoint **之前**接线 generation producer，
+> 把这条校验留在这里会留下一个「producer 已接线、assignment 指向的
+> transport proxy 未验证」的窗口。**本表不再包含任何
+> `test_mihomo_reconciliation.py` 里的测试**，与 B2-B2c 的 allowed files
+> 一致 —— 之前那处不一致已随此修正消失。
 
 | 测试名 | 放哪 | 关键断言 |
 |---|---|---|
@@ -1292,7 +1349,6 @@ receipt-verified cache 内定位唯一 materialized proxy）**也还没有实现
 | `test_mihomo_document_contains_egress_transport_binding` | `test_mihomo_projection.py` | 有 ACTIVE assignment 的出口 ⇒ 其 proxy 条目含 `dialer-proxy == <transport proxy name>`；**无** ACTIVE assignment 的出口 ⇒ 该条目**完全没有** `dialer-proxy` 键（不是空值）；且 `listeners[*].proxy` 与 `proxies[*].name` 一一对应 |
 | `test_egress_proxy_name_collision_fails_closed` | `test_mihomo_projection.py` | repo-owned 出口 `code` 与某个 materialized proxy 同名 ⇒ 复用既有 `MIHOMO_DUPLICATE_PROXY_IDENTITY` fail closed |
 | `test_unsupported_egress_protocol_fails_closed` | `test_mihomo_projection.py` | `EgressEndpoint.protocol` 非 `{socks, socks5}` ⇒ `MIHOMO_EGRESS_PROTOCOL_UNSUPPORTED` |
-| `test_transport_proxy_unresolved_fails_closed` | `test_mihomo_reconciliation.py` | ACTIVE assignment 的 `(name, host, port)` 在 receipt-verified cache 内容里匹配 0 个或 >1 个 ⇒ `MIHOMO_TRANSPORT_PROXY_UNRESOLVED` |
 
 ##### B2-B2d —— Xray → Mihomo 交接（**ADR-037 §1a，2026-09-20 新增**）
 
@@ -1436,7 +1492,8 @@ transport node」涉及容量、健康度、地域、重平衡——**那是一�
    **✅ 已由 `ADR-037` §2 裁定。同样分三段**：
    **`B2-B2a`**（✅ #167）建 `transport_proxy_name` / `transport_node_identity`
    字段与 manifest 表示 → **`B2-B2.1`** loader 解析 ACTIVE assignment、
-   **`B2-B2.3`** 证明四条 fail-closed、
+   **`B2-B2.3`** 补上 receipt-verified cache 内的 `(name, host, port)` 唯一匹配
+   并证明**五条** fail-closed（含 `MIHOMO_TRANSPORT_PROXY_UNRESOLVED`）、
    **`B2-B2.5`** 锁住 node A→B ⇒ fingerprint 变 →
    **`B2-B2c`** 渲染 `dialer-proxy`。
 3. **`dialer-proxy` 在钉住的 `metacubex/mihomo:v1.19.27` 上未实测。**
@@ -1687,10 +1744,13 @@ docs/83-project-continuity.md
 > 自己的 exact list 里** ✅。
 >
 > **2026-09-20 第四次修订后尤其要注意**：`B2-B2` 已再切分为六个 checkpoint，
-> 其中 **`.2` / `.3` / `.4` / `.5` 的 exact list 只有
+> 其中 **`.2` / `.4` / `.5` 的 exact list 只有
 > `backend/tests/unit/test_mihomo_reconciliation.py` 一个文件**。
-> 在那四个 checkpoint 里改任何生产代码都是越界 ——
+> 在那三个 checkpoint 里改任何生产代码都是越界 ——
 > **发现 loader 有缺陷时停下上报，不得自行扩清单**（ADR-036 §2）。
+> **`.3` 是唯一的例外**：它另外允许 `backend/app/infra/mihomo_reconciliation.py`，
+> 因为它要补上 receipt-verified transport proxy 解析的生产实现
+> （2026-09-20 审查修正，理由见 `.3` 那一节）。
 
 > **两份清单有两处刻意重叠（2026-09-20，ADR-035）。**
 > `backend/app/core/config.py` 与 `backend/tests/unit/test_registry.py`

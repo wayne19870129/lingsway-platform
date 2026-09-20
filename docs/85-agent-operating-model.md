@@ -627,7 +627,7 @@ Claude 的产出形态是：ADR、`docs/81-reviews/REVIEW-*.md`、以及直接�
 |---|---|
 | **S04-B2-B1** receipt / secret resolver / manifest / allocator / DNS gate | ✅ **已合并（PR #156）**，2026-09-19 |
 | **S04-B2-B2a** contract substrate | ✅ **已合并（PR #167）**，2026-09-20 —— DTO + manifest 键 + `MANIFEST_VERSION "1"→"2"` |
-| **S04-B2-B2** concrete DB desired loader + preparation transaction | ⚠️ **2026-09-20 触发返工熔断（§6.1 第一层），已再切分为 6 个 checkpoint `B2-B2.1` ~ `B2-B2.6`**。在途 PR #163 收敛为 **`B2-B2.1`**。逐个 checkpoint 的 allowed files / 测试见 TASK「**B2-B2 的再切分**」一节 |
+| **S04-B2-B2** concrete DB desired loader + preparation transaction | ⚠️ **2026-09-20 触发返工熔断（§6.1 第一层），已再切分为 6 个 checkpoint `B2-B2.1` ~ `B2-B2.6`**。在途 PR #163 收敛为 **`B2-B2.1`**。逐个 checkpoint 的 allowed files / 测试见 TASK「**B2-B2 的再切分**」一节。**`.3` 含生产实现**（receipt-verified transport proxy 解析），其余中间 checkpoint 是 tests-only |
 | **S04-B2-B2c / B2-B2d / B2-B3 / B2-B4** | 按 §5.1 的完整顺序依次排（单向依赖，见 TASK） |
 
 > **当前唯一顺序（与 §5.1 一致，不要各写一套）：**
@@ -649,15 +649,25 @@ Claude 的产出形态是：ADR、`docs/81-reviews/REVIEW-*.md`、以及直接�
 >
 > | # | checkpoint | allowed files |
 > |---|---|---|
-> | .1 | loader 实现 + **可参数化测试基座** + whitespace fail-closed 修复 | 5 个（`mihomo_reconciliation.py` / `credential_resolver.py` / `config.py` / `test_mihomo_reconciliation.py` / `test_registry.py`） |
-> | .2 | in-scope 集合与文档形状（3 条测试） | **只有** `backend/tests/unit/test_mihomo_reconciliation.py` |
-> | .3 | assignment 校验与 fail closed（3 条测试） | 同上 |
-> | .4 | credential identity 与 precedence（2 条测试） | 同上 |
-> | .5 | fingerprint 不变式（3 条测试） | 同上 |
-> | .6 | preparation 事务 + production wiring（2 条测试） | `mihomo_reconciliation.py` + `test_mihomo_reconciliation.py` |
+> | .1 | loader core + **可参数化测试基座** + whitespace fail-closed 修复 | 5 个（`mihomo_reconciliation.py` / `credential_resolver.py` / `config.py` / `test_mihomo_reconciliation.py` / `test_registry.py`） |
+> | .2 | in-scope / document-shape（3 条测试，tests-only） | **只有** `backend/tests/unit/test_mihomo_reconciliation.py` |
+> | .3 | assignment 校验 **+ receipt-verified transport proxy 解析**（4 条测试 + 生产实现） | `mihomo_reconciliation.py` + `test_mihomo_reconciliation.py` |
+> | .4 | credential identity / precedence（2 条测试，tests-only） | **只有** 测试文件 |
+> | .5 | fingerprint invariants（3 条测试，tests-only） | **只有** 测试文件 |
+> | .6 | preparation + production wiring（2 条测试） | `mihomo_reconciliation.py` + `test_mihomo_reconciliation.py` |
 >
-> **派 .2 / .3 / .4 / .5 时必须写进指令卡：只能改那一个测试文件。**
+> **派 .2 / .4 / .5 时必须写进指令卡：只能改那一个测试文件。**
 > 发现 loader 有缺陷 ⇒ **停下上报 User**（ADR-036 §2），不得自行扩清单。
+>
+> **`.3` 是唯一一个含生产实现的中间 checkpoint**（2026-09-20 审查修正）：
+> #163 目前直接拿 `TransportEndpointRecord.name/host/port` 生成
+> `transport_proxy_name`，**从未与 receipt-verified cache 内容比对**。
+> ADR-037 §2.2 / §4 要求按 `(name, host, port)` 三元组在该 provider 的
+> receipt-verified cache 内唯一匹配，0 个或 >1 个 ⇒
+> `MIHOMO_TRANSPORT_PROXY_UNRESOLVED`。这条原本留在 B2-B2c，但新顺序里
+> **`.6` 在 B2-B2c 之前接线 generation producer**，会留下一个
+> 「producer 已接线、assignment 指向的 transport proxy 未验证」的窗口 ——
+> 所以它必须前移到 `.3`，**且 `.3` 必须早于 `.6`**。
 >
 > **`.1` 的增量很小**：#163 的 loader 主体已经写好并通过，剩下的只有
 > ① 把已有 fixture 提成可参数化基座、② 一处 whitespace-only override 的
@@ -786,11 +796,11 @@ S07 一个任务里，「允许修改的文件」漏项**连续发生两次**：
 | 1 | ~~**S04-B2-B2a** contract substrate~~ | `docs/82-tasks/TASK-S04-mihomo-activation.md` | ✅ **已合并（PR #167）**，见 §5.3b |
 | 2 | **S04-B2-B2.1** loader 实现 + 测试基座 | 同上 | **在途：PR #163**。⛔ 前置：B2-B2a ✅。增量只有三项：提出可参数化 fixture 基座、whitespace-only override fail-closed、**把 `prepare` + `reconcile_mihomo_job()` 的 `None` 接线迁出到 .6**。**不接生产路径** |
 | 3 | **S04-B2-B2.2** in-scope 集合与文档形状 | 同上 | ⛔ 前置：.1。**tests-only，只能改 `backend/tests/unit/test_mihomo_reconciliation.py`** |
-| 4 | **S04-B2-B2.3** assignment 校验与 fail closed | 同上 | ⛔ 前置：.2。同上，tests-only |
-| 5 | **S04-B2-B2.4** credential identity 与 precedence | 同上 | ⛔ 前置：.3。同上，tests-only；关键断言之一是**全程不解密** |
-| 6 | **S04-B2-B2.5** fingerprint 不变式 | 同上 | ⛔ 前置：.4（真实依赖 .3/.4 建好的变体）。同上，tests-only |
+| 4 | **S04-B2-B2.3** assignment 校验 + receipt-verified transport proxy 解析 | 同上 | ⛔ 前置：.2。**唯一一个含生产实现的中间 checkpoint**：allowed files 是 `backend/app/infra/mihomo_reconciliation.py` + `backend/tests/unit/test_mihomo_reconciliation.py`。补上 `(name, host, port)` 三元组在 receipt-verified cache 内的唯一匹配与 `MIHOMO_TRANSPORT_PROXY_UNRESOLVED`。**必须早于 .6** |
+| 5 | **S04-B2-B2.4** credential identity 与 precedence | 同上 | ⛔ 前置：.3。**tests-only，只能改 `backend/tests/unit/test_mihomo_reconciliation.py`**（注意：上一行 `.3` 不是 tests-only）；关键断言之一是**全程不解密** |
+| 6 | **S04-B2-B2.5** fingerprint 不变式 | 同上 | ⛔ 前置：.4（真实依赖 .3/.4 建好的变体）。**tests-only，只能改同一个测试文件** |
 | 7 | **S04-B2-B2.6** preparation 事务 + production wiring | 同上 | ⛔ 前置：.5。**唯一能生产 generation 的 checkpoint**；交付物全部从 #163 迁出，原样带过来 |
-| 8 | **S04-B2-B2c** render / finalization | 同上 | ⛔ 前置：B2-B2a + **B2-B2.6**。`dialer-proxy` 渲染 + 明文在 render 边界解析。**派之前先解决 TASK 末尾记的那条 `test_transport_proxy_unresolved_fails_closed` 归属不一致——按 ADR-036 §2 报告 User** |
+| 8 | **S04-B2-B2c** render / finalization | 同上 | ⛔ 前置：B2-B2a + **B2-B2.6**。`dialer-proxy` 渲染 + 明文在 render 边界解析。**scope 已闭合**：原先那条 `test_transport_proxy_unresolved_fails_closed` 的归属不一致已解决——它连同实现正式归 **B2-B2.3**，本 checkpoint 的测试表里不再有任何 `test_mihomo_reconciliation.py` 的测试 |
 | 9 | **S04-B2-B2d** Xray → Mihomo 交接 | 同上 | ⛔ 前置：B2-B2c。Xray outbound 改指 `127.0.0.1:{mihomo_listen_port}`，该跳无凭据。**没有这一段链路 B 不可达** |
 | 10 | **S04-B2-B3** freshness 三点复核 / recovery / runtime exact readback | 同上 | 等 B2-B2d 合并 |
 | 11 | **S04-B2-B4** 完整 integration / guard / migration / concurrency 验收 | 同上 | 等 B2-B3 合并 |

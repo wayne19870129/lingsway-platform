@@ -458,13 +458,29 @@ different contents) and the PR #128 version won.
   cache file on disk whose sha256 must equal the receipt's `content_hash`, a
   `Secret` whose `revision` must equal the receipt's `source_revision`), so
   batching merely made each batch pay the full fixture cost again. `B2-B2` is
-  now six checkpoints: **`.1`** loader implementation plus a *parameterizable
+  now six checkpoints: **`.1`** loader core plus a *parameterizable
   fixture base* (PR #163, deliberately **not** wired to production),
-  **`.2`–`.5`** tests-only checkpoints that may touch
-  `backend/tests/unit/test_mihomo_reconciliation.py` and nothing else, and
-  **`.6`** the preparation transaction plus production wiring. Precise
+  **`.2` / `.4` / `.5`** tests-only checkpoints that may touch
+  `backend/tests/unit/test_mihomo_reconciliation.py` and nothing else,
+  **`.3`** assignment validation *plus* receipt-verified transport-proxy
+  resolution (the one intermediate checkpoint that carries production code),
+  and **`.6`** the preparation transaction plus production wiring. Precise
   per-checkpoint allowed files, tests and preconditions live in the TASK's
   「B2-B2 的再切分」section; the dispatch queue is `docs/85` §5.1.
+
+  **`.3` carries production code on purpose (2026-09-20 review correction).**
+  #163 currently derives `transport_proxy_name` straight from
+  `TransportEndpointRecord.name/host/port` and never compares it against the
+  receipt-verified cache, but ADR-037 §2.2 and §4 require matching
+  `(name, host, port)` to exactly one materialized proxy inside that
+  provider's receipt-verified cache, with 0 or >1 matches failing closed as
+  `MIHOMO_TRANSPORT_PROXY_UNRESOLVED`. That check and its test
+  (`test_transport_proxy_unresolved_fails_closed`) were originally parked in
+  B2-B2c — which no longer works, because under the new order **`.6` wires the
+  generation producer before B2-B2c runs**, leaving a window where a live
+  producer emits fingerprints for assignments whose transport proxy was never
+  verified to exist. Both moved to `.3`, so **`.3` must land before `.6`**.
+  The earlier "unresolved ownership" item about this test is closed.
 
   **Why ADR-037 §5a still holds under that order** (measured on `main`
   `5ae40a6`, not inferred): `allocate_generation()` has **no non-test caller**,
