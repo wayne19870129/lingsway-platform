@@ -327,7 +327,8 @@ different contents) and the PR #128 version won.
   freshness proof. It does not activate
   Mihomo, wire `FORWARDER_PROVIDER=mihomo` into production, deploy, or authorize
   real-provider production use.
-- **S04-B:** ACTIVE. B1 merged; B2-A merged (PR #128); B2-B not started —
+- **S04-B:** ACTIVE. B1 merged; B2-A merged (PR #128); **B2-B1 merged
+  (PR #156, 2026-09-19); B2-B2 next and unblocked** —
   see `TASK-S04-mihomo-activation.md` for the authorized scope of each stage.
 - **S04-B1:** COMPLETE / merged from `task/s04-b1-mihomo-durable-reconciliation`.
   Merge commit: `c494ade7d40419afd1a812c8b5ddefb154b1c14c`. It adds only
@@ -357,35 +358,52 @@ different contents) and the PR #128 version won.
   a blocker; do not cite it as one.**
 
   **B2-B1** (receipt binding, SQL controller-secret resolver, canonical
-  manifest + generation allocator, DNS candidate gate) is on **PR #156** and
-  depends on nothing else. **B2-B2 / B2-B3 / B2-B4 are blocked on a new ADR**
-  — see the next bullet. The four checkpoints' union equals the original
-  B2-B; nothing was deferred to S04-C and no acceptance criterion was
-  lowered. The split followed the §6.1 breaker: Codex failed the same Round 1
-  finding set twice, so retrying it unchanged was not allowed.
+  manifest + generation allocator, DNS candidate gate) **merged as PR #156 on
+  2026-09-19**. **B2-B2 is next and has no open blocker** — the ADR it was
+  waiting on now exists; see the next bullet. The four checkpoints' union
+  equals the original B2-B; nothing was deferred to S04-C and no acceptance
+  criterion was lowered. The split followed the §6.1 breaker: Codex failed the
+  same Round 1 finding set twice, so retrying it unchanged was not allowed —
+  and the split worked: the first checkpoint landed.
 
-- **⛔ S04-B2-B2 blocker — `ADR-035` is needed and does not exist yet.**
-  **The authority class is already settled and is not what is open.** ADR-025
-  §3's taxonomy rules deployment-owned validated constants as
-  **`deployment, not DB`**, read from **validated `Settings` / repo-owned
-  deployment constants**, and states outright that **"Deployment constants are
-  never migrated into the database."** A DB table is therefore not an
-  available option; proposing one would require superseding ADR-025.
+- **✅ S04-B2-B2 unblocked — `ADR-035` is written and accepted (2026-09-20).**
+  **The authority class was never what was open.** ADR-025 §3's taxonomy rules
+  deployment-owned validated constants as **`deployment, not DB`**, read from
+  **validated `Settings` / repo-owned deployment constants**, and states
+  outright that **"Deployment constants are never migrated into the
+  database."** A DB table was therefore never an available option; proposing
+  one would require superseding ADR-025.
 
-  What is genuinely open sits *inside* that class. Three of the seven
+  What was genuinely open sat *inside* that class: three of the seven
   `_validate_deployment_constants()` keys have no default and must be supplied
   by the caller — `external-controller`, `api-secret-ref` and
   `api-secret-revision`; only `mode`, `mixed-port`, `allow-lan` and
-  `log-level` default. `api-secret-revision`'s source is already decided (the
-  fresh purpose-bound `Secret.revision`), so the open question is narrow:
-  **do `external-controller` and `api-secret-ref` live in validated `Settings`
-  or in repo-owned fixed constants?** Both are legal under ADR-025 §3.
-  `Settings` has the closer precedent (`core/config.py:62`'s
-  `transport_cache_root`) but that file belongs to S04-C, which is a TASK
-  scoping problem rather than an architectural one; fixed constants keep B2-B2
-  self-contained but pin an environment-specific `host:port` that S04-C would
-  have to move. ADR-035 decides only that, and may not reopen the authority
-  class.
+  `log-level` default. `api-secret-revision`'s source was already decided (the
+  fresh purpose-bound `Secret.revision`), leaving two.
+
+  **ADR-035's answers, so nobody re-derives them:**
+
+  | key | placement |
+  |---|---|
+  | `external-controller` | **validated `Settings`** — new field `mihomo_external_controller: str = ""`, non-blank check in `validate_runtime_safety()` gated on `forwarder_provider == "mihomo"`; the **format** authority stays `_validate_controller_address()` and is not duplicated into `config.py` |
+  | `api-secret-ref` | **repo-owned constant** `MIHOMO_CONTROLLER_SECRET_REF = "mihomo/api-secret"` beside the existing `MIHOMO_CONTROLLER_SECRET_PURPOSE` in `infra/credential_resolver.py` |
+
+  The discriminator ADR-035 sets for any future case: **would two correct
+  deployments hold different values? Yes → `Settings`; no → repo constant.**
+  `api-secret-ref` is half of the composite `(secret_ref, purpose)` lookup in
+  `core/secrets.py:185-190`, and its other half is already a repo constant —
+  splitting the pair across two ownership domains would allow a mismatch that
+  no configuration check could detect, because `Settings` validation does not
+  touch the database.
+
+  **Consequence for the file lists**: B2-B2 gains `backend/app/core/config.py`
+  and `backend/tests/unit/test_registry.py`, which **also stay in S04-C's
+  list**. The overlap is deliberate and the TASK carries the exact boundary
+  table: B2-B2 adds only the field and its non-blank check; S04-C keeps
+  `build_registry()` acceptance, lifecycle/factory, and `.env.example` (whose
+  exact line is written into the TASK's S04-C section). The field and its
+  check must land together because ADR-025 §3 says **validated** `Settings`
+  and the value enters the fingerprinted manifest verbatim.
 
   > **An earlier version of this entry was wrong** and said both ADRs left the
   > constants unlocated, listing a versioned DB table as a candidate. ADR-025

@@ -545,8 +545,10 @@ Claude 的产出形态是：ADR、TASK 文件、`docs/81-reviews/REVIEW-*.md`、
 > 唯一仍需你自己核对的是**未合并分支**：本节写的是 `main` 上的状态，
 > 刚推上去还没合并的东西看不到（见 §1）。
 >
-> 最后更新：2026-09-19（**ADR-034：审查只由 User 开口触发，三个强制审计节点
-> 全部取消；S07 已完成合并，下一个是 S04-B2-B**；
+> 最后更新：2026-09-20（**ADR-035：Mihomo deployment 常量落点已裁定，
+> S04-B2-B2 解除阻塞；B2-B1 已合并（#156）；客户端配置指南已合并（#160）**；
+> ADR-034：审查只由 User 开口触发，三个强制审计节点
+> 全部取消；S07 已完成合并；
 > ADR-033：定期监督取消，审查改由 User 触发；派活载体收敛：Issue 模板删除；
 > 派发权按 ADR-032 交回 ChatGPT）。
 > **自动化那一段已全部合并**：S08 自动合并（#136）、S10 健康摘要（#140、
@@ -560,8 +562,17 @@ Claude 的产出形态是：ADR、TASK 文件、`docs/81-reviews/REVIEW-*.md`、
 
 | 任务 | 状态 |
 |---|---|
-| **S04-B2-B1** receipt / secret resolver / manifest / allocator / DNS gate | **在途：PR #156**（`task/s04-b2-b-mihomo-runtime`），`no-automerge`、`risk:high`、由 User 人工合 |
-| **S04-B2-B2 / B3 / B4** | ⛔ **被 ADR-035 阻塞**（Mihomo deployment constants 的来源未定），见下 |
+| **S04-B2-B1** receipt / secret resolver / manifest / allocator / DNS gate | ✅ **已合并（PR #156）**，2026-09-19 |
+| **S04-B2-B2** concrete DB desired loader + preparation transaction | **可以直接派** —— 没有任何待解除的阻塞项。deployment 常量落点已由 **ADR-035** 裁定并逐条写进 TASK |
+| **S04-B2-B3 / B4** | 依次排在 B2-B2 之后（单向依赖，见 TASK） |
+
+> **2026-09-20：原来写在这里的 "⛔ 被 ADR-035 阻塞" 已经解除。**
+> ADR-035 裁定：`external-controller` → validated `Settings` 新字段
+> `mihomo_external_controller`；`api-secret-ref` → repo-owned constant
+> `MIHOMO_CONTROLLER_SECRET_REF = "mihomo/api-secret"`。
+> **后果是 B2-B2 的允许文件多了两个**（`backend/app/core/config.py`、
+> `backend/tests/unit/test_registry.py`，与 S04-C 刻意重叠，边界表在 TASK 里）。
+> 派 B2-B2 时**照 TASK 抄，不要让 Codex 重新设计落点**。
 
 > **2026-09-19 · S04-B2-B 已拆成 4 个 checkpoint（熔断后的重构）**
 >
@@ -582,8 +593,8 @@ Claude 的产出形态是：ADR、TASK 文件、`docs/81-reviews/REVIEW-*.md`、
 > 有单向依赖的段落**。判断标准很简单：**这一轮能不能独立跑通验收并提交？**
 > 不能，就该切。
 >
-> **另外它暴露了一个规格缺口，需要 ADR-035**（Claude 写），
-> 在它被接受前 B2-B2/B3/B4 不得开工，**B2-B1 不受阻塞**。
+> **另外它暴露了一个规格缺口，需要 ADR-035**（Claude 写）。
+> **2026-09-20：ADR-035 已写完并裁定，B2-B2/B3/B4 的阻塞解除。**
 >
 > **注意缺口的范围，别读大了**：authority class **已经定了**——ADR-025 §3
 > 裁定 deployment-owned 常量是 **`deployment, not DB`**，读取边界是
@@ -593,6 +604,13 @@ Claude 的产出形态是：ADR、TASK 文件、`docs/81-reviews/REVIEW-*.md`、
 > `api-secret-revision`），其中 `api-secret-revision` 的来源已由 ADR-025 定为
 > fresh 的 purpose-bound `Secret.revision`——**所以只剩前两个要决定：
 > 落在 validated `Settings` 还是 repo-owned fixed constants。**
+>
+> > **2026-09-20 结论（ADR-035）**：`external-controller` →
+> > **validated `Settings`**（逐部署不同的 `host:port`）；
+> > `api-secret-ref` → **repo-owned constant**（它是 `(secret_ref, purpose)`
+> > 复合查找键的一半，而 purpose 本来就是仓库常量；拆开会造出一个配置校验
+> > 查不出来的误配置轴）。判据一句话：**两个都正确的部署，这个值会不会不
+> > 一样？会 → `Settings`；不会 → 常量。**
 >
 > > **这一段的初稿是错的**（说两条 ADR 都没定位它，并把"版本化 DB 表"列为
 > > 候选）。**ADR-025 §3 已经定位了，只是当时只读了 §4。** 2026-09-19 经
@@ -644,9 +662,13 @@ S07 一个任务里，「允许修改的文件」漏项**连续发生两次**：
 
 | # | 任务 | TASK 文件 | 闸门状态 |
 |---|---|---|---|
-| 1 | **S04-B2-B** Mihomo 运行时实现 | `docs/82-tasks/TASK-S04-mihomo-activation.md` | ✅ 两道闸门都已满足（ADR-025 已合并、TASK 已合并）。**必须与 S04-C 分成两个 PR** |
+| 1 | **S04-B2-B2** concrete DB desired loader + preparation transaction | `docs/82-tasks/TASK-S04-mihomo-activation.md` | ✅ **无阻塞，可直接派**。B2-B1 已合并（#156），ADR-035 已裁定落点。**一个 checkpoint 一个 PR，且必须与 S04-C 分开** |
+| 2 | **S04-B2-B3** freshness 三点复核 / recovery / runtime exact readback | 同上 | 等 B2-B2 合并 |
+| 3 | **S04-B2-B4** 完整 integration / guard / migration / concurrency 验收 | 同上 | 等 B2-B3 合并 |
 
-（**S07 已于 2026-09-19 完成并合并**，PR #152 / `a9d5bd2`，见 §5.3b。）
+（**S07 已于 2026-09-19 完成并合并**，PR #152 / `a9d5bd2`；
+**S04-B2-B1 已于 2026-09-19 合并**，PR #156；
+**客户端配置指南已于 2026-09-20 合并**，PR #160。均见 §5.3b。）
 
 派 S04-B2-B 时提醒 Codex：B2-B 结束时要有测试证明
 `FORWARDER_PROVIDER=mihomo` **仍然**被 `build_registry()` 拒绝——防止
@@ -711,11 +733,20 @@ User 全权授权 Claude 决定，结论写在 ADR-027 §7.1–7.4。
 
 ### 5.3 可以随时派，不触发 TASK 门槛
 
-| # | 任务 | 说明 |
-|---|---|---|
-| — | **客户端配置指南** | 只碰 `frontend/app/(docs)/guides/**`（现在只有空目录），低风险、无后端依赖。**不触发 §2.1 门槛**，可以直接派，PR 描述即记录。是"订阅能生成"和"客户能自己用"之间唯一的缺口 |
+**当前为空**（原来唯一的一条"客户端配置指南"已于 2026-09-20 由 PR #160
+合并，见 §5.3b）。
 
 ### 5.3b 已完成，从队列移出
+
+- ✅ **S04-B2-B1** —— PR #156 已合并（2026-09-19）。receipt 精确绑定、
+  SQL controller-secret resolver、canonical manifest + generation allocator、
+  DNS candidate gate、两个 migration（`0025` / `0026`）与两个 ORM model。
+  **切分本身是这次的成果**：Round 1 的指令卡等于整个 B2-B，连续两次卡在
+  同一处；切成 4 个单向依赖的 checkpoint 之后第一个就过了。
+
+- ✅ **客户端配置指南** —— PR #160 已合并（2026-09-20）。只碰
+  `frontend/app/(docs)/guides/**`，不触发 §2.1 门槛，PR 描述即记录。
+  它补上了"订阅能生成"和"客户能自己用"之间的缺口。
 
 - ✅ **S07 订单队列计费（续费/加购）** —— PR #152 已合并（`a9d5bd2`），
   迁移 `0024_usage_period_queue.py` 在 `main` 上。**这是第一个走完
@@ -798,10 +829,10 @@ User 全权授权 Claude 决定，结论写在 ADR-027 §7.1–7.4。
 其中只有一个被 git 判为冲突，另一个差点静默合入。**认领新的 ADR / TASK 编号
 时，要对着当前 `main` 加上所有 open PR 一起查，不能只看 `main`。**
 
-当前已用到：**ADR-034**、**TASK-S11**。下一个分别是 **ADR-035**、**TASK-S12**。
+当前已用到：**ADR-035**、**TASK-S11**。下一个分别是 **ADR-036**、**TASK-S12**。
 
-> **`ADR-035` 已被预定**：S04-B2-B 的 deployment-constant 来源缺口（见 §5.0）。
-> 认领 ADR 编号时请从 **ADR-036** 起。
+> **2026-09-20 更新**：`ADR-035`（Mihomo deployment 常量落点）已落地，
+> 预定状态解除。下一个可用的 ADR 编号是 **ADR-036**。
 
 已用 TASK 编号：S04 / S05 / S06 / S07（订单队列计费）/ S08（自动合并流水线）
 / S09（备份恢复）/ S10（流水线健康摘要）/ S11（风险分类器路径表）。
