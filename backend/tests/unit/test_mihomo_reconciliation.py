@@ -130,7 +130,7 @@ def test_prepare_rolls_back_generation_when_intent_enqueue_fails(
     monkeypatch.setattr(reconciliation, "enqueue_mihomo_reconciliation", fail_enqueue)
     with pytest.raises(RuntimeError, match="enqueue failed"):
         prepare_mihomo_reconciliation(db, operation_id="rollback", loader=Loader())
-    db.rollback()
+    db.commit()
     assert db.scalar(select(MihomoProjectionGeneration.revision)) is None
     assert db.scalar(select(Job.id)) is None
 
@@ -197,7 +197,7 @@ def test_sql_desired_loader_rebuilds_db_authority_with_stable_order(
         1, "transport-a", "SUBSCRIPTION", "transport/subscription-a"
     )
     cache_path = transport_resolver._cache_path(descriptor)  # noqa: SLF001
-    content = b"proxies:\n  - {name: proxy-a, type: ss, server: a.invalid, port: 443}\n"
+    content = b"proxies:\n  - {name: Node A, type: ss, server: 203.0.113.11, port: 443}\n"
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_bytes(content)
     from backend.app.models import ProviderStatus, RouteGroupStatus
@@ -228,6 +228,12 @@ def test_sql_desired_loader_rebuilds_db_authority_with_stable_order(
                         ciphertext="opaque-controller",
                         purpose=credential_resolver.MIHOMO_CONTROLLER_SECRET_PURPOSE,
                         revision=7,
+                    ),
+                    Secret(
+                        secret_ref="egress/a",
+                        ciphertext="opaque-egress",
+                        purpose="EGRESS_CREDENTIAL",
+                        revision=3,
                     ),
                 RouteGroup(id=1, code="route-b", name="B", status=RouteGroupStatus.ACTIVE),
                 RouteGroup(id=2, code="route-a", name="A", status=RouteGroupStatus.ACTIVE),
@@ -310,9 +316,12 @@ def test_sql_desired_loader_rebuilds_db_authority_with_stable_order(
         first = loader.load_current(session)
         session.expire_all()
         second = loader.load_current(session)
-        assert tuple(item["name"] for item in first.proxies) == ("egress-a",)
+        assert tuple(item.name for item in first.egress_proxies) == ("egress-a",)
+        assert first.egress_proxies[0].credential_secret_ref == "egress/a"
+        assert first.egress_proxies[0].credential_revision == 3
+        assert first.egress_proxies[0].transport_proxy_name == "Node A"
         assert tuple(item["name"] for item in first.proxy_groups) == (
-            "route-b", "route-a", "subscription-10"
+            "route-b", "route-a"
         )
         assert first == second
         assert first.deployment_constants["api-secret-revision"] == 7

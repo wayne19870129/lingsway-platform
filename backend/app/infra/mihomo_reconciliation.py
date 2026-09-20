@@ -63,7 +63,11 @@ from backend.app.models import (
     TransportEndpointRecord,
     TransportProviderRecord,
 )
-from backend.app.providers.base import DesiredForwarderState, ForwarderListenerDTO
+from backend.app.providers.base import (
+    DesiredForwarderState,
+    ForwarderEgressProxyDTO,
+    ForwarderListenerDTO,
+)
 from backend.app.providers.forwarder.mihomo import (
     ControllerSecretResolver,
     MihomoApplyError,
@@ -196,7 +200,7 @@ class SqlMihomoDesiredSnapshotLoader:
             db.scalars(
                 select(EgressEndpoint)
                 .where(
-                    EgressEndpoint.status == "AVAILABLE",
+                    EgressEndpoint.status.in_(("AVAILABLE", "ASSIGNED", "DEGRADED")),
                     EgressEndpoint.group_id.in_(egress_group_ids or {-1}),
                 )
                 .order_by(EgressEndpoint.code, EgressEndpoint.id)
@@ -222,8 +226,10 @@ class SqlMihomoDesiredSnapshotLoader:
             db.scalars(
                 select(TransportEndpointRecord)
                 .where(
-                    TransportEndpointRecord.provider_id.in_(provider_id_set or {-1}),
-                    TransportEndpointRecord.status == "AVAILABLE",
+                    # Assignment validation needs to distinguish a missing node
+                    # from a node belonging to the wrong provider.  Endpoint
+                    # status and operational metadata are not projection inputs.
+                    TransportEndpointRecord.id.is_not(None),
                 )
                 .order_by(
                     TransportEndpointRecord.provider_id,
@@ -238,7 +244,6 @@ class SqlMihomoDesiredSnapshotLoader:
             db.scalars(
                 select(EgressTransportAssignment)
                 .where(
-                    EgressTransportAssignment.transport_provider_id.in_(provider_id_set or {-1}),
                     EgressTransportAssignment.state == "ACTIVE",
                 )
                 .order_by(
@@ -250,20 +255,22 @@ class SqlMihomoDesiredSnapshotLoader:
                 .execution_options(populate_existing=True)
             )
         )
-        endpoint_ids = {endpoint.id for endpoint in transport_endpoints}
+        transport_by_id = {endpoint.id: endpoint for endpoint in transport_endpoints}
         egress_ids = {endpoint.id for endpoint in endpoints}
+        assignments_by_egress: dict[int, EgressTransportAssignment] = {}
         for assignment in assignments:
-            if (
-                assignment.transport_node_id not in endpoint_ids
-                or assignment.transport_provider_id
-                != next(
-                    endpoint.provider_id
-                    for endpoint in transport_endpoints
-                    if endpoint.id == assignment.transport_node_id
+            node = transport_by_id.get(assignment.transport_node_id)
+            if node is None:
+                raise MihomoReconciliationError("MIHOMO_TRANSPORT_ASSIGNMENT_NODE_MISSING")
+            if assignment.transport_provider_id != node.provider_id:
+                raise MihomoReconciliationError(
+                    "MIHOMO_TRANSPORT_ASSIGNMENT_PROVIDER_MISMATCH"
                 )
-                or assignment.egress_id not in egress_ids
-            ):
-                raise MihomoReconciliationError("MIHOMO_TRANSPORT_ASSIGNMENT_INVALID")
+            if assignment.egress_id not in egress_ids:
+                raise MihomoReconciliationError("MIHOMO_TRANSPORT_ASSIGNMENT_EGRESS_UNKNOWN")
+            if assignment.egress_id in assignments_by_egress:
+                raise MihomoReconciliationError("MIHOMO_TRANSPORT_ASSIGNMENT_AMBIGUOUS")
+            assignments_by_egress[assignment.egress_id] = assignment
         active_bindings = list(
             db.scalars(
                 select(EgressBinding)
@@ -332,15 +339,44 @@ class SqlMihomoDesiredSnapshotLoader:
                 )
         finally:
             resolver.close()
-        proxies = tuple(
-            {
-                "name": endpoint.code,
-                "type": endpoint.protocol,
-                "server": endpoint.host,
-                "port": endpoint.port,
-            }
-            for endpoint in endpoints
-        )
+        egress_proxies: list[ForwarderEgressProxyDTO] = []
+        for endpoint in endpoints:
+            binding = next(
+                (item for item in active_bindings if item.egress_id == endpoint.id), None
+            )
+            override = binding.credential_secret_ref if binding is not None else None
+            credential_ref = override.strip() if isinstance(override, str) else ""
+            if not credential_ref:
+                credential_ref = endpoint.credential_secret_ref.strip()
+            if not credential_ref:
+                raise MihomoReconciliationError("MIHOMO_EGRESS_CREDENTIAL_REF_INVALID")
+            secret = db.scalar(
+                select(Secret)
+                .where(Secret.secret_ref == credential_ref)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if secret is None or isinstance(secret.revision, bool) or secret.revision <= 0:
+                raise MihomoReconciliationError("MIHOMO_EGRESS_CREDENTIAL_METADATA_INVALID")
+            selected_assignment = assignments_by_egress.get(endpoint.id)
+            node = (
+                transport_by_id.get(selected_assignment.transport_node_id)
+                if selected_assignment
+                else None
+            )
+            egress_proxies.append(
+                ForwarderEgressProxyDTO(
+                    name=endpoint.code,
+                    protocol=endpoint.protocol,
+                    host=endpoint.host,
+                    port=endpoint.port,
+                    credential_secret_ref=credential_ref,
+                    credential_revision=secret.revision,
+                    transport_proxy_name=node.name if node else None,
+                    transport_node_identity=(node.name, node.host, node.port) if node else None,
+                )
+            )
+        egress_proxies.sort(key=lambda item: item.name)
         endpoint_names = {endpoint.id: endpoint.code for endpoint in endpoints}
         groups_by_id = {group.id: group.code for group in groups}
         proxy_groups = tuple(
@@ -355,14 +391,6 @@ class SqlMihomoDesiredSnapshotLoader:
                 ),
             }
             for group_id in sorted(groups_by_id)
-        )
-        proxy_groups += tuple(
-            {
-                "name": f"subscription-{binding.subscription_id}",
-                "type": "select",
-                "proxies": (endpoint_names[binding.egress_id],),
-            }
-            for binding in active_bindings
         )
         listeners = tuple(
             ForwarderListenerDTO(
@@ -407,7 +435,8 @@ class SqlMihomoDesiredSnapshotLoader:
         }
         return DesiredForwarderState(
             listener_specs=listeners,
-            proxies=proxies,
+            proxies=(),
+            egress_proxies=tuple(egress_proxies),
             proxy_groups=proxy_groups,
             rules=desired_rules,
             dns={"enable": True, "ipv6": False},
@@ -481,23 +510,27 @@ def prepare_mihomo_reconciliation(
 ) -> Job:
     """Persist one generation and its identifier-only intent atomically."""
     with mihomo_projection_write(db):
-        if loader is None:
-            settings = get_settings()
-            loader = SqlMihomoDesiredSnapshotLoader(
-                Path(settings.transport_cache_root), settings.mihomo_external_controller
+        try:
+            if loader is None:
+                settings = get_settings()
+                loader = SqlMihomoDesiredSnapshotLoader(
+                    Path(settings.transport_cache_root), settings.mihomo_external_controller
+                )
+            desired = loader.load_current(db)
+            manifest = build_projection_source_manifest(desired)
+            generation = allocate_generation(db, manifest)
+            snapshot_identity(generation.revision, generation.desired_fingerprint)
+            job = enqueue_mihomo_reconciliation(
+                db,
+                operation_id=operation_id,
+                operation_kind=operation_kind,
+                snapshot_revision=generation.revision,
             )
-        desired = loader.load_current(db)
-        manifest = build_projection_source_manifest(desired)
-        generation = allocate_generation(db, manifest)
-        snapshot_identity(generation.revision, generation.desired_fingerprint)
-        job = enqueue_mihomo_reconciliation(
-            db,
-            operation_id=operation_id,
-            operation_kind=operation_kind,
-            snapshot_revision=generation.revision,
-        )
-        db.commit()
-        return job
+            db.commit()
+            return job
+        except Exception:
+            db.rollback()
+            raise
 
 
 def _validate_operation_id(value: object) -> str:
