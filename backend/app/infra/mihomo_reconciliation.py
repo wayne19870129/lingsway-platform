@@ -14,12 +14,10 @@ from sqlalchemy import or_, select
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import Session
 
-from backend.app.core.config import get_settings
 from backend.app.core.database import SessionLocal
 from backend.app.infra.credential_resolver import (
     MIHOMO_CONTROLLER_SECRET_PURPOSE,
     MIHOMO_CONTROLLER_SECRET_REF,
-    SqlMihomoControllerSecretResolver,
 )
 from backend.app.infra.mihomo_blocker import (
     MIHOMO_BLOCKER_KIND_FINALIZATION,
@@ -30,11 +28,7 @@ from backend.app.infra.mihomo_blocker import (
     mihomo_blocker_dedupe_key,
     validate_mihomo_operation_id,
 )
-from backend.app.infra.mihomo_generation import (
-    allocate_generation,
-    build_projection_source_manifest,
-    snapshot_identity,
-)
+from backend.app.infra.mihomo_generation import snapshot_identity
 from backend.app.infra.mihomo_materialization import (
     load_transport_materialization,
     verify_materialization,
@@ -129,10 +123,6 @@ class ProjectionVerification:
 
 class MihomoDesiredSnapshotLoader(Protocol):
     def load(self, db: Session, job: Job) -> DesiredForwarderState: ...
-
-
-class MihomoPreparationSnapshotLoader(Protocol):
-    def load_current(self, db: Session) -> DesiredForwarderState: ...
 
 
 class SqlMihomoDesiredSnapshotLoader:
@@ -345,9 +335,12 @@ class SqlMihomoDesiredSnapshotLoader:
                 (item for item in active_bindings if item.egress_id == endpoint.id), None
             )
             override = binding.credential_secret_ref if binding is not None else None
-            credential_ref = override.strip() if isinstance(override, str) else ""
-            if not credential_ref:
+            if override is None or override == "":
                 credential_ref = endpoint.credential_secret_ref.strip()
+            elif not isinstance(override, str) or not override.strip():
+                raise MihomoReconciliationError("MIHOMO_EGRESS_CREDENTIAL_REF_INVALID")
+            else:
+                credential_ref = override
             if not credential_ref:
                 raise MihomoReconciliationError("MIHOMO_EGRESS_CREDENTIAL_REF_INVALID")
             secret = db.scalar(
@@ -499,38 +492,6 @@ class MihomoReconciliationResult:
     finalized: bool
     retryable: bool
     reason_code: str | None = None
-
-
-def prepare_mihomo_reconciliation(
-    db: Session,
-    *,
-    operation_id: str,
-    operation_kind: str = "RECONCILE",
-    loader: MihomoPreparationSnapshotLoader | None = None,
-) -> Job:
-    """Persist one generation and its identifier-only intent atomically."""
-    with mihomo_projection_write(db):
-        try:
-            if loader is None:
-                settings = get_settings()
-                loader = SqlMihomoDesiredSnapshotLoader(
-                    Path(settings.transport_cache_root), settings.mihomo_external_controller
-                )
-            desired = loader.load_current(db)
-            manifest = build_projection_source_manifest(desired)
-            generation = allocate_generation(db, manifest)
-            snapshot_identity(generation.revision, generation.desired_fingerprint)
-            job = enqueue_mihomo_reconciliation(
-                db,
-                operation_id=operation_id,
-                operation_kind=operation_kind,
-                snapshot_revision=generation.revision,
-            )
-            db.commit()
-            return job
-        except Exception:
-            db.rollback()
-            raise
 
 
 def _validate_operation_id(value: object) -> str:
@@ -965,22 +926,13 @@ def _reset_blocked_claim(db: Session, job: Job) -> None:
 
 def reconcile_mihomo_job(
     provider: MihomoProjectionProvider,
-    loader: MihomoDesiredSnapshotLoader | None,
-    resolver: ControllerSecretResolver | None,
-    verifier: ProjectionVerifier | None,
+    loader: MihomoDesiredSnapshotLoader,
+    resolver: ControllerSecretResolver,
+    verifier: ProjectionVerifier,
     *,
     db_factory: Callable[[], Session] = SessionLocal,
 ) -> MihomoReconciliationResult | None:
     with db_factory() as db, mihomo_projection_write(db):
-        if loader is None:
-            settings = get_settings()
-            loader = SqlMihomoDesiredSnapshotLoader(
-                Path(settings.transport_cache_root), settings.mihomo_external_controller
-            )
-        if resolver is None:
-            resolver = SqlMihomoControllerSecretResolver(db)
-        if verifier is None:
-            raise MihomoReconciliationError("MIHOMO_VERIFIER_NOT_CONFIGURED")
         job = _claim(db, datetime.now(UTC))
         if job is None:
             return None
