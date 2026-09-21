@@ -604,7 +604,9 @@ Claude 的产出形态是：ADR、`docs/81-reviews/REVIEW-*.md`、以及直接�
 > 唯一仍需你自己核对的是**未合并分支**：本节写的是 `main` 上的状态，
 > 刚推上去还没合并的东西看不到（见 §1）。
 >
-> 最后更新：2026-09-20（**ADR-036：每阶段回 Claude 的固定卡点取消——TASK、
+> 最后更新：2026-09-20（**B2-B2 触发返工熔断，已再切分为 `B2-B2.1` ~ `B2-B2.6`
+> 六个 checkpoint，队列 §5.1 已按新粒度重排；B2-B2a 已合并（#167）**；
+> **ADR-036：每阶段回 Claude 的固定卡点取消——TASK、
 > 队列、粒度、返工都归你；只有 ADR 仍是 Claude 独占，且架构缺口路由到 User
 > 而不是 Claude**；ADR-035：Mihomo deployment 常量落点已裁定，
 > S04-B2-B2 解除阻塞；B2-B1 已合并（#156）；客户端配置指南已合并（#160）**；
@@ -624,12 +626,55 @@ Claude 的产出形态是：ADR、`docs/81-reviews/REVIEW-*.md`、以及直接�
 | 任务 | 状态 |
 |---|---|
 | **S04-B2-B1** receipt / secret resolver / manifest / allocator / DNS gate | ✅ **已合并（PR #156）**，2026-09-19 |
-| **S04-B2-B2a** contract substrate | **#164 合并后的下一项** —— DTO + manifest 键 + `MANIFEST_VERSION "1"→"2"`。纯契约，不生产 generation |
-| **S04-B2-B2** concrete DB desired loader + preparation transaction | **在途 PR #163，需先等 B2-B2a 合并再 rebase**，且 loader 必须**填充 `egress_proxies`**。deployment 常量落点已由 **ADR-035** 裁定 |
+| **S04-B2-B2a** contract substrate | ✅ **已合并（PR #167）**，2026-09-20 —— DTO + manifest 键 + `MANIFEST_VERSION "1"→"2"` |
+| **S04-B2-B2** concrete DB desired loader + preparation transaction | ⚠️ **2026-09-20 触发返工熔断（§6.1 第一层），已再切分为 6 个 checkpoint `B2-B2.1` ~ `B2-B2.6`**。在途 PR #163 收敛为 **`B2-B2.1`**。逐个 checkpoint 的 allowed files / 测试见 TASK「**B2-B2 的再切分**」一节。**`.3` 含生产实现**（receipt-verified transport proxy 解析），其余中间 checkpoint 是 tests-only |
 | **S04-B2-B2c / B2-B2d / B2-B3 / B2-B4** | 按 §5.1 的完整顺序依次排（单向依赖，见 TASK） |
 
 > **当前唯一顺序（与 §5.1 一致，不要各写一套）：**
-> `B2-B1 ✅ → B2-B2a → B2-B2(#163) → B2-B2c → B2-B2d → B2-B3 → B2-B4 → writer → S04-C`
+> `B2-B1 ✅ → B2-B2a ✅ → B2-B2.1(#163) → .2 → .3 → .4 → .5 → .6`
+> `→ B2-B2c → B2-B2d → B2-B3 → B2-B4 → writer → S04-C`
+
+> **⚠️ 2026-09-20 第四次修订：B2-B2 再切分（返工熔断）。**
+>
+> **不要再按「B2-B2 一张卡」派活。** 那一组 12 条测试已经连续两轮未收敛，
+> 第二轮把 11 条未完成测试分成 Batch A/B/C **仍然没做完**，
+> 按 §6.1「同一 finding 连续 2 次修复失败」**不得原样再试第 3 次**。
+>
+> **根因不是提示词不够细，是规格把共享前置当成了零成本**：那 12 条测试
+> 每一条都要先搭出同一份 ~130 行的 fixture 图（12 张表 + 磁盘 cache 文件 +
+> 与之一致的 `content_hash` / `source_revision`），**分 Batch 只是让每个
+> Batch 各付一次全额 fixture 成本**。
+>
+> **新切法（六个，单向依赖）：**
+>
+> | # | checkpoint | allowed files |
+> |---|---|---|
+> | .1 | loader core + **可参数化测试基座** + whitespace fail-closed 修复 | 5 个（`mihomo_reconciliation.py` / `credential_resolver.py` / `config.py` / `test_mihomo_reconciliation.py` / `test_registry.py`） |
+> | .2 | in-scope / document-shape（3 条测试，tests-only） | **只有** `backend/tests/unit/test_mihomo_reconciliation.py` |
+> | .3 | assignment 校验 **+ receipt-verified transport proxy 解析**（4 条测试 + 生产实现） | `mihomo_reconciliation.py` + `test_mihomo_reconciliation.py` |
+> | .4 | credential identity / precedence（2 条测试，tests-only） | **只有** 测试文件 |
+> | .5 | fingerprint invariants（3 条测试，tests-only） | **只有** 测试文件 |
+> | .6 | preparation + production wiring（2 条测试） | `mihomo_reconciliation.py` + `test_mihomo_reconciliation.py` |
+>
+> **派 .2 / .4 / .5 时必须写进指令卡：只能改那一个测试文件。**
+> 发现 loader 有缺陷 ⇒ **停下上报 User**（ADR-036 §2），不得自行扩清单。
+>
+> **`.3` 是唯一一个含生产实现的中间 checkpoint**（2026-09-20 审查修正）：
+> #163 目前直接拿 `TransportEndpointRecord.name/host/port` 生成
+> `transport_proxy_name`，**从未与 receipt-verified cache 内容比对**。
+> ADR-037 §2.2 / §4 要求按 `(name, host, port)` 三元组在该 provider 的
+> receipt-verified cache 内唯一匹配，0 个或 >1 个 ⇒
+> `MIHOMO_TRANSPORT_PROXY_UNRESOLVED`。这条原本留在 B2-B2c，但新顺序里
+> **`.6` 在 B2-B2c 之前接线 generation producer**，会留下一个
+> 「producer 已接线、assignment 指向的 transport proxy 未验证」的窗口 ——
+> 所以它必须前移到 `.3`，**且 `.3` 必须早于 `.6`**。
+>
+> **`.1` 的增量很小**：#163 的 loader 主体已经写好并通过，剩下的只有
+> ① 把已有 fixture 提成可参数化基座、② 一处 whitespace-only override 的
+> fail-closed 修复（Codex 本地已有未提交的改动，直接提交进 #163）、
+> ③ **把 `prepare_mihomo_reconciliation()` 与 `reconcile_mihomo_job()` 的
+> `None` 默认接线迁出到 `.6`**。第三项是刻意删掉约 50 行已通过的代码 ——
+> 理由见下一条。
 
 > **2026-09-20（第二次更新，ADR-037）：链路与 Q1/Q2 已最终裁定。**
 > 最终链路是 **客户端 → Xray → Mihomo listener → transport node → 住宅 egress**。
@@ -640,9 +685,16 @@ Claude 的产出形态是：ADR、`docs/81-reviews/REVIEW-*.md`、以及直接�
 >
 > **⚠️ 顺序有一条硬不变式（ADR-037 §5a）**：**任何已合并且能生产 generation 的
 > checkpoint，其 canonical manifest 必须已覆盖 assignment + credential。**
-> 所以 **B2-B2a（纯契约）必须先于 #163**，而 #163 合并时其 loader 必须已经
-> 填充 `egress_proxies`。**不得出现「#163 已合并、能分配 generation，但
-> assignment/credential 还没进 manifest」的 `main` 状态。**
+> 所以 **B2-B2a（纯契约）必须先于 loader**（已满足，#167 先于 #163 合并）。
+>
+> **2026-09-20 第四次修订后这条不变式怎么成立的**（实测依据，不是推断）：
+> `main`（`5ae40a6`）上 `allocate_generation()` **没有任何非测试调用者**，
+> `prepare_mihomo_reconciliation()` 与 `SqlMihomoDesiredSnapshotLoader`
+> **根本不存在**。把 `prepare` 与 `reconcile_mihomo_job()` 的 `None` 默认
+> 接线一起推迟到 **`.6`** 之后，**`.1` ~ `.5` 在结构上不可能生产 generation**，
+> 不变式无从触发；到 `.6` 合并时 manifest 早已完整（B2-B2a），
+> 且 ADR-037 的三条核心不变式已被 `.4` / `.5` 证明。
+> **因此不存在「先让 generation 上线、以后再补 fingerprint 输入」的中间状态。**
 >
 > **2026-09-20：原来写在这里的 "⛔ 被 ADR-035 阻塞" 已经解除。**
 > ADR-035 裁定：`external-controller` → validated `Settings` 新字段
@@ -741,14 +793,19 @@ S07 一个任务里，「允许修改的文件」漏项**连续发生两次**：
 
 | # | 任务 | TASK 文件 | 闸门状态 |
 |---|---|---|---|
-| 1 | **S04-B2-B2a** contract substrate | `docs/82-tasks/TASK-S04-mihomo-activation.md` | ⛔ 前置：`ADR-037` 已合并。`ForwarderEgressProxyDTO` + `egress_proxies` + manifest 键 + `MANIFEST_VERSION "1"→"2"`。**纯契约，不生产 generation** |
-| 2 | **S04-B2-B2** concrete DB desired loader + preparation transaction | 同上 | **在途：PR #163，需 rebase 到 B2-B2a 之后**。返工项：撤 `subscription-*` group、status 三状态、assignment 改为 effective、**填充 `egress_proxies`**、rollback 自持 |
-| 3 | **S04-B2-B2c** render / finalization | 同上 | ⛔ 前置：B2-B2a + B2-B2。`dialer-proxy` 渲染 + 明文在 render 边界解析 |
-| 4 | **S04-B2-B2d** Xray → Mihomo 交接 | 同上 | ⛔ 前置：B2-B2c。Xray outbound 改指 `127.0.0.1:{mihomo_listen_port}`，该跳无凭据。**没有这一段链路 B 不可达** |
-| 5 | **S04-B2-B3** freshness 三点复核 / recovery / runtime exact readback | 同上 | 等 B2-B2d 合并 |
-| 6 | **S04-B2-B4** 完整 integration / guard / migration / concurrency 验收 | 同上 | 等 B2-B3 合并 |
-| 7 | **ACTIVE assignment 的 writer** | **待定** | ⛔ **S04-C 激活的硬前置，且尚无 owner**。分配策略未被任何 ADR 决定 —— 按 ADR-036 §2 **报告 User**，不要自行发明 |
-| 8 | **S04-C** registry 放行 + 激活闸门 | 同上 | ⛔ 前置：B2-B4 + writer。闸门：每个 in-scope egress 恰好一条 ACTIVE assignment |
+| 1 | ~~**S04-B2-B2a** contract substrate~~ | `docs/82-tasks/TASK-S04-mihomo-activation.md` | ✅ **已合并（PR #167）**，见 §5.3b |
+| 2 | **S04-B2-B2.1** loader 实现 + 测试基座 | 同上 | **在途：PR #163**。⛔ 前置：B2-B2a ✅。增量只有三项：提出可参数化 fixture 基座、whitespace-only override fail-closed、**把 `prepare` + `reconcile_mihomo_job()` 的 `None` 接线迁出到 .6**。**不接生产路径** |
+| 3 | **S04-B2-B2.2** in-scope 集合与文档形状 | 同上 | ⛔ 前置：.1。**tests-only，只能改 `backend/tests/unit/test_mihomo_reconciliation.py`** |
+| 4 | **S04-B2-B2.3** assignment 校验 + receipt-verified transport proxy 解析 | 同上 | ⛔ 前置：.2。**唯一一个含生产实现的中间 checkpoint**：allowed files 是 `backend/app/infra/mihomo_reconciliation.py` + `backend/tests/unit/test_mihomo_reconciliation.py`。补上 `(name, host, port)` 三元组在 receipt-verified cache 内的唯一匹配与 `MIHOMO_TRANSPORT_PROXY_UNRESOLVED`。**必须早于 .6** |
+| 5 | **S04-B2-B2.4** credential identity 与 precedence | 同上 | ⛔ 前置：.3。**tests-only，只能改 `backend/tests/unit/test_mihomo_reconciliation.py`**（注意：上一行 `.3` 不是 tests-only）；关键断言之一是**全程不解密** |
+| 6 | **S04-B2-B2.5** fingerprint 不变式 | 同上 | ⛔ 前置：.4（真实依赖 .3/.4 建好的变体）。**tests-only，只能改同一个测试文件** |
+| 7 | **S04-B2-B2.6** preparation 事务 + production wiring | 同上 | ⛔ 前置：.5。**唯一能生产 generation 的 checkpoint**；交付物全部从 #163 迁出，原样带过来 |
+| 8 | **S04-B2-B2c** render / finalization | 同上 | ⛔ 前置：B2-B2a + **B2-B2.6**。`dialer-proxy` 渲染 + 明文在 render 边界解析。**scope 已闭合**：原先那条 `test_transport_proxy_unresolved_fails_closed` 的归属不一致已解决——它连同实现正式归 **B2-B2.3**，本 checkpoint 的测试表里不再有任何 `test_mihomo_reconciliation.py` 的测试 |
+| 9 | **S04-B2-B2d** Xray → Mihomo 交接 | 同上 | ⛔ 前置：B2-B2c。Xray outbound 改指 `127.0.0.1:{mihomo_listen_port}`，该跳无凭据。**没有这一段链路 B 不可达** |
+| 10 | **S04-B2-B3** freshness 三点复核 / recovery / runtime exact readback | 同上 | 等 B2-B2d 合并 |
+| 11 | **S04-B2-B4** 完整 integration / guard / migration / concurrency 验收 | 同上 | 等 B2-B3 合并 |
+| 12 | **ACTIVE assignment 的 writer** | **待定** | ⛔ **S04-C 激活的硬前置，且尚无 owner**。分配策略未被任何 ADR 决定 —— 按 ADR-036 §2 **报告 User**，不要自行发明 |
+| 13 | **S04-C** registry 放行 + 激活闸门 | 同上 | ⛔ 前置：B2-B4 + writer。闸门：每个 in-scope egress 恰好一条 ACTIVE assignment |
 
 > **S04-C 的前置风险不止 `dialer-proxy` 镜像验证一条。** 还有
 > **assignment writer（尚无 owner）** 与 **completeness gate**，见 TASK。
@@ -824,6 +881,14 @@ User 全权授权 Claude 决定，结论写在 ADR-027 §7.1–7.4。
 合并，见 §5.3b）。
 
 ### 5.3b 已完成，从队列移出
+
+- ✅ **S04-B2-B2a contract substrate** —— PR #167 已合并（2026-09-20）。
+  `ForwarderEgressProxyDTO` + `DesiredForwarderState.egress_proxies` +
+  manifest 新增 `egress_proxies` 键 + `MANIFEST_VERSION "1" → "2"`。
+  **纯契约，不接任何生产路径、不生产 generation** —— 它先落地，正是
+  ADR-037 §5a 顺序不变式要求的那一步。
+  （另：PR #166 已合并，把 TASK 里 `egress_proxies` 的排序职责与 ADR-037 §4
+  对齐 —— 排序归 loader，manifest 与 render 都不得再次重排。）
 
 - ✅ **S04-B2-B1** —— PR #156 已合并（2026-09-19）。receipt 精确绑定、
   SQL controller-secret resolver、canonical manifest + generation allocator、
