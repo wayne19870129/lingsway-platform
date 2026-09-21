@@ -805,7 +805,15 @@ S07 一个任务里，「允许修改的文件」漏项**连续发生两次**：
 | 10 | **S04-B2-B3** freshness 三点复核 / recovery / runtime exact readback | 同上 | 等 B2-B2d 合并 |
 | 11 | **S04-B2-B4** 完整 integration / guard / migration / concurrency 验收 | 同上 | 等 B2-B3 合并 |
 | 12 | **ACTIVE assignment 的 writer** | **待定** | ⛔ **S04-C 激活的硬前置，且尚无 owner**。分配策略未被任何 ADR 决定 —— 按 ADR-036 §2 **报告 User**，不要自行发明 |
-| 13 | **S04-C** registry 放行 + 激活闸门 | 同上 | ⛔ 前置：B2-B4 + writer。闸门：每个 in-scope egress 恰好一条 ACTIVE assignment |
+| 13 | **C1：开通链路 forwarder 契约兼容** | **待定** | ⛔ **S04-C 硬前置，尚无 owner**（2026-09-21 审计 `REVIEW-089`）。形状与步数两处不兼容，`mypy` 抓不到，**放行即开通停摆**。触及 `domain/**` + `providers/base.py` ⇒ **铁律 5 要求先有 ADR** —— 报告 User |
+| 14 | **C2：Mihomo reconcile 的 producer + runner** | **待定** | ⛔ **S04-C 硬前置，尚无 owner**（同上）。`reconcile_mihomo_job()` 非测试调用者为 0，`workers/` 零 mihomo 命中。「哪些业务事件触发一次 reconcile」是设计选择 —— 报告 User |
+| 15 | **S04-C** registry 放行 + 激活闸门 | 同上 | ⛔ **BLOCKED**。前置：B2-B4 + writer **+ C1 + C2**。闸门：每个 in-scope egress 恰好一条 ACTIVE assignment |
+
+> **⛔ 2026-09-21：不要派 S04-C，直到 C1 与 C2 被 User 裁定。**
+> 它的允许文件里**确实**有 `main.py` 与 `workers/scheduler.py`，
+> 但目标与验收标准里一条都没提 producer/runner ——
+> **文件在清单里 ≠ 工作在计划里**，按现在的描述派活，执行者没有任何理由
+> 去写那两样东西，结果是合进一个"放行即停摆"的开关。
 
 > **S04-C 的前置风险不止 `dialer-proxy` 镜像验证一条。** 还有
 > **assignment writer（尚无 owner）** 与 **completeness gate**，见 TASK。
@@ -964,10 +972,23 @@ User 全权授权 Claude 决定，结论写在 ADR-027 §7.1–7.4。
 1. ~~**ADR-027 第 7 条**：`RENEWAL` 与 `ADDON` 合并~~ —— **已决**
    （User 全权授权，结论见 ADR-027 §7.1–7.4）。不再卡住 S07。
 2. **「未用完额度作废」的对客文案**：这是条款不是实现细节，上线前要定。
-3. **`plans` 表的四行要人工核对** —— 仓库里没有任何代码创建 `Plan` 行
-   （`60_seed.sh` 刻意拒绝隐式种子数据），所以 `catalog.py` 定的价格只是
-   声明。**特别是 `currency`：如果库里现存行是 `USD`，客户会看到
-   "30 USD" 而不是 ¥30，且经 `Order.currency` 带到订单上。**
+3. **`plans` 表没有任何 seed 路径 —— 这是上线阻断，不只是"价格没生效"。**
+   **2026-09-21 审计（`REVIEW-089` M1）重新定级。** 原文写的是"四行要人工
+   核对"，低估了：`GET /plans`（`api/public.py:112-131`）**从数据库读**，
+   而全仓唯一出现 `Plan(` 的地方是 `models/billing.py:54` 的类定义本身 ——
+   **没有任何代码创建 `Plan` 行**，`60_seed.sh:21` 又刻意拒绝隐式种子。
+   ⇒ **全新部署上 `/plans` 返回空数组，客户看不到任何套餐、下不了单。**
+
+   要 User 拍板的是同一个老问题：**本仓库是否在部署期写业务数据**
+   （`docs/83` §8 第 4 条已指出那需要签字）。写 seed 脚本 / 建库时人工插行，
+   两条路都行，但必须选一条，否则第一次真实部署就是零商品。
+   **`currency` 那条仍然成立**：若库里现存行是 `USD`，客户会看到
+   "30 USD" 而不是 ¥30，且经 `Order.currency` 带到订单上。
+
+4. **C1 / C2 两条 S04-C 硬前置**（见 §5.1 第 13、14 行与
+   `docs/81-reviews/REVIEW-089-s04-activation-readiness.md`）。
+   两条都要 ADR 才能动，**按 ADR-036 §2 路由到你**：由你决定是否叫 Claude
+   写那两条规格。**在此之前 S04-C 不可派。**
 
 ### 5.7 还开着的技术债（continuity §8 有完整清单）
 

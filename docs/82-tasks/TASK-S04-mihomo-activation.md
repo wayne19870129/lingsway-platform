@@ -1516,7 +1516,25 @@ transport node」涉及容量、健康度、地域、重平衡——**那是一�
 6. **⛔ ACTIVE assignment 的 writer 仍无 owner。** 见上面那一节 ——
    **它是 S04-C 激活的硬前置**，不是可选项。
 
-**除第 6 条外，当前没有其它已知的 S04-C 架构前置缺口。**
+7. **⛔ 开通链路的 forwarder 契约与 Mihomo 实现不兼容（C1）。尚无 owner。**
+   形状（legacy `listeners` vs `listener_specs`/`egress_proxies`）与步数
+   （2 步 `render→apply` vs 3 步 `render→finalize→apply`）两处独立不兼容，
+   `mypy --strict` 抓不到。**放行即开通停摆。** 详见上面 S04-C 那一节的
+   ⛔ 框与 `REVIEW-089`。改协议形状触及 `domain/**` 与
+   `providers/base.py`，**铁律 5 要求先有 ADR**。
+
+8. **⛔ Mihomo reconciliation 既无 producer 也无 runner（C2）。尚无 owner。**
+   `reconcile_mihomo_job()` 非测试调用者为 0；`workers/` 下零 mihomo 命中。
+   **整条流水线做完仍然不会被触发、也不会被运行。** 详见同上。
+
+> **⚠️ 2026-09-21 更正**：本节此前收尾写着「**除第 6 条外，当前没有其它
+> 已知的 S04-C 架构前置缺口**」。**那句话当时就是错的** —— C1 与 C2 在
+> 仓库里一直存在，只是没有人沿"放行之后这条链路真的跑得起来吗"这条轴
+> 查过一遍。这与 `docs/85` §5.0 记的 S07 两次漏项是同一类失误：
+> **只沿一条轴做闭包检查，得到的是"这条轴上闭合"，不是"闭合"。**
+
+**当前已知的 S04-C 架构前置缺口共三条：第 6、7、8 条，全部尚无 owner，
+全部按 ADR-036 §2 报告 User。**
 
 ---
 
@@ -1647,7 +1665,56 @@ A→B→A 新 revision、**两个并发 writer 只有一个 runtime apply**。
 
 ---
 
-### S04-C — 注册表放行与生产选择（NOT STARTED）
+### S04-C — 注册表放行与生产选择（**BLOCKED**）
+
+> ## ⛔ 两条硬前置缺口，尚无 owner（2026-09-21 审计，REVIEW-089）
+>
+> **在这两条被裁定之前不得派 S04-C。** 按现在的描述放行
+> `FORWARDER_PROVIDER=mihomo`，合进 `main` 的是一个"放行即停摆"的开关。
+> 完整证据见 `docs/81-reviews/REVIEW-089-s04-activation-readiness.md`。
+>
+> **C1 —— 开通链路的 forwarder 契约与 Mihomo 实现不兼容。**
+> 两处独立不兼容，修好一处另一处仍在：
+>
+> 1. **形状对不上**：`provisioning_state.py:193-198` 的
+>    `desired_forwarder_state()` 只填 legacy 的
+>    `listeners: Mapping[str, str]`，`listener_specs` /
+>    `egress_proxies` / `deployment_constants` 全空。实测把它交给
+>    Mihomo 渲染 ⇒ **`MIHOMO_CONTROLLER_SECRET_REF_INVALID`**。
+>    补偿路径 `render(previous_forwarder)` 用
+>    `current_forwarder_state()`，形状相同，**抛同一个错**。
+>    （注意：**不是** `MIHOMO_LEGACY_LISTENERS_UNSUPPORTED` ——
+>    `_validate_deployment_constants()` 跑在 legacy-listeners 检查之前。
+>    下游写测试要断言实测的这个码。）
+> 2. **步数对不上**：`ForwarderProvider` Protocol
+>    （`base.py:583-588`）与 `MockForwarderProvider` 都是
+>    `render → apply` **2 步**；`MihomoForwarderProvider` 是
+>    `render → finalize(resolver) → apply` **3 步**，且
+>    `apply()` 要求 `isinstance(candidate, MihomoCandidateConfig)`。
+>    而 `domain/provisioning.py:432` 调的是 2 步。
+>    **`mypy --strict` 抓不到**：`ProjectionTemplate` 是
+>    `CandidateConfig` 的子类（`base.py:337`），返回类型合法收窄。
+>
+> 后果：S04-C 放行当天，每一次开通在 `APPLY_FORWARDER` 抛错 → 补偿同样
+> 抛错 → 按 ADR-026 落 `PENDING_MANUAL`，**且 `CREATE_TENANT` 建的外部
+> tenant 已存在**。是 fail closed，但开通全线停摆。
+>
+> **C2 —— Mihomo reconciliation 既无 producer 也无 runner。**
+> 实测：`reconcile_mihomo_job()` 的非测试调用者为 **0**，
+> `workers/` 下零 mihomo 命中。对照 Xray 有完整三件套 ——
+> producer（`services.py:223`、`accounting_sync.py:475`）、
+> runner（`main.py:22-53` 的 lifespan asyncio loop）、
+> inline（`reconcile_gateway_job_in_session()`）。
+> **本 TASK 从 B2-B1 到 S04-C 没有任何 checkpoint 认领这三样。**
+> S04-C 的允许文件里**确实**有 `main.py` 与 `workers/scheduler.py`，
+> 但它的目标与验收标准里一条都没提 —— **文件在清单里 ≠ 工作在计划里**。
+>
+> **为什么这两条不能"实现时顺手处理"**：C1 要改
+> `domain/**` 与 `providers/base.py` 的协议形状，受**铁律 5** 约束，
+> 必须先有 ADR；C2 的「哪些业务事件触发一次 reconcile」是会改变
+> fingerprint 产生频率与锁竞争面的设计选择。现有 ADR 一条都没裁定过。
+> **按 ADR-036 §2：报告 User，由 User 决定是否叫 Claude 写那条规格。
+> 不得由执行者自选。**
 
 `build_registry()` 接受 `FORWARDER_PROVIDER=mihomo`，
 `.env.example` 补齐变量，lifecycle/factory 边界。**生产激活本身仍需 User
