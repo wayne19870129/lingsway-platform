@@ -862,7 +862,17 @@ backend/tests/unit/test_registry.py
 > **⚠️ 2026-09-20 第四次修订：这五个文件现在按 checkpoint 再分。**
 > 上面这份清单是 **B2-B2.1 ~ B2-B2.6 的并集**，**不是任何单个 PR 的清单**。
 > 每个 checkpoint 自己的精确清单见「B2-B2 的再切分」一节 ——
-> `.2`/`.3`/`.4`/`.5` **只能动 `backend/tests/unit/test_mihomo_reconciliation.py` 一个文件**。
+>
+> - **`.2` / `.4` / `.5`**：只能修改
+>   `backend/tests/unit/test_mihomo_reconciliation.py`。
+> - **`.3` 是唯一的中间例外**，exact allowed files 为：
+>   - `backend/app/infra/mihomo_reconciliation.py`
+>   - `backend/tests/unit/test_mihomo_reconciliation.py`
+>
+>   因为 **B2-B2.3 必须实现 ADR-037 §4（及 §2.2）要求的 receipt-verified
+>   `(name, host, port)` transport proxy 唯一解析**，所以它必须被允许修改
+>   loader 的生产代码。
+>
 > **按并集派活就等于没切。**
 
 > **B2-B2 一个字都不许动 `providers/base.py`（属 B2-B2a）与
