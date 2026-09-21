@@ -737,10 +737,23 @@ later session does not have to rediscover it.
    expiry, whichever comes first; the subscription link never changes) is
    **ADR-027**, implemented by **`TASK-S07-order-queue-billing.md`**.
 
-   Note that `RENEWAL`, `UPGRADE` and `ADDON` are all still unimplemented
+   ~~Note that `RENEWAL`, `UPGRADE` and `ADDON` are all still unimplemented
    stubs in `api/admin.py:159-169`, and there is **no usage-period rollover
    code at all** — `apply_expiry_policy()`'s own docstring says it does not
-   touch period boundaries. ADR-027 + TASK-S07 are what close that.
+   touch period boundaries.~~ **Both sentences are stale — corrected
+   2026-09-21 (`REVIEW-089` m1).** TASK-S07 (PR #152) closed them and
+   nothing went back to fix this paragraph: `api/admin.py:161-168` now
+   routes all three to `enqueue_subscription()`, and
+   `workers/accounting_sync.py:181` `apply_expiry_policy()` is real — its
+   docstring now reads "Close an exhausted/expired period and activate the
+   FIFO queued period" and it selects the head of the
+   `UsagePeriodStatus.QUEUED` queue. Same "changed one place, left the
+   current-state text stale elsewhere" defect class this repo keeps hitting.
+
+   **Severity of the seeding gap was raised on 2026-09-21** — see
+   `REVIEW-089` M1 and `docs/85` §5.6 item 3. It is not "prices declared but
+   not in effect"; `GET /plans` reads the database, so on a fresh deployment
+   the customer sees **an empty catalogue and cannot order at all**.
 
 5. **`.env.example` omitted `XRAY_CONFIG_PATH`, `XRAY_BACKUP_DIR`, and
    `XRAY_LOG_LEVEL`** — real `Settings` fields consumed by the now-wired
@@ -751,6 +764,39 @@ later session does not have to rediscover it.
    blank by convention, and any of them that `Settings` validates will hard-fail
    if copied into a real `.env` as-is.
 
+6a. **`domain/provisioning.py`'s forwarder contract is incompatible with the
+   Mihomo implementation (C1).** Added 2026-09-21 by `REVIEW-089`; **no
+   owner**. Two independent mismatches — fixing either leaves the other:
+   (a) `provisioning_state.py:193-198` fills only the legacy
+   `listeners: Mapping[str, str]`, so rendering it through Mihomo raises
+   `MIHOMO_CONTROLLER_SECRET_REF_INVALID` (measured — **not**
+   `MIHOMO_LEGACY_LISTENERS_UNSUPPORTED`, because
+   `_validate_deployment_constants()` runs first), and the ADR-026
+   compensation path uses the same shape so it raises identically;
+   (b) the `ForwarderProvider` Protocol and `MockForwarderProvider` are
+   two-step `render → apply`, while `MihomoForwarderProvider` is three-step
+   `render → finalize(resolver) → apply` and its `apply()` requires a
+   `MihomoCandidateConfig`. `mypy --strict` cannot see (b): `ProjectionTemplate`
+   subclasses `CandidateConfig`. **Consequence: the day S04-C allows
+   `FORWARDER_PROVIDER=mihomo`, every provisioning run fails at
+   `APPLY_FORWARDER` and lands `PENDING_MANUAL` with the external tenant
+   already created.** Fail-closed, but provisioning stops. Changing the
+   protocol touches `domain/**` and `providers/base.py`, so 铁律 5 requires an
+   ADR first — routed to the user per ADR-036 §2.
+
+6b. **Mihomo reconciliation has neither a producer nor a runner (C2).**
+   Added 2026-09-21 by `REVIEW-089`; **no owner**. `reconcile_mihomo_job()`
+   has **zero non-test callers** and `workers/` mentions mihomo nowhere, while
+   the Xray path has all three parts (producer `services.py:223` /
+   `accounting_sync.py:475`, runner `main.py:22-53` lifespan loop, inline
+   `reconcile_gateway_job_in_session()`). No checkpoint from B2-B1 through
+   S04-C claims any of them. S04-C's allowed files *do* include `main.py` and
+   `workers/scheduler.py`, but its goals and acceptance criteria mention
+   neither — **a file being in the list is not the same as the work being in
+   the plan.** Which business events should enqueue a reconcile is a design
+   choice that changes fingerprint frequency and lock contention, so it is
+   routed to the user, not invented by an executor.
+
 6. **Frontend components are written one-statement-per-file-line.** Entire React
    components sit on single 1000+ character lines
    (`frontend/app/(customer)/**/page.tsx`, `(admin)/admin/components.tsx`).
@@ -759,6 +805,19 @@ later session does not have to rediscover it.
    that the PR timeline be a reconstructable record. Type definitions are also
    duplicated per page rather than shared, which is the concrete form of
    `docs/84-*`'s "`frontend/lib/api.ts` is not a real typed client" gap.
+   **Re-confirmed 2026-09-21** (`REVIEW-089` m2): eight customer pages still
+   carry 1–2 lines over 400 characters each. Needs its own TASK; out of S04's
+   scope.
+
+7. **`mypy` run inside the remote Claude Code container is all environment
+   noise.** Added 2026-09-21 (`REVIEW-089` m3), for any session that follows
+   `CLAUDE.md`'s "run `mypy backend/app backend/tests` before pushing". In that
+   container `mypy` lives in its own pipx venv (`/root/.local/bin/mypy`) and
+   cannot see the project's site-packages, so it reports **352 errors** — 189
+   `import-not-found`, 101 `untyped-decorator`, and the rest cascading from
+   them. CI's `lint` job installs `-e ".[dev]"` first, so a green CI is
+   genuinely green. **Do not "fix" those 352.** To run mypy meaningfully
+   locally, run it from an interpreter that has the project dependencies.
 
 ## 9. Spec-vs-reality drift in `ARCHITECTURE.md`
 
