@@ -54,6 +54,7 @@ from backend.app.infra.mihomo_reconciliation import (
     assert_no_unresolved_mihomo_mutation,
     classify_finalization_outcome,
     enqueue_mihomo_reconciliation,
+    prepare_mihomo_reconciliation,
     reconcile_mihomo_job,
 )
 from backend.app.models import (
@@ -102,6 +103,48 @@ def db() -> Generator[Session, None, None]:
     finally:
         session.close()
         engine.dispose()
+
+
+def test_prepare_generation_and_intent_commit_together(
+    db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cast(Table, MihomoProjectionGeneration.__table__).create(bind=db.get_bind())
+    monkeypatch.setattr(reconciliation, "mihomo_projection_write", nullcontext)
+
+    class Loader:
+        def load_current(self, session: Session) -> DesiredForwarderState:
+            assert session is db
+            return DesiredForwarderState(snapshot_revision=1, snapshot_identity="input")
+
+    job = prepare_mihomo_reconciliation(db, operation_id="prepare-together", loader=Loader())
+    generation = db.scalar(select(MihomoProjectionGeneration))
+    persisted_job = db.get(Job, job.id)
+    assert generation is not None
+    assert persisted_job is not None
+    payload = json.loads(persisted_job.payload_json)
+    assert payload["snapshot_revision"] == generation.revision
+    assert persisted_job.status is JobStatus.PENDING
+
+
+def test_prepare_rolls_back_generation_when_intent_enqueue_fails(
+    db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cast(Table, MihomoProjectionGeneration.__table__).create(bind=db.get_bind())
+    monkeypatch.setattr(reconciliation, "mihomo_projection_write", nullcontext)
+
+    class Loader:
+        def load_current(self, _session: Session) -> DesiredForwarderState:
+            return DesiredForwarderState()
+
+    def fail_enqueue(*_args: object, **_kwargs: object) -> Job:
+        raise RuntimeError("enqueue failed")
+
+    monkeypatch.setattr(reconciliation, "enqueue_mihomo_reconciliation", fail_enqueue)
+    with pytest.raises(RuntimeError, match="enqueue failed"):
+        prepare_mihomo_reconciliation(db, operation_id="rollback", loader=Loader())
+    db.commit()
+    assert db.scalar(select(MihomoProjectionGeneration.revision)) is None
+    assert db.scalar(select(Job.id)) is None
 
 
 def test_sql_controller_secret_resolver_requires_exact_purpose_and_revision(
