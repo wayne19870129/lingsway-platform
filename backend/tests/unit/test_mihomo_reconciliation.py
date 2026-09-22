@@ -30,7 +30,7 @@ from backend.app.infra.mihomo_blocker import (
     MihomoBlockerError,
     ensure_mihomo_blocker,
 )
-from backend.app.infra.mihomo_generation import build_projection_source_manifest
+from backend.app.infra.mihomo_generation import build_projection_source_manifest, canonical_manifest
 from backend.app.infra.mihomo_projection_lock import SESSION_INFO_DURABLE_STATE_UNKNOWN_KEY
 from backend.app.infra.mihomo_reconciliation import (
     MIHOMO_FINALIZATION_UNKNOWN,
@@ -483,9 +483,22 @@ def test_released_transport_assignment_does_not_block_projection(
             }
         ],
     )
-    desired = loader.load_current(session)
-    assert desired.egress_proxies[0].transport_proxy_name is None
-    assert desired.egress_proxies[0].transport_node_identity is None
+    with_historical_row = loader.load_current(session)
+    assert with_historical_row.egress_proxies[0].transport_proxy_name is None
+    assert with_historical_row.egress_proxies[0].transport_node_identity is None
+    assignment = session.scalar(select(EgressTransportAssignment))
+    assert assignment is not None
+    session.delete(assignment)
+    session.commit()
+    without_assignment_row = loader.load_current(session)
+    assert with_historical_row == without_assignment_row
+    with_row_bytes = canonical_manifest(
+        build_projection_source_manifest(with_historical_row)
+    ).encode()
+    without_row_bytes = canonical_manifest(
+        build_projection_source_manifest(without_assignment_row)
+    ).encode()
+    assert with_row_bytes == without_row_bytes
     session.close()
     engine.dispose()
 
