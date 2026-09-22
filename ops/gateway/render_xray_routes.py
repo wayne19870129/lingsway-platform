@@ -133,12 +133,12 @@ def _render_from_database_with_fingerprint() -> tuple[Path, str]:
         resolver = SqlAlchemyCredentialResolver(db)
         desired = full_desired_routing_snapshot(db)
         reality = resolver.resolve_reality_identity()
-        credentials = {
-            outbound.credential_secret_ref: resolver.resolve(
-                outbound.credential_secret_ref
-            )
-            for outbound in desired.outbounds
-        }
+        credentials: dict[str, CredentialDTO] = {}
+        for outbound in desired.outbounds:
+            secret_ref = outbound.credential_secret_ref
+            if secret_ref is None:
+                continue
+            credentials[secret_ref] = resolver.resolve(secret_ref)
         rendered = _compose_desired(
             base_config,
             desired,
