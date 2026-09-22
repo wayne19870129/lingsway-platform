@@ -7,10 +7,11 @@ from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from sqlalchemy import Table, create_engine, event, select
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
@@ -116,13 +117,23 @@ def test_sql_controller_secret_resolver_requires_exact_purpose_and_revision(
     ]
 
 
-def test_sql_desired_loader_rebuilds_db_authority_with_stable_order(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def seed_mihomo_loader_graph(
+    tmp_path: Path,
+    *,
+    endpoints: list[dict[str, Any]] | None = None,
+    insertion_order: list[str] | None = None,
+    binding_credential_secret_ref: str | None = None,
+    binding_egress_id: int = 1,
+    assignments: list[dict[str, Any]] | None = None,
+    assignment_node_id: int = 11,
+    transport_non_identity: dict[str, object] | None = None,
+    secret_revisions: dict[str, int] | None = None,
+    transport_cache_content: bytes | None = None,
+    source_revision: int = 2,
+) -> tuple[Engine, Session, reconciliation.SqlMihomoDesiredSnapshotLoader]:
+    """Seed the complete minimal loader graph; later checkpoints vary its axes."""
     engine = create_engine(
-        "sqlite://",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
     )
     event.listen(
         engine,
@@ -130,9 +141,7 @@ def test_sql_desired_loader_rebuilds_db_authority_with_stable_order(
         lambda connection, _record: connection.create_function(
             "IF",
             3,
-            lambda condition, when_true, when_false: when_true
-            if condition
-            else when_false,
+            lambda condition, when_true, when_false: when_true if condition else when_false,
             deterministic=True,
         ),
     )
@@ -151,6 +160,204 @@ def test_sql_desired_loader_rebuilds_db_authority_with_stable_order(
         Secret.__table__,
     ]
     Base.metadata.create_all(engine, tables=tables)  # type: ignore[arg-type]
+    content = (
+        transport_cache_content
+        or b"proxies:\n  - {name: Node A, type: ss, server: 203.0.113.11, port: 443}\n"
+    )
+    resolver = SubscriptionTransportResolver(tmp_path)
+    descriptor = TransportProviderDescriptor(
+        1, "transport-a", "SUBSCRIPTION", "transport/subscription-a"
+    )
+    cache_path = resolver._cache_path(descriptor)  # noqa: SLF001
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_bytes(content)
+    now = datetime.now(UTC)
+    endpoint_rows = endpoints or [{"id": 1, "code": "egress-a", "status": "AVAILABLE"}]
+    rows_by_code = {str(row.get("code", "egress-a")): row for row in endpoint_rows}
+    order = insertion_order or list(reversed(list(rows_by_code)))
+    revisions = secret_revisions or {"egress/a": 3}
+    non_identity = transport_non_identity or {}
+    with Session(engine) as session:
+        from backend.app.models import ProviderStatus, RouteGroupStatus
+
+        session.add_all(
+            [
+                TransportProviderRecord(
+                    id=1,
+                    code="transport-a",
+                    slug="transport-a",
+                    name="Transport A",
+                    kind=TransportProviderKind.SUBSCRIPTION,
+                    secret_ref="transport/subscription-a",
+                    status=ProviderStatus.HEALTHY,
+                    enabled=True,
+                ),
+                Secret(
+                    secret_ref="transport/subscription-a",
+                    ciphertext="opaque",
+                    purpose="TRANSPORT_SUBSCRIPTION_URL",
+                    revision=source_revision,
+                ),
+                Secret(
+                    secret_ref=credential_resolver.MIHOMO_CONTROLLER_SECRET_REF,
+                    ciphertext="opaque-controller",
+                    purpose=credential_resolver.MIHOMO_CONTROLLER_SECRET_PURPOSE,
+                    revision=7,
+                ),
+                RouteGroup(id=1, code="route-a", name="A", status=RouteGroupStatus.ACTIVE),
+                EgressGroup(id=1, code="egress", region="test", status="ACTIVE"),
+                TransportEndpointRecord(
+                    id=11,
+                    provider_id=1,
+                    external_id="node-a",
+                    name="Node A",
+                    protocol="https",
+                    host="203.0.113.11",
+                    port=443,
+                    auth_secret_ref="node/a",
+                    status=non_identity.get("status", "AVAILABLE"),
+                    region=non_identity.get("region", "UNKNOWN"),
+                    latency_ms=non_identity.get("latency_ms"),
+                    packet_loss=None,
+                    raw_metadata_json=non_identity.get("raw_metadata_json", "{}"),
+                ),
+                RouteBinding(route_group_id=1, provider_id=1, role="PRIMARY", enabled=True),
+                TrafficRule(
+                    rule_set="default",
+                    match_type="MATCH",
+                    target_egress="BLOCK",
+                    priority=100,
+                    enabled=True,
+                ),
+                MihomoTransportMaterialization(
+                    owner_record_id=1,
+                    provider_code="transport-a",
+                    source_revision=source_revision,
+                    cache_identity=str(cache_path),
+                    content_hash=hashlib.sha256(content).hexdigest(),
+                    freshness_deadline=now + timedelta(hours=1),
+                ),
+            ]
+        )
+        for index, code in enumerate(order, 1):
+            row = rows_by_code[code]
+            endpoint_id = int(row.get("id", index))
+            ref = str(row.get("credential_secret_ref", f"egress/{code[-1]}"))
+            session.add(
+                EgressEndpoint(
+                    id=endpoint_id,
+                    group_id=1,
+                    code=code,
+                    provider_name="test",
+                    host=str(row.get("host", "203.0.113.10")),
+                    port=int(row.get("port", 443)),
+                    protocol="ss",
+                    credential_secret_ref=ref,
+                    mihomo_listen_port=10000 + endpoint_id,
+                    status=str(row.get("status", "AVAILABLE")),
+                )
+            )
+            session.add(
+                Secret(
+                    secret_ref=ref,
+                    ciphertext="opaque-egress",
+                    purpose="EGRESS_CREDENTIAL",
+                    revision=revisions.get(ref, 3),
+                )
+            )
+            session.add(
+                RouteEgressBinding(
+                    route_group_id=1, egress_endpoint_id=endpoint_id, role="PRIMARY", enabled=True
+                )
+            )
+        session.add(
+            EgressBinding(
+                subscription_id=10,
+                egress_id=binding_egress_id,
+                credential_secret_ref=binding_credential_secret_ref,
+            )
+        )
+        for item in assignments or [
+            {
+                "egress_id": 1,
+                "transport_provider_id": 1,
+                "transport_node_id": assignment_node_id,
+                "state": "ACTIVE",
+            }
+        ]:
+            session.add(
+                EgressTransportAssignment(
+                    egress_id=int(item.get("egress_id", 1)),
+                    transport_provider_id=int(item.get("transport_provider_id", 1)),
+                    transport_node_id=int(item.get("transport_node_id", assignment_node_id)),
+                    state=str(item.get("state", "ACTIVE")),
+                    allocation_generation=1,
+                    last_latency_ms=None,
+                    last_checked_at=None,
+                    unavailable_since=None,
+                )
+            )
+        session.commit()
+        loader = reconciliation.SqlMihomoDesiredSnapshotLoader(tmp_path, "203.0.113.20:9090")
+        return engine, session, loader
+
+
+def test_sql_desired_loader_rebuilds_db_authority_with_stable_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine, session, loader = seed_mihomo_loader_graph(
+        tmp_path,
+        endpoints=[
+            {"id": 1, "code": "egress-b", "status": "AVAILABLE"},
+            {"id": 2, "code": "egress-a", "status": "AVAILABLE"},
+        ],
+        insertion_order=["egress-b", "egress-a"],
+    )
+    monkeypatch.setattr(
+        credential_resolver,
+        "reveal_secret_snapshot_for_purpose",
+        lambda *_args: pytest.fail("loader must not resolve controller plaintext"),
+    )
+    first = loader.load_current(session)
+    second = loader.load_current(session)
+    assert tuple(item.name for item in first.egress_proxies) == ("egress-a", "egress-b")
+    assert tuple(item["name"] for item in first.proxy_groups) == ("route-a",)
+    assert first == second
+    assert first.deployment_constants["api-secret-revision"] == 7
+    session.close()
+    engine.dispose()
+    return
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    event.listen(
+        engine,
+        "connect",
+        lambda connection, _record: connection.create_function(
+            "IF",
+            3,
+            lambda condition, when_true, when_false: when_true if condition else when_false,
+            deterministic=True,
+        ),
+    )
+    tables = [
+        RouteGroup.__table__,
+        TransportProviderRecord.__table__,
+        RouteBinding.__table__,
+        EgressGroup.__table__,
+        EgressEndpoint.__table__,
+        RouteEgressBinding.__table__,
+        TrafficRule.__table__,
+        MihomoTransportMaterialization.__table__,
+        TransportEndpointRecord.__table__,
+        EgressTransportAssignment.__table__,
+        EgressBinding.__table__,
+        Secret.__table__,
+    ]
+    Base.metadata.create_all(engine, tables=tables)
     cache_root = tmp_path
     transport_resolver = SubscriptionTransportResolver(cache_root)
     descriptor = TransportProviderDescriptor(
@@ -176,25 +383,25 @@ def test_sql_desired_loader_rebuilds_db_authority_with_stable_order(
         )
         session.add_all(
             [
-                    provider,
-                    Secret(
-                        secret_ref="transport/subscription-a",
-                        ciphertext="opaque",
-                        purpose="TRANSPORT_SUBSCRIPTION_URL",
-                        revision=2,
-                    ),
-                    Secret(
-                        secret_ref=credential_resolver.MIHOMO_CONTROLLER_SECRET_REF,
-                        ciphertext="opaque-controller",
-                        purpose=credential_resolver.MIHOMO_CONTROLLER_SECRET_PURPOSE,
-                        revision=7,
-                    ),
-                    Secret(
-                        secret_ref="egress/a",
-                        ciphertext="opaque-egress",
-                        purpose="EGRESS_CREDENTIAL",
-                        revision=3,
-                    ),
+                provider,
+                Secret(
+                    secret_ref="transport/subscription-a",
+                    ciphertext="opaque",
+                    purpose="TRANSPORT_SUBSCRIPTION_URL",
+                    revision=2,
+                ),
+                Secret(
+                    secret_ref=credential_resolver.MIHOMO_CONTROLLER_SECRET_REF,
+                    ciphertext="opaque-controller",
+                    purpose=credential_resolver.MIHOMO_CONTROLLER_SECRET_PURPOSE,
+                    revision=7,
+                ),
+                Secret(
+                    secret_ref="egress/a",
+                    ciphertext="opaque-egress",
+                    purpose="EGRESS_CREDENTIAL",
+                    revision=3,
+                ),
                 RouteGroup(id=1, code="route-b", name="B", status=RouteGroupStatus.ACTIVE),
                 RouteGroup(id=2, code="route-a", name="A", status=RouteGroupStatus.ACTIVE),
                 EgressGroup(id=1, code="egress", region="test", status="ACTIVE"),
@@ -270,9 +477,7 @@ def test_sql_desired_loader_rebuilds_db_authority_with_stable_order(
             "reveal_secret_snapshot_for_purpose",
             lambda *_args: pytest.fail("loader must not resolve controller plaintext"),
         )
-        loader = reconciliation.SqlMihomoDesiredSnapshotLoader(
-            cache_root, "203.0.113.20:9090"
-        )
+        loader = reconciliation.SqlMihomoDesiredSnapshotLoader(cache_root, "203.0.113.20:9090")
         first = loader.load_current(session)
         session.expire_all()
         second = loader.load_current(session)
@@ -280,9 +485,7 @@ def test_sql_desired_loader_rebuilds_db_authority_with_stable_order(
         assert first.egress_proxies[0].credential_secret_ref == "egress/a"
         assert first.egress_proxies[0].credential_revision == 3
         assert first.egress_proxies[0].transport_proxy_name == "Node A"
-        assert tuple(item["name"] for item in first.proxy_groups) == (
-            "route-b", "route-a"
-        )
+        assert tuple(item["name"] for item in first.proxy_groups) == ("route-b", "route-a")
         assert first == second
         assert first.deployment_constants["api-secret-revision"] == 7
     transport_resolver.close()
@@ -374,9 +577,7 @@ def test_operation_id_is_bounded_by_job_dedupe_key(db: Session) -> None:
     "operation_id",
     ["abc", "op-123", "op_123", "op.123", "op:123", "x" * 143],
 )
-def test_operation_id_accepts_only_shared_safe_grammar(
-    db: Session, operation_id: str
-) -> None:
+def test_operation_id_accepts_only_shared_safe_grammar(db: Session, operation_id: str) -> None:
     job = enqueue_mihomo_reconciliation(
         db, operation_id=operation_id, operation_kind="RECONCILE", snapshot_revision=1
     )
@@ -417,9 +618,9 @@ def test_blocker_is_identifier_only_idempotent_and_global(db: Session) -> None:
     assert same.id == blocker.id
     assert "secret" not in same.payload_json.casefold()
     assert "token" not in same.payload_json.casefold()
-    assert db.scalar(
-        select(Job).where(Job.job_type == MIHOMO_RECONCILE_BLOCKER_JOB_TYPE)
-    ) is not None
+    assert (
+        db.scalar(select(Job).where(Job.job_type == MIHOMO_RECONCILE_BLOCKER_JOB_TYPE)) is not None
+    )
     db.info["mihomo_projection_lock_held"] = True
     with pytest.raises(MihomoReconciliationBlocked, match="GLOBAL_MANUAL_BLOCKER"):
         assert_no_unresolved_mihomo_mutation(db)
@@ -509,32 +710,41 @@ def test_classifier_requires_exact_job_and_evidence(db: Session) -> None:
         db, operation_id="op-2", operation_kind="RECONCILE", snapshot_revision=4
     )
     db.commit()
-    assert classify_finalization_outcome(
-        db,
-        job_id=job.id,
-        operation_id="op-2",
-        operation_kind="RECONCILE",
-        snapshot_revision=4,
-        candidate_fingerprint="v4",
-    ) is CommitOutcome.UNKNOWN
+    assert (
+        classify_finalization_outcome(
+            db,
+            job_id=job.id,
+            operation_id="op-2",
+            operation_kind="RECONCILE",
+            snapshot_revision=4,
+            candidate_fingerprint="v4",
+        )
+        is CommitOutcome.UNKNOWN
+    )
     job.status = JobStatus.RUNNING
     db.commit()
-    assert classify_finalization_outcome(
-        db,
-        job_id=job.id,
-        operation_id="op-2",
-        operation_kind="RECONCILE",
-        snapshot_revision=4,
-        candidate_fingerprint="v4",
-    ) is CommitOutcome.ABSENT
-    assert classify_finalization_outcome(
-        db,
-        job_id=9999,
-        operation_id="op-2",
-        operation_kind="RECONCILE",
-        snapshot_revision=4,
-        candidate_fingerprint="v4",
-    ) is CommitOutcome.UNKNOWN
+    assert (
+        classify_finalization_outcome(
+            db,
+            job_id=job.id,
+            operation_id="op-2",
+            operation_kind="RECONCILE",
+            snapshot_revision=4,
+            candidate_fingerprint="v4",
+        )
+        is CommitOutcome.ABSENT
+    )
+    assert (
+        classify_finalization_outcome(
+            db,
+            job_id=9999,
+            operation_id="op-2",
+            operation_kind="RECONCILE",
+            snapshot_revision=4,
+            candidate_fingerprint="v4",
+        )
+        is CommitOutcome.UNKNOWN
+    )
     payload = json.loads(job.payload_json)
     payload["finalization_evidence"] = {
         "operation_id": "op-2",
@@ -546,14 +756,17 @@ def test_classifier_requires_exact_job_and_evidence(db: Session) -> None:
     job.payload_json = json.dumps(payload)
     job.status = JobStatus.SUCCEEDED
     db.commit()
-    assert classify_finalization_outcome(
-        db,
-        job_id=job.id,
-        operation_id="op-2",
-        operation_kind="RECONCILE",
-        snapshot_revision=4,
-        candidate_fingerprint="v4",
-    ) is CommitOutcome.UNKNOWN
+    assert (
+        classify_finalization_outcome(
+            db,
+            job_id=job.id,
+            operation_id="op-2",
+            operation_kind="RECONCILE",
+            snapshot_revision=4,
+            candidate_fingerprint="v4",
+        )
+        is CommitOutcome.UNKNOWN
+    )
     ensure_mihomo_blocker(
         db,
         blocker_kind=MIHOMO_BLOCKER_KIND_LOCK_RELEASE,
@@ -563,45 +776,52 @@ def test_classifier_requires_exact_job_and_evidence(db: Session) -> None:
         reason_code=MIHOMO_LOCK_RELEASE_PENDING,
     )
     db.commit()
-    assert classify_finalization_outcome(
-        db,
-        job_id=job.id,
-        operation_id="op-2",
-        operation_kind="RECONCILE",
-        snapshot_revision=4,
-        candidate_fingerprint="v4",
-    ) is CommitOutcome.LANDED
+    assert (
+        classify_finalization_outcome(
+            db,
+            job_id=job.id,
+            operation_id="op-2",
+            operation_kind="RECONCILE",
+            snapshot_revision=4,
+            candidate_fingerprint="v4",
+        )
+        is CommitOutcome.LANDED
+    )
     payload["finalization_evidence"]["candidate_fingerprint"] = "wrong"
     job.payload_json = json.dumps(payload)
     db.commit()
-    assert classify_finalization_outcome(
-        db,
-        job_id=job.id,
-        operation_id="op-2",
-        operation_kind="RECONCILE",
-        snapshot_revision=4,
-        candidate_fingerprint="v4",
-    ) is CommitOutcome.UNKNOWN
+    assert (
+        classify_finalization_outcome(
+            db,
+            job_id=job.id,
+            operation_id="op-2",
+            operation_kind="RECONCILE",
+            snapshot_revision=4,
+            candidate_fingerprint="v4",
+        )
+        is CommitOutcome.UNKNOWN
+    )
 
 
 @pytest.mark.parametrize("status", [JobStatus.PENDING, JobStatus.FAILED])
-def test_classifier_never_calls_pending_or_failed_absent(
-    db: Session, status: JobStatus
-) -> None:
+def test_classifier_never_calls_pending_or_failed_absent(db: Session, status: JobStatus) -> None:
     job = enqueue_mihomo_reconciliation(
         db, operation_id="op-certainty", operation_kind="RECONCILE", snapshot_revision=1
     )
     job.status = status
     db.commit()
 
-    assert classify_finalization_outcome(
-        db,
-        job_id=job.id,
-        operation_id="op-certainty",
-        operation_kind="RECONCILE",
-        snapshot_revision=1,
-        candidate_fingerprint="projection-v1",
-    ) is CommitOutcome.UNKNOWN
+    assert (
+        classify_finalization_outcome(
+            db,
+            job_id=job.id,
+            operation_id="op-certainty",
+            operation_kind="RECONCILE",
+            snapshot_revision=1,
+            candidate_fingerprint="projection-v1",
+        )
+        is CommitOutcome.UNKNOWN
+    )
 
 
 def test_partial_finalization_evidence_is_preserved_as_unknown(db: Session) -> None:
@@ -632,18 +852,17 @@ def test_partial_finalization_evidence_is_preserved_as_unknown(db: Session) -> N
     current = db.get(Job, job.id)
     assert current is not None
     assert current.status is JobStatus.RUNNING
-    assert json.loads(current.payload_json)["finalization_evidence"] == payload[
-        "finalization_evidence"
-    ]
+    assert (
+        json.loads(current.payload_json)["finalization_evidence"]
+        == payload["finalization_evidence"]
+    )
     assert current.last_error_code is None
 
 
 @pytest.mark.parametrize(
     "state", ["missing", "malformed", "partial", "wrong-fingerprint", "wrong-identity"]
 )
-def test_ambiguous_finalization_persists_global_blocker(
-    db: Session, state: str
-) -> None:
+def test_ambiguous_finalization_persists_global_blocker(db: Session, state: str) -> None:
     job_id = 9001
     if state != "missing":
         job = enqueue_mihomo_reconciliation(
@@ -682,9 +901,7 @@ def test_ambiguous_finalization_persists_global_blocker(
     )
 
     assert result.retryable is False
-    blocker = db.scalar(
-        select(Job).where(Job.job_type == MIHOMO_RECONCILE_BLOCKER_JOB_TYPE)
-    )
+    blocker = db.scalar(select(Job).where(Job.job_type == MIHOMO_RECONCILE_BLOCKER_JOB_TYPE))
     assert blocker is not None
     if state != "missing":
         current = db.get(Job, job_id)
@@ -1305,6 +1522,8 @@ def test_stale_transport_materialization_fails_before_runtime_mutation(
     assert result is not None
     assert result.reason_code == "MIHOMO_TRANSPORT_CACHE_STALE"
     assert result.retryable is True
+
+
 class _Provider:
     def __init__(self) -> None:
         self.render_count = 0
@@ -1497,8 +1716,7 @@ def test_nonpositive_apply_result_persists_runtime_blocker_and_blocks_newer(
     assert result.retryable is False
     assert result.reason_code == MIHOMO_RUNTIME_UNKNOWN
     assert (
-        db.scalar(select(Job).where(Job.job_type == MIHOMO_RECONCILE_BLOCKER_JOB_TYPE))
-        is not None
+        db.scalar(select(Job).where(Job.job_type == MIHOMO_RECONCILE_BLOCKER_JOB_TYPE)) is not None
     )
     newer = enqueue_mihomo_reconciliation(
         db, operation_id="op-apply-unknown-newer", operation_kind="RECONCILE", snapshot_revision=1
