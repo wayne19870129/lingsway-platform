@@ -445,10 +445,40 @@ different contents) and the PR #128 version won.
   §6 — **false green, not accepted.** `ADR-038` fixes the interface (a frozen
   `MihomoFinalizationResolvers` bundle; one new method on the *existing*
   resolver with `resolve()` delegating to it, so the decryption logic exists
-  exactly once), the allowed list went from 4 files to 8 (all already inside
-  the S04-B2-B master union — **the overall scope did not grow**), and three
+  exactly once), the allowed list went from 4 files to 8, and three
   new tests in `test_mihomo_reconciliation.py` prove the wiring rather than
-  the fake.
+  the fake. **`ADR-038` merged as PR #175.**
+
+  **Then 8 became 9 (2026-09-22), and this time the master union really did
+  grow.** The earlier note here said the eight files were "all already inside
+  the S04-B2-B master union — the overall scope did not grow"; that has been
+  deleted because it is no longer true. While reworking **PR #176**, a full
+  `mypy` run mechanically found three surviving call sites that the new public
+  signature breaks — `backend/tests/guards/test_mihomo_safe_reload.py` at
+  `:107`, `:138` and `:139`, each still passing a single
+  `ControllerSecretResolver` to `finalize()`. That file was in **neither** the
+  B2-B2c list **nor** the master union, so Codex stopped rather than edit it —
+  correct behaviour. It is now the ninth B2-B2c file and a new master-union
+  entry marked **B2-B2c only** (not authorised for B2-B2d/B3/B4), limited to
+  migrating those three call sites to the bundle: no change to safe-reload or
+  rollback behaviour, and since those fixtures carry no egress credential
+  requirements the egress resolver is only a legal bundle member, never a
+  reason to add egress assertions. This is an existing-call-site adaptation,
+  not a new architectural decision, so **no ADR-039 is needed.**
+
+  **The closure is still only half done, and that is recorded, not resolved.**
+  A repo-wide `grep` for `.finalize(` found two more files the same signature
+  breaks: `backend/tests/integration/test_db_adapters.py` (`:706`, `:779`) and
+  `backend/tests/integration/test_mihomo_reconciliation_mysql.py` (`:127`,
+  which passes the `reconcile_mihomo_job()` positional that ADR-038 renames to
+  `resolvers`). **`mypy` cannot see them** — `pyproject.toml` excludes
+  `backend/tests/integration` — and the `test_db_adapters.py` pair has no skip
+  guard while CI's `backend` job runs `pytest backend/tests` over the whole
+  tree, so they execute and would fail at runtime. Both files are already in
+  the master union under B2-B4 but **not** in B2-B2c's nine; whether to pull
+  them in is the user's call per ADR-036 §2. **Method note worth keeping: for a
+  public-signature change, `mypy` alone is not a closure check — pair it with a
+  `grep` over call sites.**
   The 2026-09-19 four-checkpoint split is history; ADR-037 extended it to six,
   and the 2026-09-20 re-split broke `B2-B2` itself into six sub-checkpoints.
   Both
@@ -595,9 +625,16 @@ different contents) and the PR #128 version won.
   list, and the first checkpoint that can produce a generation is `.6`, not
   #163.) `providers/base.py` belongs to
   B2-B2a (the DTO) and B2-B2d (the Xray outbound change), not to B2-B2c, which
-  is render/finalization only. `dialer-proxy` has **not** been tested
-  against the pinned `metacubex/mihomo:v1.19.27` — B2-B2c must confirm it
-  during candidate validation and stop rather than substitute an encoding.
+  is render/finalization only. ~~`dialer-proxy` has **not** been tested
+  against the pinned `metacubex/mihomo:v1.19.27`~~ — **updated 2026-09-22:
+  a real candidate validation was run against the pinned image during PR
+  #176's implementation and returned exit code 0**, so the encoding is
+  accepted. Two caveats that must travel with that fact: **PR #176 is not
+  merged** (it is in rework over the scope-closure gap above), and the
+  standing rule is unchanged — if a later run is ever rejected, **stop and
+  report the user; never substitute another encoding.**
+  (`providers/base.py` is also a B2-B2c file since ADR-038, not only a
+  B2-B2a/B2-B2d one — see the ADR-038 entry above.)
 
   Third, chain B **requires changing Xray**, which the ADR's first draft
   denied in the same breath as choosing chain B.

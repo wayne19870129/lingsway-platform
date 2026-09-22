@@ -805,7 +805,7 @@ S07 一个任务里，「允许修改的文件」漏项**连续发生两次**：
 | 5 | ~~**S04-B2-B2.4** credential identity 与 precedence~~ | 同上 | ✅ **已合并（PR #172）**。tests-only，只动同一个测试文件（注意：上一行 `.3` 不是 tests-only）；关键断言之一是**全程不解密** |
 | 6 | ~~**S04-B2-B2.5** fingerprint 不变式~~ | 同上 | ✅ **已合并（PR #173）**。tests-only，只动同一个测试文件；依赖 .3/.4 建好的变体 |
 | 7 | ~~**S04-B2-B2.6** preparation 事务 + production wiring~~ | 同上 | ✅ **已合并（PR #174）**。**唯一能生产 generation 的 checkpoint**；交付物全部从 #163 迁出，原样带过来 |
-| 8 | **S04-B2-B2c** render / finalization | 同上 | **⬅ 下一项未完成 checkpoint。** ⛔ 唯一未解除的前置：**`ADR-038` 合并（PR #175 在途）** —— B2-B2a ✅ 与 `.1`~`.6` ✅ 均已满足。`dialer-proxy` 渲染 + 明文在 render 边界解析。**2026-09-22 重做了一次范围闭包**：原 4 文件清单**做不到** ADR-037 §6 的 revision identity（`SqlAlchemyCredentialResolver.resolve()` 不暴露 `Secret.revision`、`finalize()` 只收一个 controller resolver、`reconcile_mihomo_job()` 只构造 controller resolver）。**现为 8 个文件**，接口落点由 **ADR-038** 唯一裁定，并新增 3 条落在 `test_mihomo_reconciliation.py` 的测试证明 production wiring 不是 fake |
+| 8 | **S04-B2-B2c** render / finalization | 同上 | **⬅ 当前在途：PR #176 返工中。** 前置**全部已解除**（B2-B2a ✅、`.1`~`.6` ✅、**`ADR-038` ✅ PR #175 已合并**）。**Round 1 收紧 resolver contract 后发现 scope closure 漏项**：`ADR-038` §2.2 把 `finalize()` 的公共签名改为唯一 bundle，全量 mypy 机械发现 `backend/tests/guards/test_mihomo_safe_reload.py` 有 **3 个**旧 `finalize()` 调用点（`:107` / `:138` / `:139`），而该文件既不在 B2-B2c 清单也不在 master union ⇒ **allowed files 由 8 → 9**，master union 同步 +1（仅 B2-B2c，不授权 B2-B2d/B3/B4）。**⛔ 另有两个 integration 调用点尚未裁定，见下方注。**`dialer-proxy` 渲染 + 明文在 render 边界解析。**2026-09-22 重做了一次范围闭包**：原 4 文件清单**做不到** ADR-037 §6 的 revision identity（`SqlAlchemyCredentialResolver.resolve()` 不暴露 `Secret.revision`、`finalize()` 只收一个 controller resolver、`reconcile_mihomo_job()` 只构造 controller resolver）。**现为 8 个文件**，接口落点由 **ADR-038** 唯一裁定，并新增 3 条落在 `test_mihomo_reconciliation.py` 的测试证明 production wiring 不是 fake |
 | 9 | **S04-B2-B2d** Xray → Mihomo 交接 | 同上 | ⛔ 前置：B2-B2c。Xray outbound 改指 `127.0.0.1:{mihomo_listen_port}`，该跳无凭据。**没有这一段链路 B 不可达** |
 | 10 | **S04-B2-B3** freshness 三点复核 / recovery / runtime exact readback | 同上 | 等 B2-B2d 合并 |
 | 11 | **S04-B2-B4** 完整 integration / guard / migration / concurrency 验收 | 同上 | 等 B2-B3 合并 |
@@ -815,10 +815,33 @@ S07 一个任务里，「允许修改的文件」漏项**连续发生两次**：
 | 15 | **S04-C** registry 放行 + 激活闸门 | 同上 | ⛔ **BLOCKED**。前置：B2-B4 + writer **+ C1 + C2**。闸门：每个 in-scope egress 恰好一条 ACTIVE assignment |
 
 > **📍 2026-09-22 队列位置（一句话）**：`B2-B2a` 与 `B2-B2.1`~`.6` **六个子
-> checkpoint 全部已合并**（#167 / #163 / #170 / #171 / #172 / #173 / #174）。
-> **下一项未完成 checkpoint 是第 8 行的 `S04-B2-B2c`**，它**只**等
-> `ADR-038`（PR #175）合并解除前置 —— 没有其它未满足的闸门。
-> 第 9~15 行都排在 B2-B2c 之后。
+> checkpoint 全部已合并**（#167 / #163 / #170 / #171 / #172 / #173 / #174），
+> **`ADR-038` 也已合并（PR #175）**。
+> **第 8 行的 `S04-B2-B2c` 现在是在途项，PR #176 正在返工**；
+> 第 9~15 行都排在它之后，顺序不变。
+
+> **⛔ 2026-09-22：B2-B2c 的闭包只补了一半，另有两处待你裁定。**
+>
+> 这次全仓 `grep -rn "\.finalize(" --include=*.py backend ops` 查出，被
+> `ADR-038` §2.2 的 bundle 签名打破的**不止**
+> `test_mihomo_safe_reload.py` 那 3 处，还有：
+>
+> | 文件 | 调用点 |
+> |---|---|
+> | `backend/tests/integration/test_db_adapters.py` | `:706`、`:779` 的 `provider.finalize(template, FakeControllerSecretResolver())` |
+> | `backend/tests/integration/test_mihomo_reconciliation_mysql.py` | `:127` 向 `reconcile_mihomo_job()` 第 3 个位置参数传 `cast(ControllerSecretResolver, …)` |
+>
+> **mypy 没报它们**，因为 `pyproject.toml` 的 `[tool.mypy]` 把
+> `backend/tests/integration` 整个 `exclude` 了。而 `test_db_adapters.py`
+> 的两处**没有任何 skip 守卫**，CI 的 `backend` job 跑
+> `python -m pytest backend/tests`（整棵树），所以它们**会真的执行并在运行期失败**。
+>
+> 两个文件**都已在 master union**（挂 B2-B4 名下），**都不在** B2-B2c 的
+> 9 文件清单。**是否划进 B2-B2c 由你决定**（ADR-036 §2）。在你裁定之前，
+> PR #176 跑到这两处会再次停下上报 —— **那是正确行为，不是失败。**
+>
+> **顺带记一条方法论**：`mypy` **不足以**为这类公共签名变更做闭包检查，
+> 因为它排除了 integration 目录。**完整闭包必须再做一次 `grep` 调用点扫描。**
 
 > **⛔ 2026-09-21：不要派 S04-C，直到 C1 与 C2 被 User 裁定。**
 > 它的允许文件里**确实**有 `main.py` 与 `workers/scheduler.py`，

@@ -913,10 +913,75 @@ backend/app/providers/forwarder/mihomo_projection.py   # dialer-proxy 渲染 + �
 backend/tests/unit/test_mihomo_projection.py
 backend/tests/unit/test_mihomo_reconciliation.py       # 证明 production wiring 不是 fake（见下面测试表后三条）
 backend/tests/guards/test_secret_leak.py
+backend/tests/guards/test_mihomo_safe_reload.py        # 2026-09-22 补入（见下）：仅迁移 3 个既有 finalize() 调用点到 bundle
 ```
 
-> **这 8 个文件全部已在本 TASK 的「允许修改的文件 / S04-B2-B」总并集里
-> —— 本次只扩 B2-B2c 这个 checkpoint 的子集，总 scope 一个文件都没加。**
+> ## ⚠️ 2026-09-22：由 8 个改为 **9 个**，且总并集确实增加了 1 个文件
+>
+> **上一版这里写着「这 8 个文件全部已在总并集里 —— 总 scope 一个文件都没加」。
+> 那句话现在不成立，是本次必须更正的事实。**
+>
+> **第 9 个文件**：`backend/tests/guards/test_mihomo_safe_reload.py`
+> —— 它**既不在**旧的 8 文件清单里，**也不在** S04-B2-B 的 master union 里，
+> 属规格漏项。本次一并补进两处（master union 的条目已注明「仅 B2-B2c」）。
+>
+> **它为什么必须进来（机械理由，不是判断）**：`ADR-038` §2.2 把
+> `MihomoForwarderProvider.finalize()` 的**公共签名**从单一
+> `ControllerSecretResolver` 改为唯一的 `MihomoFinalizationResolvers` bundle。
+> 公共签名一变，**仓库里所有静态调用点都必须同步**。实测 `main`
+> （`0439f67`）该文件有 **3 个**旧调用点：
+>
+> ```
+> backend/tests/guards/test_mihomo_safe_reload.py:107  return provider.finalize(template, Resolver())
+> backend/tests/guards/test_mihomo_safe_reload.py:138  first  = provider.finalize(template, Resolver("secret-a"))
+> backend/tests/guards/test_mihomo_safe_reload.py:139  second = provider.finalize(template, Resolver("secret-b"))
+> ```
+>
+> 全量 `mypy` 已**机械发现**这三处 —— 不是有人凭印象想起来的。
+>
+> **这个文件在 B2-B2c 里允许做什么、不允许做什么（写死）**：
+>
+> - ✅ **仅**把上述 3 个调用点由单一 `ControllerSecretResolver` 迁移到
+>   `ADR-038` §2.2 的 `MihomoFinalizationResolvers` bundle；
+> - ⛔ **不得改变 safe-reload / rollback 的任何行为**（九步重载语义、
+>   backup/restore 顺序、失败路径断言一律不动）；
+> - ⛔ 这些 fixture **没有 egress credential requirements**
+>   （`ProjectionTemplate.egress_credentials` 为空元组），所以 bundle 里的
+>   **egress resolver 只作为合法成员存在**，**不得**借此引入任何新的
+>   production 行为、新的 egress 测试需求或新的断言；
+> - ⛔ **不授权给 B2-B2d / B2-B3 / B2-B4** —— 它只属于 B2-B2c 这一个
+>   checkpoint。
+>
+> **这不是新的架构决策，只是既有测试调用点适配，因此不需要 `ADR-039`。**
+> `ADR-038` 已经裁定了签名；本次只是把它的机械后果补进允许文件清单。
+
+> ## ⛔ 同一次闭包检查发现的另外两个调用点 —— **尚未裁定，需 User 决定**
+>
+> **本节是 2026-09-22 这次闭包的副产品，不在本次修订的授权范围内，
+> 但必须记下来，否则 PR #176 会以同样的方式再停一次。**
+>
+> 全仓 `grep -rn "\.finalize(" --include=*.py backend ops` 实测，除上面那 3 处
+> 之外还有**两个文件**会被同一个签名变更打破：
+>
+> | 文件 | 调用点 | 为什么 `mypy` 没报 |
+> |---|---|---|
+> | `backend/tests/integration/test_db_adapters.py` | `:706`、`:779` 的 `provider.finalize(template, FakeControllerSecretResolver())` | **`pyproject.toml` 的 `[tool.mypy]` 把 `backend/tests/integration` 整个 `exclude` 掉了** |
+> | `backend/tests/integration/test_mihomo_reconciliation_mysql.py` | `:127` 向 `reconcile_mihomo_job()` 第 3 个位置参数传 `cast(ControllerSecretResolver, …)` —— 那正是 ADR-038 §2.4 改名改型为 `resolvers` 的参数 | 同上 |
+>
+> **`test_db_adapters.py` 的两处没有任何 skip 守卫**，而 CI 的 `backend` job
+> 跑的是 `python -m pytest backend/tests`（整棵树）—— 所以它们**会真的执行**，
+> 在新签名下 `FakeControllerSecretResolver()` 没有 `.controller` / `.egress`，
+> 运行期即失败。
+>
+> > **这次要记住的教训**：`mypy` **不足以**为这个签名变更做闭包检查，
+> > 正因为它 `exclude` 了 integration 目录。**完整闭包必须同时做一次
+> > `grep` 调用点扫描。** 这与 `docs/85` §5.0 记的「只沿一条轴查出来的是
+> > 『这条轴上闭合』，不是『闭合』」是同一条。
+>
+> **两个文件都已在 master union 里**（挂在 B2-B4 名下），
+> **但都不在 B2-B2c 的 9 文件清单里**。**本次刻意不加** —— 是否把它们也
+> 划进 B2-B2c，属 User 的裁决（ADR-036 §2）。在裁定之前，PR #176 一旦跑到
+> 这两处就会再次停下并上报，**这是正确行为，不是失败**。
 
 > **`mihomo_generation.py` 仍不在 B2-B2c 范围内**（manifest 契约已在 B2-B2a
 > 落地，明文永不进 manifest，本 checkpoint 没有理由碰它）。
@@ -1855,6 +1920,7 @@ backend/tests/unit/test_mihomo_generation.py        # 新增
 backend/tests/unit/test_mihomo_materialization.py   # 新增
 backend/tests/guards/test_mihomo_reconciliation_safety.py
 backend/tests/guards/test_secret_leak.py
+backend/tests/guards/test_mihomo_safe_reload.py         # 仅 B2-B2c：ADR-038 finalize bundle 签名变更后的既有 safe-reload 测试调用点迁移
 backend/tests/integration/test_mihomo_reconciliation_mysql.py
 backend/tests/integration/test_db_adapters.py
 backend/tests/integration/test_models.py                # 2026-09-19 补入，依据见下
@@ -1877,6 +1943,13 @@ docs/83-project-continuity.md
 > 判断某个文件能不能改，要同时满足两条：**在总并集里** ✅ **且在当前 checkpoint
 > 自己的 exact list 里** ✅。
 >
+> **⚠️ 2026-09-22：这份总并集本次新增了一个文件。**
+> `backend/tests/guards/test_mihomo_safe_reload.py` 原先**既不在**总并集、
+> **也不在** B2-B2c 的清单里，是 `ADR-038` 签名变更暴露出的规格漏项。
+> 它在总并集里的授权范围是**「仅 B2-B2c」** —— **不授权给 B2-B2d /
+> B2-B3 / B2-B4**，用途逐条写在上面 B2-B2c 那一节。
+> **因此不能再说「总 scope 一个文件都没加」。**
+
 > **2026-09-20 第四次修订后尤其要注意**：`B2-B2` 已再切分为六个 checkpoint，
 > 其中 **`.2` / `.4` / `.5` 的 exact list 只有
 > `backend/tests/unit/test_mihomo_reconciliation.py` 一个文件**。
