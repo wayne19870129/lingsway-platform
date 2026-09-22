@@ -604,8 +604,11 @@ Claude 的产出形态是：ADR、`docs/81-reviews/REVIEW-*.md`、以及直接�
 > 唯一仍需你自己核对的是**未合并分支**：本节写的是 `main` 上的状态，
 > 刚推上去还没合并的东西看不到（见 §1）。
 >
-> 最后更新：2026-09-22（**`ADR-038` 落地：B2-B2c 的 resolver 契约唯一化，
-> 其 allowed files 由 4 个扩为 8 个，新增 3 条证明 production wiring 的测试；
+> 最后更新：2026-09-22（**`ADR-038` 落地（PR #175）：B2-B2c 的 resolver 契约
+> 唯一化，新增 3 条证明 production wiring 的测试；随后经 mypy 与全仓静态调用点
+> 扫描两轮闭包，其 allowed files 走完 **4 → 8 → 9 → 11**，当前为 **11 个**，
+> 而 master union 只新增 `test_mihomo_safe_reload.py` 一个文件；
+> B2-B2c 当前在途 PR #176 返工中；
 > `B2-B2.1`~`.6` 已全部合并，`.6` 为 PR #174**；
 > 2026-09-20：**B2-B2 触发返工熔断，已再切分为 `B2-B2.1` ~ `B2-B2.6`
 > 六个 checkpoint，队列 §5.1 已按新粒度重排；B2-B2a 已合并（#167）**；
@@ -632,7 +635,7 @@ Claude 的产出形态是：ADR、`docs/81-reviews/REVIEW-*.md`、以及直接�
 | **S04-B2-B2a** contract substrate | ✅ **已合并（PR #167）**，2026-09-20 —— DTO + manifest 键 + `MANIFEST_VERSION "1"→"2"` |
 | **S04-B2-B2** concrete DB desired loader + preparation transaction | ⚠️ **2026-09-20 触发返工熔断（§6.1 第一层），已再切分为 6 个 checkpoint `B2-B2.1` ~ `B2-B2.6`**。在途 PR #163 收敛为 **`B2-B2.1`**。逐个 checkpoint 的 allowed files / 测试见 TASK「**B2-B2 的再切分**」一节。**`.3` 含生产实现**（receipt-verified transport proxy 解析），其余中间 checkpoint 是 tests-only |
 | **S04-B2-B2** 的 `.1` ~ `.6` | ✅ **全部已合并**，`.6`（preparation + production wiring）为 PR #174 |
-| **S04-B2-B2c** render / finalization | **下一个** —— ⛔ 前置 **`ADR-038` 已合并**。2026-09-22 重做范围闭包，allowed files 由 4 个扩为 8 个，接口落点见 ADR-038 §2 |
+| **S04-B2-B2c** render / finalization | **在途：PR #176 返工中。** 前置**全部已解除**（含 `ADR-038` ✅ PR #175）。scope closure 历史 **4 → 8 → 9 → 11**，**当前 exact allowed files = 11 个**；接口落点见 ADR-038 §2，逐条清单与窄授权见 §5.1 第 8 行。**master union 只新增了 `backend/tests/guards/test_mihomo_safe_reload.py` 一个文件** —— 两个 integration 文件（`test_db_adapters.py`、`test_mihomo_reconciliation_mysql.py`）原本就在并集里，只是额外获得一项窄授权：做 ADR-038 bundle 签名迁移 |
 | **S04-B2-B2d / B2-B3 / B2-B4** | 按 §5.1 的完整顺序依次排（单向依赖，见 TASK） |
 
 > **当前唯一顺序（与 §5.1 一致，不要各写一套）：**
@@ -805,7 +808,7 @@ S07 一个任务里，「允许修改的文件」漏项**连续发生两次**：
 | 5 | ~~**S04-B2-B2.4** credential identity 与 precedence~~ | 同上 | ✅ **已合并（PR #172）**。tests-only，只动同一个测试文件（注意：上一行 `.3` 不是 tests-only）；关键断言之一是**全程不解密** |
 | 6 | ~~**S04-B2-B2.5** fingerprint 不变式~~ | 同上 | ✅ **已合并（PR #173）**。tests-only，只动同一个测试文件；依赖 .3/.4 建好的变体 |
 | 7 | ~~**S04-B2-B2.6** preparation 事务 + production wiring~~ | 同上 | ✅ **已合并（PR #174）**。**唯一能生产 generation 的 checkpoint**；交付物全部从 #163 迁出，原样带过来 |
-| 8 | **S04-B2-B2c** render / finalization | 同上 | **⬅ 当前在途：PR #176 返工中。** 前置**全部已解除**（B2-B2a ✅、`.1`~`.6` ✅、**`ADR-038` ✅ PR #175 已合并**）。**scope closure 经全仓调用点扫描由 8 → 9 → 11**：`ADR-038` §2.2/§2.4 改的是公共签名，该 checkpoint 必须同步**所有**现存静态调用点。第 9 个 = `backend/tests/guards/test_mihomo_safe_reload.py`（mypy 发现，`:107`/`:138`/`:139`）；第 10、11 个 = `backend/tests/integration/test_db_adapters.py`（`:706`/`:779`）与 `backend/tests/integration/test_mihomo_reconciliation_mysql.py`（`_run_worker()` `:127`）。**后两者仅授权做 ADR-038 bundle 签名迁移**，不得改 rollback/restore/unhealthy 断言、不得改并发语义与 apply-count、不得提前做 B2-B4 的新验收。**master union 只 +1**（第 9 个）——后两者早已在并集里，挂 B2-B4 名下，其完整 integration/concurrency 验收职责不变。|`dialer-proxy` 渲染 + 明文在 render 边界解析。**2026-09-22 重做了一次范围闭包**：原 4 文件清单**做不到** ADR-037 §6 的 revision identity（`SqlAlchemyCredentialResolver.resolve()` 不暴露 `Secret.revision`、`finalize()` 只收一个 controller resolver、`reconcile_mihomo_job()` 只构造 controller resolver）。**现为 8 个文件**，接口落点由 **ADR-038** 唯一裁定，并新增 3 条落在 `test_mihomo_reconciliation.py` 的测试证明 production wiring 不是 fake |
+| 8 | **S04-B2-B2c** render / finalization | 同上 | **⬅ 当前在途：PR #176 返工中。** 前置**全部已解除**（B2-B2a ✅、`.1`~`.6` ✅、**`ADR-038` ✅ PR #175 已合并**）。交付：`dialer-proxy` 渲染 + 明文在 render/finalization 边界解析，接口落点由 **ADR-038 §2** 唯一裁定，并有 3 条落在 `test_mihomo_reconciliation.py` 的测试证明 production wiring 不是 fake。**scope closure 历史：4 → 8 → 9 → 11，当前 exact allowed files = 11 个。**第 9 个由**全量 mypy** 发现（`backend/tests/guards/test_mihomo_safe_reload.py`，`:107`/`:138`/`:139`）；第 10、11 个由**全仓静态调用点扫描**发现（`backend/tests/integration/test_db_adapters.py` `:706`/`:779`，`backend/tests/integration/test_mihomo_reconciliation_mysql.py` 的 `_run_worker()` `:127`）—— mypy 看不见它们，因为 `pyproject.toml` 把 `backend/tests/integration` exclude 了。**两个 integration 文件只有窄授权**：仅做 ADR-038 bundle 签名迁移，不得改 rollback / restore / unhealthy 断言，不得改并发语义与 apply-count，不得提前做 B2-B4 的新验收；B2-B4 对它们的完整 integration / concurrency 验收职责不变。**master union 只 +1**（第 9 个）—— 两个 integration 文件早已在并集里。**`dialer-proxy` 在 pinned `metacubex/mihomo:v1.19.27` 上的 candidate validation 已在 #176 实施期间真实通过（exit code 0）。** |
 | 9 | **S04-B2-B2d** Xray → Mihomo 交接 | 同上 | ⛔ 前置：B2-B2c。Xray outbound 改指 `127.0.0.1:{mihomo_listen_port}`，该跳无凭据。**没有这一段链路 B 不可达** |
 | 10 | **S04-B2-B3** freshness 三点复核 / recovery / runtime exact readback | 同上 | 等 B2-B2d 合并 |
 | 11 | **S04-B2-B4** 完整 integration / guard / migration / concurrency 验收 | 同上 | 等 B2-B3 合并 |
