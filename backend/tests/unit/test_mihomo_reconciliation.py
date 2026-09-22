@@ -37,7 +37,10 @@ from backend.app.infra.mihomo_generation import (
     canonical_manifest,
     manifest_fingerprint,
 )
-from backend.app.infra.mihomo_projection_lock import SESSION_INFO_DURABLE_STATE_UNKNOWN_KEY
+from backend.app.infra.mihomo_projection_lock import (
+    SESSION_INFO_DURABLE_STATE_UNKNOWN_KEY,
+    session_holds_mihomo_projection_lock,
+)
 from backend.app.infra.mihomo_reconciliation import (
     MIHOMO_FINALIZATION_UNKNOWN,
     MIHOMO_ROLLBACK_UNKNOWN,
@@ -75,13 +78,23 @@ from backend.app.models import (
     TransportProviderKind,
     TransportProviderRecord,
 )
-from backend.app.providers.base import DesiredForwarderState
+from backend.app.providers.base import (
+    CredentialDTO,
+    DesiredForwarderState,
+    EgressCredentialResolver,
+    EgressCredentialSnapshot,
+    ForwarderEgressProxyDTO,
+    ForwarderListenerDTO,
+)
 from backend.app.providers.forwarder.mihomo import (
     ControllerSecretResolver,
+    ControllerSecretSnapshot,
+    MihomoFinalizationResolvers,
     MihomoForwarderProvider,
     MihomoRollbackUnknownError,
     MihomoRollbackVerifiedError,
     MihomoRuntime,
+    MihomoRuntimeError,
 )
 from backend.app.providers.forwarder.mihomo_projection import (
     TransportMaterialization,
@@ -103,6 +116,121 @@ def db() -> Generator[Session, None, None]:
     finally:
         session.close()
         engine.dispose()
+
+
+def test_finalization_fails_closed_on_egress_credential_revision_drift() -> None:
+    state = DesiredForwarderState(
+        listener_specs=(
+            ForwarderListenerDTO(
+                "listener-egress", "mixed", "127.0.0.1", 10001, "egress-a"
+            ),
+        ),
+        egress_proxies=(
+            ForwarderEgressProxyDTO(
+                "egress-a", "socks5", "192.0.2.10", 1080, "egress/ref", 1
+            ),
+        ),
+        rules=({"match": "MATCH", "target": "BLOCK"},),
+        deployment_constants={
+            "external-controller": "172.30.0.10:9090",
+            "api-secret-ref": "mihomo/api-secret",
+            "api-secret-revision": 1,
+        },
+    )
+    provider = MihomoForwarderProvider(cast(MihomoRuntime, object()))
+    template = provider.render(state)
+
+    class Controller:
+        def resolve(self, _ref: str) -> ControllerSecretSnapshot:
+            return ControllerSecretSnapshot("mihomo/api-secret", 1, "controller")
+
+    class Egress:
+        def resolve_egress_credential(self, _ref: str) -> EgressCredentialSnapshot:
+            return EgressCredentialSnapshot("egress/ref", 2, CredentialDTO("new", "secret"))
+
+    with pytest.raises(MihomoRuntimeError, match="MIHOMO_EGRESS_CREDENTIAL_REVISION_MISMATCH"):
+        provider.finalize(
+            template,
+            MihomoFinalizationResolvers(
+                cast(ControllerSecretResolver, Controller()),
+                cast(EgressCredentialResolver, Egress()),
+            ),
+        )
+
+
+def test_egress_plaintext_is_only_decrypted_inside_the_projection_lock(
+    db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cast(Table, Secret.__table__).create(bind=db.get_bind())
+    db.add(
+        Secret(
+            secret_ref="egress/ref",
+            ciphertext="ciphertext",
+            purpose="EGRESS_CREDENTIAL",
+            revision=3,
+        )
+    )
+    db.commit()
+    db.info["mihomo_projection_lock_held"] = True
+    seen: list[bool] = []
+
+    def decrypt(_ciphertext: str) -> str:
+        seen.append(session_holds_mihomo_projection_lock(db))
+        return json.dumps({"username": "user", "password": "pass"})
+
+    monkeypatch.setattr(credential_resolver, "decrypt_secret", decrypt)
+    snapshot = credential_resolver.SqlAlchemyCredentialResolver(db).resolve_egress_credential(
+        "egress/ref"
+    )
+    assert snapshot.revision == 3
+    assert snapshot.credential == CredentialDTO("user", "pass")
+    assert seen == [True]
+
+
+def test_reconcile_resolves_egress_plaintext_with_no_injected_resolver(
+    db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    enqueue_mihomo_reconciliation(
+        db, operation_id="default-resolvers", operation_kind="RECONCILE", snapshot_revision=1
+    )
+    db.commit()
+    monkeypatch.setattr(reconciliation, "mihomo_projection_write", nullcontext)
+    monkeypatch.setattr(
+        reconciliation,
+        "get_settings",
+        lambda: SimpleNamespace(
+            transport_cache_root="data", mihomo_external_controller="172.30.0.10:9090"
+        ),
+    )
+
+    class Loader:
+        def __init__(self, *_args: object) -> None:
+            pass
+
+        def load(self, _db: Session, _job: Job) -> DesiredForwarderState:
+            return DesiredForwarderState(snapshot_revision=1, snapshot_identity="db-v1")
+
+    class Provider(_Provider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.received: object | None = None
+
+        def finalize(self, template: object, resolver: object) -> ProjectionCandidate:
+            self.received = resolver
+            return _Candidate()
+
+    monkeypatch.setattr(reconciliation, "SqlMihomoDesiredSnapshotLoader", Loader)
+    provider = Provider()
+    db.info["mihomo_projection_lock_held"] = True
+    result = reconcile_mihomo_job(
+        cast(reconciliation.MihomoProjectionProvider, provider),
+        None,
+        None,
+        cast(ProjectionVerifier, _Verifier(ProjectionVerification(True, "v1"))),
+        db_factory=lambda: db,
+    )
+    assert result is not None
+    assert isinstance(provider.received, MihomoFinalizationResolvers)
 
 
 def test_prepare_generation_and_intent_commit_together(

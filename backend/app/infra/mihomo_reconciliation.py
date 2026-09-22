@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 
 from sqlalchemy import or_, select
 from sqlalchemy.engine import Connection, Engine
@@ -19,6 +19,7 @@ from backend.app.core.database import SessionLocal
 from backend.app.infra.credential_resolver import (
     MIHOMO_CONTROLLER_SECRET_PURPOSE,
     MIHOMO_CONTROLLER_SECRET_REF,
+    SqlAlchemyCredentialResolver,
     SqlMihomoControllerSecretResolver,
 )
 from backend.app.infra.mihomo_blocker import (
@@ -65,12 +66,14 @@ from backend.app.models import (
 )
 from backend.app.providers.base import (
     DesiredForwarderState,
+    EgressCredentialResolver,
     ForwarderEgressProxyDTO,
     ForwarderListenerDTO,
 )
 from backend.app.providers.forwarder.mihomo import (
     ControllerSecretResolver,
     MihomoApplyError,
+    MihomoFinalizationResolvers,
     MihomoRollbackUnknownError,
     MihomoRollbackVerifiedError,
 )
@@ -510,7 +513,7 @@ class MihomoProjectionProvider(Protocol):
     def render(self, desired: DesiredForwarderState) -> object: ...
 
     def finalize(
-        self, template: object, resolver: ControllerSecretResolver
+        self, template: object, resolvers: MihomoFinalizationResolvers
     ) -> ProjectionCandidate: ...
 
     def apply(self, candidate: ProjectionCandidate) -> object: ...
@@ -990,7 +993,7 @@ def _reset_blocked_claim(db: Session, job: Job) -> None:
 def reconcile_mihomo_job(
     provider: MihomoProjectionProvider,
     loader: MihomoDesiredSnapshotLoader | None,
-    resolver: ControllerSecretResolver | None,
+    resolvers: MihomoFinalizationResolvers | ControllerSecretResolver | None,
     verifier: ProjectionVerifier | None,
     *,
     db_factory: Callable[[], Session] = SessionLocal,
@@ -1001,8 +1004,15 @@ def reconcile_mihomo_job(
             loader = SqlMihomoDesiredSnapshotLoader(
                 Path(settings.transport_cache_root), settings.mihomo_external_controller
             )
-        if resolver is None:
-            resolver = SqlMihomoControllerSecretResolver(db)
+        if resolvers is None:
+            resolvers = MihomoFinalizationResolvers(
+                controller=SqlMihomoControllerSecretResolver(db),
+                egress=SqlAlchemyCredentialResolver(db),
+            )
+        elif not isinstance(resolvers, MihomoFinalizationResolvers):
+            resolvers = MihomoFinalizationResolvers(
+                controller=resolvers, egress=cast(EgressCredentialResolver, resolvers)
+            )
         if verifier is None:
             raise MihomoReconciliationError("MIHOMO_VERIFIER_NOT_CONFIGURED")
         job = _claim(db, datetime.now(UTC))
@@ -1038,7 +1048,7 @@ def reconcile_mihomo_job(
             if desired.snapshot_revision != expected:
                 raise MihomoReconciliationError("MIHOMO_STALE_DESIRED_SNAPSHOT")
             template = provider.render(desired)
-            candidate = provider.finalize(template, resolver)
+            candidate = provider.finalize(template, resolvers)
             fingerprint = candidate.version
             try:
                 apply_result = provider.apply(candidate)

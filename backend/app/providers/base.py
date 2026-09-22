@@ -245,6 +245,28 @@ class ForwarderEgressProxyDTO:
 
 
 @dataclass(frozen=True, slots=True)
+class EgressCredentialRequirement:
+    """Render-stage opaque credential requirement."""
+
+    proxy_name: str
+    secret_ref: str = field(repr=False)
+    revision: int
+
+
+@dataclass(frozen=True, slots=True)
+class EgressCredentialSnapshot:
+    """Finalization-stage plaintext credential and fresh revision."""
+
+    secret_ref: str = field(repr=False)
+    revision: int
+    credential: CredentialDTO = field(repr=False)
+
+
+class EgressCredentialResolver(Protocol):
+    def resolve_egress_credential(self, secret_ref: str) -> EgressCredentialSnapshot: ...
+
+
+@dataclass(frozen=True, slots=True)
 class DesiredForwarderState:
     listeners: Mapping[str, str] = field(default_factory=dict)
     listener_specs: tuple[ForwarderListenerDTO, ...] = ()
@@ -337,9 +359,14 @@ class CandidateConfig:
 class ProjectionTemplate(CandidateConfig):
     """Secret-free, non-installable projection awaiting operation finalization."""
 
-    __slots__ = ("_controller_secret_ref", "_controller_secret_revision")
+    __slots__ = (
+        "_controller_secret_ref",
+        "_controller_secret_revision",
+        "_egress_credentials",
+    )
     _controller_secret_ref: str
     _controller_secret_revision: int
+    _egress_credentials: tuple[EgressCredentialRequirement, ...]
 
     def __init__(
         self,
@@ -347,10 +374,12 @@ class ProjectionTemplate(CandidateConfig):
         version: str,
         controller_secret_ref: str,
         controller_secret_revision: int,
+        egress_credentials: tuple[EgressCredentialRequirement, ...] = (),
     ) -> None:
         super().__init__(cast(Mapping[str, object], _freeze_content(content)), version)
         object.__setattr__(self, "_controller_secret_ref", controller_secret_ref)
         object.__setattr__(self, "_controller_secret_revision", controller_secret_revision)
+        object.__setattr__(self, "_egress_credentials", tuple(egress_credentials))
 
     @property
     def controller_secret_ref(self) -> str:
@@ -359,6 +388,10 @@ class ProjectionTemplate(CandidateConfig):
     @property
     def controller_secret_revision(self) -> int:
         return self._controller_secret_revision
+
+    @property
+    def egress_credentials(self) -> tuple[EgressCredentialRequirement, ...]:
+        return self._egress_credentials
 
     def __repr__(self) -> str:
         return (

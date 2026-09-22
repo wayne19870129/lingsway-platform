@@ -375,6 +375,27 @@ def _controller_identity(desired: DesiredForwarderState) -> tuple[str, int]:
     return ref, revision
 
 
+def _egress_proxy_mappings(desired: DesiredForwarderState) -> tuple[Mapping[str, object], ...]:
+    result: list[Mapping[str, object]] = []
+    for proxy in desired.egress_proxies:
+        if proxy.protocol not in {"socks", "socks5"}:
+            raise MihomoProjectionError("MIHOMO_EGRESS_PROTOCOL_UNSUPPORTED")
+        if not proxy.name or proxy.name != proxy.name.strip():
+            raise MihomoProjectionError("MIHOMO_PROXY_INVALID")
+        if proxy.port < 1 or proxy.port > 65535:
+            raise MihomoProjectionError("MIHOMO_PROXY_INVALID")
+        item: dict[str, object] = {
+            "name": proxy.name,
+            "type": "socks5",
+            "server": proxy.host,
+            "port": proxy.port,
+        }
+        if proxy.transport_proxy_name is not None:
+            item["dialer-proxy"] = proxy.transport_proxy_name
+        result.append(item)
+    return tuple(result)
+
+
 def compose_mihomo_document(desired: DesiredForwarderState) -> tuple[dict[str, object], str]:
     """Compose the complete repo-owned document from the supplied snapshot only."""
     if not isinstance(desired, DesiredForwarderState):
@@ -418,7 +439,8 @@ def compose_mihomo_document(desired: DesiredForwarderState) -> tuple[dict[str, o
         materialized_proxies.extend(
             _mapping(proxy, "MIHOMO_TRANSPORT_CONTENT_INVALID") for proxy in candidate
         )
-    effective_proxies = tuple(desired.proxies) + tuple(materialized_proxies)
+    egress_proxies = _egress_proxy_mappings(desired)
+    effective_proxies = tuple(desired.proxies) + tuple(materialized_proxies) + egress_proxies
     effective_desired = DesiredForwarderState(
         listeners=desired.listeners,
         listener_specs=desired.listener_specs,

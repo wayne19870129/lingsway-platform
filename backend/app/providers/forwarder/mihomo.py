@@ -21,6 +21,8 @@ from backend.app.providers.base import (
     ApplyResult,
     CandidateConfig,
     DesiredForwarderState,
+    EgressCredentialRequirement,
+    EgressCredentialResolver,
     ForwarderProvider,
     HealthReport,
     ProjectionTemplate,
@@ -66,6 +68,12 @@ class ControllerSecretSnapshot:
 
 class ControllerSecretResolver(Protocol):
     def resolve(self, secret_ref: str) -> ControllerSecretSnapshot: ...
+
+
+@dataclass(frozen=True, slots=True)
+class MihomoFinalizationResolvers:
+    controller: ControllerSecretResolver
+    egress: EgressCredentialResolver
 
 
 _FINALIZATION_PROOF = object()
@@ -212,26 +220,63 @@ class MihomoForwarderProvider(ForwarderProvider):
             raise MihomoRuntimeError("Mihomo controller secret reference is missing")
         if isinstance(revision, bool) or not isinstance(revision, int) or revision <= 0:
             raise MihomoRuntimeError("Mihomo controller secret revision is invalid")
-        return ProjectionTemplate(dict(parsed), version, secret_ref, revision)
+        requirements = tuple(
+            EgressCredentialRequirement(
+                proxy_name=proxy.name,
+                secret_ref=proxy.credential_secret_ref,
+                revision=proxy.credential_revision,
+            )
+            for proxy in desired.egress_proxies
+        )
+        return ProjectionTemplate(dict(parsed), version, secret_ref, revision, requirements)
 
     def finalize(
-        self, template: ProjectionTemplate, resolver: ControllerSecretResolver
+        self,
+        template: ProjectionTemplate,
+        resolvers: MihomoFinalizationResolvers | ControllerSecretResolver,
     ) -> MihomoCandidateConfig:
         if not isinstance(template, ProjectionTemplate):
             raise MihomoRuntimeError("invalid Mihomo projection template")
+        if not isinstance(resolvers, MihomoFinalizationResolvers):
+            resolvers = MihomoFinalizationResolvers(controller=resolvers, egress=resolvers)  # type: ignore[arg-type]
         try:
-            snapshot = resolver.resolve(template.controller_secret_ref)
+            controller = resolvers.controller.resolve(template.controller_secret_ref)
         except Exception as exc:
             raise MihomoRuntimeError("Mihomo controller secret resolution failed") from exc
         if (
-            snapshot.ref != template.controller_secret_ref
-            or snapshot.revision != template.controller_secret_revision
+            controller.ref != template.controller_secret_ref
+            or controller.revision != template.controller_secret_revision
         ):
             raise MihomoRuntimeError("Mihomo controller secret identity mismatch")
-        if not snapshot.value.strip():
+        if not controller.value.strip():
             raise MihomoRuntimeError("Mihomo controller secret resolution failed")
         content = dict(template.content)
-        content["secret"] = snapshot.value
+        content["secret"] = controller.value
+        raw_proxies = content.get("proxies")
+        if not isinstance(raw_proxies, (list, tuple)):
+            raise MihomoRuntimeError("MIHOMO_EGRESS_CREDENTIAL_UNRESOLVED")
+        proxies = [dict(item) for item in raw_proxies if isinstance(item, Mapping)]
+        if len(proxies) != len(raw_proxies):
+            raise MihomoRuntimeError("MIHOMO_EGRESS_CREDENTIAL_UNRESOLVED")
+        content["proxies"] = proxies
+        for requirement in template.egress_credentials:
+            try:
+                snapshot = resolvers.egress.resolve_egress_credential(requirement.secret_ref)
+            except Exception as exc:
+                raise MihomoRuntimeError("MIHOMO_EGRESS_CREDENTIAL_UNRESOLVED") from exc
+            if snapshot.secret_ref != requirement.secret_ref:
+                raise MihomoRuntimeError("MIHOMO_EGRESS_CREDENTIAL_UNRESOLVED")
+            if snapshot.revision != requirement.revision:
+                raise MihomoRuntimeError("MIHOMO_EGRESS_CREDENTIAL_REVISION_MISMATCH")
+            matches = [
+                item
+                for item in proxies
+                if isinstance(item, dict) and item.get("name") == requirement.proxy_name
+            ]
+            if len(matches) != 1:
+                raise MihomoRuntimeError("MIHOMO_EGRESS_CREDENTIAL_UNRESOLVED")
+            matches[0]["username"] = snapshot.credential.username
+            matches[0]["password"] = snapshot.credential.password
         return MihomoCandidateConfig(
             content,
             template.version,
