@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Protocol
 
 from sqlalchemy import or_, select
 from sqlalchemy.engine import Connection, Engine
@@ -66,12 +66,10 @@ from backend.app.models import (
 )
 from backend.app.providers.base import (
     DesiredForwarderState,
-    EgressCredentialResolver,
     ForwarderEgressProxyDTO,
     ForwarderListenerDTO,
 )
 from backend.app.providers.forwarder.mihomo import (
-    ControllerSecretResolver,
     MihomoApplyError,
     MihomoFinalizationResolvers,
     MihomoRollbackUnknownError,
@@ -993,7 +991,7 @@ def _reset_blocked_claim(db: Session, job: Job) -> None:
 def reconcile_mihomo_job(
     provider: MihomoProjectionProvider,
     loader: MihomoDesiredSnapshotLoader | None,
-    resolvers: MihomoFinalizationResolvers | ControllerSecretResolver | None,
+    resolvers: MihomoFinalizationResolvers | None,
     verifier: ProjectionVerifier | None,
     *,
     db_factory: Callable[[], Session] = SessionLocal,
@@ -1008,10 +1006,6 @@ def reconcile_mihomo_job(
             resolvers = MihomoFinalizationResolvers(
                 controller=SqlMihomoControllerSecretResolver(db),
                 egress=SqlAlchemyCredentialResolver(db),
-            )
-        elif not isinstance(resolvers, MihomoFinalizationResolvers):
-            resolvers = MihomoFinalizationResolvers(
-                controller=resolvers, egress=cast(EgressCredentialResolver, resolvers)
             )
         if verifier is None:
             raise MihomoReconciliationError("MIHOMO_VERIFIER_NOT_CONFIGURED")

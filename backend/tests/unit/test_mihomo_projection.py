@@ -3,10 +3,13 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import cast
 
 import pytest
 
+from backend.app.infra import credential_resolver
+from backend.app.models import EgressEndpoint
 from backend.app.providers.base import (
     CandidateConfig,
     CredentialDTO,
@@ -30,6 +33,7 @@ from backend.app.providers.forwarder.mihomo_projection import (
     TransportMaterializationReference,
     compose_mihomo_document,
 )
+from backend.tests.unit.test_mihomo_reconciliation import seed_mihomo_loader_graph
 
 
 def materialization(owner: int, code: str, content: dict[str, object]) -> TransportMaterialization:
@@ -748,21 +752,36 @@ def test_unsupported_egress_protocol_fails_closed() -> None:
         )
 
 
-def test_finalization_resolves_egress_credential_at_provider_boundary() -> None:
+def test_finalization_resolves_egress_credential_at_provider_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     provider = MihomoForwarderProvider(runtime=cast(MihomoRuntime, object()))
-    state = egress_snapshot()
+    engine, session, loader = seed_mihomo_loader_graph(tmp_path)
+
+    def fail_plaintext(*_args: object, **_kwargs: object) -> str:
+        pytest.fail("egress plaintext must not be resolved during loading")
+
+    monkeypatch.setattr(credential_resolver, "decrypt_secret", fail_plaintext)
+    endpoint = session.get(EgressEndpoint, 1)
+    assert endpoint is not None
+    endpoint.protocol = "socks5"
+    session.commit()
+    state = loader.load_current(session)
+    state = replace(state, transport_materializations=(), transport_references=())
+    session.close()
+    engine.dispose()
     template = provider.render(state)
     assert template.egress_credentials[0].proxy_name == "egress-a"
-    assert template.egress_credentials[0].secret_ref == "egress/ref"
+    assert template.egress_credentials[0].secret_ref == "egress/a"
     assert template.egress_credentials[0].revision == 3
     assert "username" not in repr(template.content)
     assert "password" not in repr(template.content)
     candidate = provider.finalize(
         template,
         MihomoFinalizationResolvers(
-            controller=Resolver(ControllerSecretSnapshot("mihomo/api-secret", 1, "controller")),
+                controller=Resolver(ControllerSecretSnapshot("mihomo/api-secret", 7, "controller")),
             egress=EgressResolver(
-                EgressCredentialSnapshot("egress/ref", 3, CredentialDTO("user", "pass"))
+                EgressCredentialSnapshot("egress/a", 3, CredentialDTO("user", "pass"))
             ),
         ),
     )

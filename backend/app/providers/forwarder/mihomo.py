@@ -233,12 +233,10 @@ class MihomoForwarderProvider(ForwarderProvider):
     def finalize(
         self,
         template: ProjectionTemplate,
-        resolvers: MihomoFinalizationResolvers | ControllerSecretResolver,
+        resolvers: MihomoFinalizationResolvers,
     ) -> MihomoCandidateConfig:
         if not isinstance(template, ProjectionTemplate):
             raise MihomoRuntimeError("invalid Mihomo projection template")
-        if not isinstance(resolvers, MihomoFinalizationResolvers):
-            resolvers = MihomoFinalizationResolvers(controller=resolvers, egress=resolvers)  # type: ignore[arg-type]
         try:
             controller = resolvers.controller.resolve(template.controller_secret_ref)
         except Exception as exc:

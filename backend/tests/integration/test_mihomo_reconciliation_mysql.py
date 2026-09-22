@@ -31,7 +31,7 @@ from backend.app.infra.mihomo_reconciliation import (
 )
 from backend.app.models import Job, JobStatus
 from backend.app.providers.base import DesiredForwarderState
-from backend.app.providers.forwarder.mihomo import ControllerSecretResolver
+from backend.app.providers.forwarder.mihomo import MihomoFinalizationResolvers
 
 
 @pytest.fixture
@@ -121,10 +121,14 @@ class _Verifier:
 
 
 def _run_worker(engine: Engine, provider: _Provider) -> MihomoReconciliationResult | None:
+    resolvers = MihomoFinalizationResolvers(
+        controller=cast(object, SimpleNamespace(resolve=lambda ref: None)),
+        egress=cast(object, SimpleNamespace(resolve_egress_credential=lambda ref: None)),
+    )
     return reconcile_mihomo_job(
         cast(object, provider),
         _Loader(),
-        cast(ControllerSecretResolver, SimpleNamespace(resolve=lambda ref: None)),
+        resolvers,
         _Verifier(),
         db_factory=lambda: Session(engine, expire_on_commit=False),
     )

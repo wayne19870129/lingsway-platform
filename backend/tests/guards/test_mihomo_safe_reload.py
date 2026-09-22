@@ -13,10 +13,17 @@ from pathlib import Path
 
 import pytest
 
-from backend.app.providers.base import DesiredForwarderState, ForwarderListenerDTO, HealthReport
+from backend.app.providers.base import (
+    CredentialDTO,
+    DesiredForwarderState,
+    EgressCredentialSnapshot,
+    ForwarderListenerDTO,
+    HealthReport,
+)
 from backend.app.providers.forwarder.mihomo import (
     ControllerSecretSnapshot,
     MihomoCandidateConfig,
+    MihomoFinalizationResolvers,
     MihomoForwarderProvider,
     MihomoRollbackUnknownError,
     MihomoRollbackVerifiedError,
@@ -91,6 +98,9 @@ class Resolver:
     def resolve(self, secret_ref: str) -> ControllerSecretSnapshot:
         return ControllerSecretSnapshot(secret_ref, 1, self.value)
 
+    def resolve_egress_credential(self, secret_ref: str) -> EgressCredentialSnapshot:
+        return EgressCredentialSnapshot(secret_ref, 1, CredentialDTO("unused", "unused"))
+
 
 def candidate(provider: MihomoForwarderProvider) -> MihomoCandidateConfig:
     template = provider.render(
@@ -104,7 +114,10 @@ def candidate(provider: MihomoForwarderProvider) -> MihomoCandidateConfig:
             },
         )
     )
-    return provider.finalize(template, Resolver())
+    resolver = Resolver()
+    return provider.finalize(
+        template, MihomoFinalizationResolvers(controller=resolver, egress=resolver)
+    )
 
 
 def test_successful_apply_verifies_health_after_reload() -> None:
@@ -135,8 +148,16 @@ def test_candidate_fingerprint_is_secret_neutral() -> None:
         )
     )
 
-    first = provider.finalize(template, Resolver("secret-a"))
-    second = provider.finalize(template, Resolver("secret-b"))
+    first_resolver = Resolver("secret-a")
+    second_resolver = Resolver("secret-b")
+    first = provider.finalize(
+        template,
+        MihomoFinalizationResolvers(controller=first_resolver, egress=first_resolver),
+    )
+    second = provider.finalize(
+        template,
+        MihomoFinalizationResolvers(controller=second_resolver, egress=second_resolver),
+    )
 
     assert first.version == second.version
     assert first.content["secret"] != second.content["secret"]
