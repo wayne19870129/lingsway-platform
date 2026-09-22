@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -329,6 +329,7 @@ class SqlMihomoDesiredSnapshotLoader:
                 )
         finally:
             resolver.close()
+        materials_by_owner = {material.owner_record_id: material for material in materials}
         egress_proxies: list[ForwarderEgressProxyDTO] = []
         for endpoint in endpoints:
             binding = next(
@@ -357,6 +358,26 @@ class SqlMihomoDesiredSnapshotLoader:
                 if selected_assignment
                 else None
             )
+            transport_proxy_name: str | None = None
+            if selected_assignment is not None and node is not None:
+                selected_material = materials_by_owner.get(
+                    selected_assignment.transport_provider_id
+                )
+                candidates = []
+                if selected_material is not None:
+                    raw_proxies = selected_material.content.get("proxies")
+                    if isinstance(raw_proxies, (list, tuple)):
+                        candidates = [
+                            proxy
+                            for proxy in raw_proxies
+                            if isinstance(proxy, Mapping)
+                            and proxy.get("name") == node.name
+                            and proxy.get("server") == node.host
+                            and proxy.get("port") == node.port
+                        ]
+                if len(candidates) != 1:
+                    raise MihomoReconciliationError("MIHOMO_TRANSPORT_PROXY_UNRESOLVED")
+                transport_proxy_name = str(candidates[0]["name"])
             egress_proxies.append(
                 ForwarderEgressProxyDTO(
                     name=endpoint.code,
@@ -365,7 +386,7 @@ class SqlMihomoDesiredSnapshotLoader:
                     port=endpoint.port,
                     credential_secret_ref=credential_ref,
                     credential_revision=secret.revision,
-                    transport_proxy_name=node.name if node else None,
+                    transport_proxy_name=transport_proxy_name,
                     transport_node_identity=(node.name, node.host, node.port) if node else None,
                 )
             )
