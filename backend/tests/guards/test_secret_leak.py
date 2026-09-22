@@ -9,7 +9,12 @@ from backend.app.infra import credential_resolver
 from backend.app.infra.mihomo_generation import build_projection_source_manifest
 from backend.app.infra.mihomo_materialization import VerifiedMaterialization
 from backend.app.models import MihomoProjectionGeneration, MihomoTransportMaterialization
-from backend.app.providers.base import DesiredForwarderState, ForwarderEgressProxyDTO
+from backend.app.providers.base import (
+    DesiredForwarderState,
+    EgressCredentialRequirement,
+    ForwarderEgressProxyDTO,
+    ProjectionTemplate,
+)
 from backend.app.providers.forwarder.mihomo import ControllerSecretSnapshot
 from backend.app.providers.forwarder.mihomo_projection import TransportMaterialization
 
@@ -89,6 +94,38 @@ def test_egress_proxy_repr_redacts_credential_ref() -> None:
         credential_secret_ref="OPAQUE_REF_SENTINEL",
     )
     assert "OPAQUE_REF_SENTINEL" not in repr(value)
+
+
+def test_manifest_excludes_egress_plaintext_credentials() -> None:
+    secret_ref = "OPAQUE_EGRESS_REF_SENTINEL"
+    username = "USERNAME_PLAINTEXT_SENTINEL"
+    password = "PASSWORD_PLAINTEXT_SENTINEL"
+    proxy = ForwarderEgressProxyDTO(
+        name="egress-a",
+        protocol="socks5",
+        host="192.0.2.10",
+        port=1080,
+        credential_secret_ref=secret_ref,
+        credential_revision=3,
+    )
+    desired = DesiredForwarderState(egress_proxies=(proxy,))
+    manifest = build_projection_source_manifest(desired)
+    generation = MihomoProjectionGeneration(
+        revision=1,
+        manifest_version="2",
+        desired_fingerprint="a" * 64,
+    )
+    rendered = " ".join((repr(manifest), repr(desired), repr(proxy), repr(generation)))
+    for sentinel in (secret_ref, username, password):
+        if sentinel == secret_ref:
+            assert sentinel in repr(manifest)
+            assert sentinel not in " ".join((repr(desired), repr(proxy), repr(generation)))
+        else:
+            assert sentinel not in rendered
+    requirement = EgressCredentialRequirement("egress-a", secret_ref, 3)
+    template = ProjectionTemplate({}, "v1", "controller/ref", 1, (requirement,))
+    assert secret_ref not in repr(requirement)
+    assert secret_ref not in repr(template)
 
 
 def test_mihomo_controller_resolver_failure_is_secret_safe(

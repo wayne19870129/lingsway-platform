@@ -54,6 +54,7 @@ from backend.app.providers.base import (
 )
 from backend.app.providers.forwarder.mihomo import (
     ControllerSecretSnapshot,
+    MihomoFinalizationResolvers,
     MihomoForwarderProvider,
     MihomoRollbackVerifiedError,
     MihomoRuntimeError,
@@ -65,6 +66,9 @@ from backend.app.schemas.public import OrderCreate
 class FakeControllerSecretResolver:
     def resolve(self, secret_ref: str) -> ControllerSecretSnapshot:
         return ControllerSecretSnapshot(secret_ref, 1, "test-api-secret")
+
+    def resolve_egress_credential(self, secret_ref: str) -> object:
+        pytest.fail(f"unexpected egress credential resolution: {secret_ref}")
 
 
 @pytest.fixture
@@ -703,7 +707,10 @@ def test_mihomo_render_failure_restores_exact_pre_operation_state(
         )
     )
 
-    candidate = provider.finalize(template, FakeControllerSecretResolver())
+    resolver = FakeControllerSecretResolver()
+    candidate = provider.finalize(
+        template, MihomoFinalizationResolvers(controller=resolver, egress=resolver)
+    )
     with pytest.raises(MihomoRuntimeError):
         provider.apply(candidate)
 
@@ -776,7 +783,10 @@ def test_mihomo_unhealthy_post_reload_restores_exact_pre_operation_state(
         )
     )
 
-    candidate = provider.finalize(template, FakeControllerSecretResolver())
+    resolver = FakeControllerSecretResolver()
+    candidate = provider.finalize(
+        template, MihomoFinalizationResolvers(controller=resolver, egress=resolver)
+    )
     with pytest.raises(MihomoRollbackVerifiedError, match="MIHOMO_ROLLBACK_VERIFIED"):
         provider.apply(candidate)
 

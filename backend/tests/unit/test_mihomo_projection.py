@@ -1,19 +1,28 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import cast
 
 import pytest
 
+from backend.app.infra import credential_resolver
+from backend.app.models import EgressEndpoint
 from backend.app.providers.base import (
     CandidateConfig,
+    CredentialDTO,
     DesiredForwarderState,
+    EgressCredentialSnapshot,
+    ForwarderEgressProxyDTO,
     ForwarderListenerDTO,
     ProjectionTemplate,
 )
 from backend.app.providers.forwarder.mihomo import (
     ControllerSecretSnapshot,
     MihomoCandidateConfig,
+    MihomoFinalizationResolvers,
     MihomoForwarderProvider,
     MihomoRuntime,
     MihomoRuntimeError,
@@ -24,6 +33,7 @@ from backend.app.providers.forwarder.mihomo_projection import (
     TransportMaterializationReference,
     compose_mihomo_document,
 )
+from backend.tests.unit.test_mihomo_reconciliation import seed_mihomo_loader_graph
 
 
 def materialization(owner: int, code: str, content: dict[str, object]) -> TransportMaterialization:
@@ -48,9 +58,22 @@ class Resolver:
     def __init__(self, snapshot: ControllerSecretSnapshot) -> None:
         self.snapshot = snapshot
         self.refs: list[str] = []
+        self.controller = self
+        self.egress = self
 
     def resolve(self, secret_ref: str) -> ControllerSecretSnapshot:
         self.refs.append(secret_ref)
+        return self.snapshot
+
+    def resolve_egress_credential(self, secret_ref: str) -> EgressCredentialSnapshot:
+        raise AssertionError(f"unexpected egress credential resolution: {secret_ref}")
+
+
+class EgressResolver:
+    def __init__(self, snapshot: EgressCredentialSnapshot) -> None:
+        self.snapshot = snapshot
+
+    def resolve_egress_credential(self, _secret_ref: str) -> EgressCredentialSnapshot:
         return self.snapshot
 
 
@@ -85,6 +108,24 @@ def mihomo_constants(**overrides: object) -> dict[str, object]:
         "api-secret-revision": 1,
         **overrides,
     }
+
+
+def egress_snapshot() -> DesiredForwarderState:
+    return replace(
+        snapshot(),
+        egress_proxies=(
+            ForwarderEgressProxyDTO(
+                name="egress-a",
+                protocol="socks5",
+                host="192.0.2.10",
+                port=1080,
+                credential_secret_ref="egress/ref",
+                credential_revision=3,
+                transport_proxy_name="materialized-a",
+                transport_node_identity=("materialized-a", "192.0.2.20", 443),
+            ),
+        ),
+    )
 
 
 def test_same_snapshot_is_deterministic_and_secret_neutral() -> None:
@@ -657,6 +698,101 @@ def test_transport_materialization_fail_closed(mutator: object, expected: str) -
         compose_mihomo_document(mutator(snapshot()))  # type: ignore[operator]
 
 
+def test_mihomo_document_contains_egress_transport_binding() -> None:
+    state = replace(
+        egress_snapshot(),
+        listener_specs=(
+            ForwarderListenerDTO("listener-a", "socks", "127.0.0.1", 10001, "egress-a"),
+        ),
+    )
+    document, _ = compose_mihomo_document(state)
+    proxies = cast(list[dict[str, object]], document["proxies"])
+    egress = next(proxy for proxy in proxies if proxy["name"] == "egress-a")
+    assert egress["dialer-proxy"] == "materialized-a"
+    listeners = cast(list[dict[str, object]], document["listeners"])
+    assert listeners[0]["proxy"] == "egress-a"
+
+    without_assignment = replace(
+        egress_snapshot(),
+        egress_proxies=(
+            replace(
+                egress_snapshot().egress_proxies[0],
+                transport_proxy_name=None,
+                transport_node_identity=None,
+            ),
+        ),
+    )
+    document_without, _ = compose_mihomo_document(without_assignment)
+    egress_without = next(
+        proxy for proxy in cast(list[dict[str, object]], document_without["proxies"])
+        if proxy["name"] == "egress-a"
+    )
+    assert "dialer-proxy" not in egress_without
+
+
+def test_egress_proxy_name_collision_fails_closed() -> None:
+    with pytest.raises(MihomoProjectionError, match="MIHOMO_DUPLICATE_PROXY_IDENTITY"):
+        compose_mihomo_document(
+            replace(
+                egress_snapshot(),
+                egress_proxies=(
+                    replace(egress_snapshot().egress_proxies[0], name="materialized-a"),
+                ),
+            )
+        )
+
+
+def test_unsupported_egress_protocol_fails_closed() -> None:
+    with pytest.raises(MihomoProjectionError, match="MIHOMO_EGRESS_PROTOCOL_UNSUPPORTED"):
+        compose_mihomo_document(
+            replace(
+                egress_snapshot(),
+                egress_proxies=(replace(egress_snapshot().egress_proxies[0], protocol="http"),),
+            )
+        )
+
+
+def test_finalization_resolves_egress_credential_at_provider_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = MihomoForwarderProvider(runtime=cast(MihomoRuntime, object()))
+    engine, session, loader = seed_mihomo_loader_graph(tmp_path)
+
+    def fail_plaintext(*_args: object, **_kwargs: object) -> str:
+        pytest.fail("egress plaintext must not be resolved during loading")
+
+    monkeypatch.setattr(credential_resolver, "decrypt_secret", fail_plaintext)
+    endpoint = session.get(EgressEndpoint, 1)
+    assert endpoint is not None
+    endpoint.protocol = "socks5"
+    session.commit()
+    state = loader.load_current(session)
+    state = replace(state, transport_materializations=(), transport_references=())
+    session.close()
+    engine.dispose()
+    template = provider.render(state)
+    assert template.egress_credentials[0].proxy_name == "egress-a"
+    assert template.egress_credentials[0].secret_ref == "egress/a"
+    assert template.egress_credentials[0].revision == 3
+    assert "username" not in repr(template.content)
+    assert "password" not in repr(template.content)
+    candidate = provider.finalize(
+        template,
+        MihomoFinalizationResolvers(
+                controller=Resolver(ControllerSecretSnapshot("mihomo/api-secret", 7, "controller")),
+            egress=EgressResolver(
+                EgressCredentialSnapshot("egress/a", 3, CredentialDTO("user", "pass"))
+            ),
+        ),
+    )
+    proxy = next(
+        item for item in cast(tuple[Mapping[str, object], ...], candidate.content["proxies"])
+        if item["name"] == "egress-a"
+    )
+    assert proxy["username"] == "user"
+    assert proxy["password"] == "pass"
+
+
 def test_provider_render_uses_desired_snapshot_not_external_renderer() -> None:
     provider = MihomoForwarderProvider(runtime=cast(MihomoRuntime, object()))
     state = snapshot()
@@ -676,7 +812,9 @@ def test_template_secret_identity_and_finalization_boundary() -> None:
     resolver = Resolver(
         ControllerSecretSnapshot("mihomo/api-secret", 1, "S04A_SECRET_SENTINEL_DO_NOT_LEAK")
     )
-    candidate = provider.finalize(template, resolver)
+    candidate = provider.finalize(
+        template, MihomoFinalizationResolvers(controller=resolver, egress=resolver)
+    )
     assert resolver.refs == ["mihomo/api-secret"]
     assert isinstance(candidate, MihomoCandidateConfig)
     assert candidate.content["secret"] == "S04A_SECRET_SENTINEL_DO_NOT_LEAK"
@@ -687,10 +825,20 @@ def test_finalization_identity_and_blank_secret_fail_closed() -> None:
     provider = MihomoForwarderProvider(runtime=cast(MihomoRuntime, object()))
     template = provider.render(snapshot())
     with pytest.raises(MihomoRuntimeError, match="identity mismatch"):
-        provider.finalize(template, Resolver(ControllerSecretSnapshot("other", 1, "secret")))
+        provider.finalize(
+            template,
+            MihomoFinalizationResolvers(
+                controller=Resolver(ControllerSecretSnapshot("other", 1, "secret")),
+                egress=Resolver(ControllerSecretSnapshot("other", 1, "secret")),
+            ),
+        )
     with pytest.raises(MihomoRuntimeError, match="resolution failed"):
         provider.finalize(
-            template, Resolver(ControllerSecretSnapshot("mihomo/api-secret", 1, "   "))
+            template,
+            MihomoFinalizationResolvers(
+                controller=Resolver(ControllerSecretSnapshot("mihomo/api-secret", 1, "   ")),
+                egress=Resolver(ControllerSecretSnapshot("mihomo/api-secret", 1, "   ")),
+            ),
         )
 
 
@@ -713,7 +861,10 @@ def test_finalized_candidate_content_is_immutable() -> None:
     template = provider.render(snapshot())
     candidate = provider.finalize(
         template,
-        Resolver(ControllerSecretSnapshot("mihomo/api-secret", 1, "runtime-secret")),
+        MihomoFinalizationResolvers(
+            controller=Resolver(ControllerSecretSnapshot("mihomo/api-secret", 1, "runtime-secret")),
+            egress=Resolver(ControllerSecretSnapshot("mihomo/api-secret", 1, "runtime-secret")),
+        ),
     )
     with pytest.raises(TypeError):
         candidate.content["secret"] = "changed"  # type: ignore[index]

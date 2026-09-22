@@ -17,6 +17,7 @@ from backend.app.models import Secret
 from backend.app.providers.base import (
     CredentialDTO,
     CredentialResolutionError,
+    EgressCredentialSnapshot,
 )
 from backend.app.providers.forwarder.mihomo import (
     ControllerSecretResolver,
@@ -71,6 +72,9 @@ class SqlAlchemyCredentialResolver(XrayRenderResolver):
         self._db = db
 
     def resolve(self, secret_ref: str) -> CredentialDTO:
+        return self.resolve_egress_credential(secret_ref).credential
+
+    def resolve_egress_credential(self, secret_ref: str) -> EgressCredentialSnapshot:
         if not isinstance(secret_ref, str) or not secret_ref.strip():
             raise CredentialResolutionError("CREDENTIAL_REF_INVALID")
 
@@ -78,6 +82,12 @@ class SqlAlchemyCredentialResolver(XrayRenderResolver):
             stored = self._db.scalar(_current_secret_statement(secret_ref))
             if stored is None:
                 raise CredentialResolutionError("CREDENTIAL_NOT_FOUND")
+            if (
+                isinstance(stored.revision, bool)
+                or not isinstance(stored.revision, int)
+                or stored.revision <= 0
+            ):
+                raise CredentialResolutionError("CREDENTIAL_MALFORMED")
 
             payload = json.loads(decrypt_secret(stored.ciphertext))
             if not isinstance(payload, dict) or set(payload) != {"username", "password"}:
@@ -91,7 +101,11 @@ class SqlAlchemyCredentialResolver(XrayRenderResolver):
                 or not password.strip()
             ):
                 raise CredentialResolutionError("CREDENTIAL_MALFORMED")
-            return CredentialDTO(username=username, password=password)
+            return EgressCredentialSnapshot(
+                secret_ref,
+                stored.revision,
+                CredentialDTO(username=username, password=password),
+            )
         except CredentialResolutionError:
             raise
         except SecretStoreError:

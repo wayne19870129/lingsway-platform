@@ -4,7 +4,7 @@ import hashlib
 import json
 from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager, nullcontext
-from dataclasses import fields, is_dataclass
+from dataclasses import fields, is_dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -37,7 +37,10 @@ from backend.app.infra.mihomo_generation import (
     canonical_manifest,
     manifest_fingerprint,
 )
-from backend.app.infra.mihomo_projection_lock import SESSION_INFO_DURABLE_STATE_UNKNOWN_KEY
+from backend.app.infra.mihomo_projection_lock import (
+    SESSION_INFO_DURABLE_STATE_UNKNOWN_KEY,
+    session_holds_mihomo_projection_lock,
+)
 from backend.app.infra.mihomo_reconciliation import (
     MIHOMO_FINALIZATION_UNKNOWN,
     MIHOMO_ROLLBACK_UNKNOWN,
@@ -75,13 +78,21 @@ from backend.app.models import (
     TransportProviderKind,
     TransportProviderRecord,
 )
-from backend.app.providers.base import DesiredForwarderState
+from backend.app.providers.base import (
+    ApplyResult,
+    DesiredForwarderState,
+    EgressCredentialResolver,
+    EgressCredentialSnapshot,
+)
 from backend.app.providers.forwarder.mihomo import (
     ControllerSecretResolver,
+    ControllerSecretSnapshot,
+    MihomoFinalizationResolvers,
     MihomoForwarderProvider,
     MihomoRollbackUnknownError,
     MihomoRollbackVerifiedError,
     MihomoRuntime,
+    MihomoRuntimeError,
 )
 from backend.app.providers.forwarder.mihomo_projection import (
     TransportMaterialization,
@@ -103,6 +114,271 @@ def db() -> Generator[Session, None, None]:
     finally:
         session.close()
         engine.dispose()
+
+
+def test_finalization_fails_closed_on_egress_credential_revision_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    engine, db, loader = seed_mihomo_loader_graph(tmp_path)
+    endpoint = db.get(EgressEndpoint, 1)
+    assert endpoint is not None
+    endpoint.protocol = "socks5"
+    db.commit()
+    desired = loader.load_current(db)
+    generation = allocate_generation(db, build_projection_source_manifest(desired))
+    db.commit()
+    enqueue_mihomo_reconciliation(
+        db,
+        operation_id="revision-drift",
+        operation_kind="RECONCILE",
+        snapshot_revision=generation.revision,
+    )
+
+    def decrypt(ciphertext: str) -> str:
+        return ciphertext
+
+    monkeypatch.setattr(credential_resolver, "decrypt_secret", decrypt)
+    monkeypatch.setattr(secrets, "decrypt_secret", lambda _ciphertext: "controller-secret")
+    monkeypatch.setattr(
+        reconciliation,
+        "mihomo_projection_write",
+        lambda session: _fake_lock_with_durable_fallback(session),
+    )
+    monkeypatch.setattr(
+        reconciliation,
+        "get_settings",
+        lambda: SimpleNamespace(
+            transport_cache_root=str(tmp_path), mihomo_external_controller="172.30.0.10:9090"
+        ),
+    )
+
+    class Controller:
+        def resolve(self, _ref: str) -> ControllerSecretSnapshot:
+            return ControllerSecretSnapshot("mihomo/api-secret", 7, "controller")
+
+    class Provider(MihomoForwarderProvider):
+        def __init__(self) -> None:
+            super().__init__(cast(MihomoRuntime, object()))
+            self.finalization_error: MihomoRuntimeError | None = None
+            self.apply_count = 0
+
+        def render(self, desired: DesiredForwarderState) -> Any:
+            template = super().render(
+                replace(desired, transport_materializations=(), transport_references=())
+            )
+            secret = db.scalar(select(Secret).where(Secret.secret_ref == "egress/a"))
+            assert secret is not None
+            secret.revision = 4
+            secret.ciphertext = json.dumps(
+                {"username": "DRIFT_USER_SENTINEL", "password": "DRIFT_PASSWORD_SENTINEL"}
+            )
+            db.flush()
+            return template
+
+        def finalize(self, template: Any, resolvers: MihomoFinalizationResolvers) -> Any:
+            try:
+                return super().finalize(template, resolvers)
+            except MihomoRuntimeError as exc:
+                self.finalization_error = exc
+                raise
+
+        def apply(self, candidate: object) -> ApplyResult:
+            self.apply_count += 1
+            pytest.fail("apply must not run after credential revision drift")
+
+    provider = Provider()
+    result = reconcile_mihomo_job(
+        cast(reconciliation.MihomoProjectionProvider, provider),
+        None,
+        None,
+        cast(ProjectionVerifier, _Verifier(ProjectionVerification(True, "readback-v1"))),
+        db_factory=lambda: db,
+    )
+    assert result is not None
+    assert result.applied is False
+    assert provider.finalization_error is not None
+    assert str(provider.finalization_error) == "MIHOMO_EGRESS_CREDENTIAL_REVISION_MISMATCH"
+    assert provider.apply_count == 0
+    leaked = " ".join(
+        str(value)
+        for row in db.scalars(select(Job)).all()
+        for value in (row.payload_json, row.last_error_code)
+    )
+    assert "DRIFT_USER_SENTINEL" not in leaked
+    assert "DRIFT_PASSWORD_SENTINEL" not in leaked
+    assert "DRIFT_USER_SENTINEL" not in " ".join(record.getMessage() for record in caplog.records)
+    assert "DRIFT_PASSWORD_SENTINEL" not in " ".join(
+        record.getMessage() for record in caplog.records
+    )
+    blockers = db.scalars(
+        select(Job).where(Job.job_type == MIHOMO_RECONCILE_BLOCKER_JOB_TYPE)
+    ).all()
+    for blocker in blockers:
+        assert "DRIFT_USER_SENTINEL" not in str(blocker.payload_json)
+        assert "DRIFT_PASSWORD_SENTINEL" not in str(blocker.payload_json)
+        assert "DRIFT_USER_SENTINEL" not in str(blocker.last_error_code)
+        assert "DRIFT_PASSWORD_SENTINEL" not in str(blocker.last_error_code)
+    engine.dispose()
+
+
+def test_egress_plaintext_is_only_decrypted_inside_the_projection_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine, db, loader = seed_mihomo_loader_graph(tmp_path)
+    endpoint = db.get(EgressEndpoint, 1)
+    assert endpoint is not None
+    endpoint.protocol = "socks5"
+    db.commit()
+    desired = loader.load_current(db)
+    generation = allocate_generation(db, build_projection_source_manifest(desired))
+    db.commit()
+    enqueue_mihomo_reconciliation(
+        db,
+        operation_id="lock-boundary",
+        operation_kind="RECONCILE",
+        snapshot_revision=generation.revision,
+    )
+    seen: list[bool] = []
+
+    def decrypt(_ciphertext: str) -> str:
+        seen.append(session_holds_mihomo_projection_lock(db))
+        assert seen[-1] is True
+        return json.dumps({"username": "user", "password": "pass"})
+
+    monkeypatch.setattr(credential_resolver, "decrypt_secret", decrypt)
+    monkeypatch.setattr(secrets, "decrypt_secret", lambda _ciphertext: "controller-secret")
+    monkeypatch.setattr(
+        reconciliation,
+        "mihomo_projection_write",
+        lambda session: _fake_lock_with_durable_fallback(session),
+    )
+    monkeypatch.setattr(
+        reconciliation,
+        "get_settings",
+        lambda: SimpleNamespace(
+            transport_cache_root=str(tmp_path), mihomo_external_controller="172.30.0.10:9090"
+        ),
+    )
+
+    class Provider(MihomoForwarderProvider):
+        def __init__(self) -> None:
+            super().__init__(cast(MihomoRuntime, object()))
+            self.captured: object | None = None
+
+        def render(self, desired: DesiredForwarderState) -> Any:
+            return super().render(
+                replace(desired, transport_materializations=(), transport_references=())
+            )
+
+        def apply(self, candidate: object) -> ApplyResult:
+            self.captured = candidate
+            return ApplyResult(applied=True, version="captured")
+
+    provider = Provider()
+    result = reconcile_mihomo_job(
+        cast(reconciliation.MihomoProjectionProvider, provider),
+        None,
+        None,
+        cast(ProjectionVerifier, _Verifier(ProjectionVerification(True, "readback-v1"))),
+        db_factory=lambda: db,
+    )
+    assert result is not None
+    assert result.applied is True
+    assert provider.captured is not None
+    assert seen and all(seen)
+    db.close()
+    engine.dispose()
+
+
+def test_reconcile_resolves_egress_plaintext_with_no_injected_resolver(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine, db, loader = seed_mihomo_loader_graph(tmp_path)
+    endpoint = db.get(EgressEndpoint, 1)
+    assert endpoint is not None
+    endpoint.protocol = "socks5"
+    db.commit()
+    desired = loader.load_current(db)
+    generation = allocate_generation(db, build_projection_source_manifest(desired))
+    db.commit()
+    enqueue_mihomo_reconciliation(
+        db,
+        operation_id="default-resolvers",
+        operation_kind="RECONCILE",
+        snapshot_revision=generation.revision,
+    )
+    egress_secret = db.scalar(
+        select(Secret).where(Secret.secret_ref == "egress/a")
+    )
+    assert egress_secret is not None
+    egress_secret.ciphertext = json.dumps(
+        {"username": "REAL_EGRESS_USER_SENTINEL", "password": "REAL_EGRESS_PASSWORD_SENTINEL"}
+    )
+    controller_secret = db.scalar(
+        select(Secret).where(Secret.secret_ref == credential_resolver.MIHOMO_CONTROLLER_SECRET_REF)
+    )
+    assert controller_secret is not None
+    controller_secret.ciphertext = "controller-secret"
+    db.commit()
+    monkeypatch.setattr(
+        reconciliation,
+        "mihomo_projection_write",
+        lambda session: _fake_lock_with_durable_fallback(session),
+    )
+    monkeypatch.setattr(
+        reconciliation,
+        "get_settings",
+        lambda: SimpleNamespace(
+            transport_cache_root=str(tmp_path), mihomo_external_controller="172.30.0.10:9090"
+        ),
+    )
+
+    def decrypt(ciphertext: str) -> str:
+        return ciphertext
+
+    monkeypatch.setattr(credential_resolver, "decrypt_secret", decrypt)
+    monkeypatch.setattr(secrets, "decrypt_secret", decrypt)
+    original_load = reconciliation.SqlMihomoDesiredSnapshotLoader.load
+
+    def sqlite_aware_load(
+        loader_instance: reconciliation.SqlMihomoDesiredSnapshotLoader,
+        session: Session,
+        job: Job,
+    ) -> DesiredForwarderState:
+        loaded = original_load(loader_instance, session, job)
+        return replace(
+            loaded,
+            transport_materializations=(),
+            transport_references=(),
+        )
+
+    monkeypatch.setattr(reconciliation.SqlMihomoDesiredSnapshotLoader, "load", sqlite_aware_load)
+
+    class Provider(MihomoForwarderProvider):
+        def __init__(self) -> None:
+            super().__init__(cast(MihomoRuntime, object()))
+            self.captured: object | None = None
+
+        def apply(self, candidate: object) -> ApplyResult:
+            self.captured = candidate
+            return ApplyResult(applied=True, version="captured")
+
+    provider = Provider()
+    result = reconcile_mihomo_job(
+        cast(reconciliation.MihomoProjectionProvider, provider),
+        None,
+        None,
+        cast(ProjectionVerifier, _Verifier(ProjectionVerification(True, "v1"))),
+        db_factory=lambda: db,
+    )
+    assert result is not None
+    assert provider.captured is not None
+    captured = cast(Any, provider.captured)
+    egress = next(item for item in captured.content["proxies"] if item["name"] == "egress-a")
+    assert egress["username"] == "REAL_EGRESS_USER_SENTINEL"
+    assert egress["password"] == "REAL_EGRESS_PASSWORD_SENTINEL"
+    db.close()
+    engine.dispose()
 
 
 def test_prepare_generation_and_intent_commit_together(
@@ -198,6 +474,7 @@ def seed_mihomo_loader_graph(
         ),
     )
     tables = [
+        Job.__table__,
         RouteGroup.__table__,
         TransportProviderRecord.__table__,
         RouteBinding.__table__,
@@ -1769,7 +2046,7 @@ def test_stale_desired_snapshot_never_renders_or_applies(
     result = reconcile_mihomo_job(
         cast(reconciliation.MihomoProjectionProvider, provider),
         StaleLoader(),
-        cast(ControllerSecretResolver, SimpleNamespace(resolve=lambda ref: None)),
+        _unused_finalization_resolvers(),
         cast(ProjectionVerifier, _Verifier(ProjectionVerification(True, "readback-v1"))),
         db_factory=lambda: db,
     )
@@ -1824,7 +2101,7 @@ def test_stale_transport_materialization_fails_before_runtime_mutation(
     result = reconcile_mihomo_job(
         cast(reconciliation.MihomoProjectionProvider, provider),
         StaleMaterializationLoader(),
-        cast(ControllerSecretResolver, SimpleNamespace(resolve=lambda ref: None)),
+        _unused_finalization_resolvers(),
         cast(ProjectionVerifier, _Verifier(ProjectionVerification(True, "readback-v1"))),
         db_factory=lambda: db,
     )
@@ -1860,6 +2137,21 @@ class _Provider:
 class _Candidate:
     version = "projection-v1"
     content = {"secret": "never-store"}
+
+
+def _unused_finalization_resolvers() -> MihomoFinalizationResolvers:
+    class UnusedController:
+        def resolve(self, _ref: str) -> None:
+            pytest.fail("controller resolver should not be called")
+
+    class UnusedEgress:
+        def resolve_egress_credential(self, _ref: str) -> EgressCredentialSnapshot:
+            pytest.fail("egress resolver should not be called")
+
+    return MihomoFinalizationResolvers(
+        controller=cast(ControllerSecretResolver, UnusedController()),
+        egress=cast(EgressCredentialResolver, UnusedEgress()),
+    )
 
 
 class _Loader:
@@ -1899,7 +2191,7 @@ def _reconcile_with_fake_lock(
     return reconcile_mihomo_job(
         provider,
         _Loader(),
-        cast(ControllerSecretResolver, SimpleNamespace(resolve=lambda ref: None)),
+        _unused_finalization_resolvers(),
         cast(ProjectionVerifier, verifier),
         db_factory=lambda: db,
     )
