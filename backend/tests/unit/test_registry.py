@@ -83,6 +83,31 @@ def test_registry_rejects_blank_subscription_cache_root() -> None:
         build_registry(Settings(transport_provider_mode="subscription", transport_cache_root=" "))
 
 
+def test_mihomo_runtime_safety_requires_external_controller() -> None:
+    with pytest.raises(ValueError, match="MIHOMO_EXTERNAL_CONTROLLER"):
+        Settings(
+            forwarder_provider="mihomo",
+            mihomo_external_controller=" ",
+        ).validate_runtime_safety()
+
+
+def test_mihomo_runtime_safety_accepts_nonblank_external_controller() -> None:
+    Settings(
+        forwarder_provider="mihomo",
+        mihomo_external_controller="203.0.113.10:9090",
+    ).validate_runtime_safety()
+
+
+def test_build_registry_still_rejects_mihomo_selection() -> None:
+    with pytest.raises(ProviderConfigurationError, match="FORWARDER_PROVIDER"):
+        build_registry(
+            Settings(
+                forwarder_provider="mihomo",
+                mihomo_external_controller="203.0.113.10:9090",
+            )
+        )
+
+
 # ---------------------------------------------------------------------------
 # TASK-T16 Phase 2B8: ProviderRegistry ownership/lifecycle.
 # ---------------------------------------------------------------------------

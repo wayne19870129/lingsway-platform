@@ -60,6 +60,7 @@ class Settings:
     admin_initial_password: str = "CHANGE_ME"
     transport_provider_mode: str = "mock"
     transport_cache_root: str = "/app/data/transport"
+    mihomo_external_controller: str = ""
     cors_origins: str = "http://localhost:3000"
 
     def __post_init__(self) -> None:
@@ -94,6 +95,10 @@ class Settings:
         return settings
 
     def validate_runtime_safety(self) -> None:
+        if self.forwarder_provider == "mihomo" and not self.mihomo_external_controller.strip():
+            raise ValueError(
+                "MIHOMO_EXTERNAL_CONTROLLER must not be blank when Mihomo is selected"
+            )
         if self.transport_provider_mode == "subscription" and not self.transport_cache_root.strip():
             raise ValueError(
                 "TRANSPORT_CACHE_ROOT must not be blank when subscription transport is selected"

@@ -28,6 +28,7 @@ from backend.app.providers.gateway.xray_composition import (
 )
 
 MIHOMO_CONTROLLER_SECRET_PURPOSE = "MIHOMO_CONTROLLER_API_SECRET"
+MIHOMO_CONTROLLER_SECRET_REF = "mihomo/api-secret"
 
 
 class SqlMihomoControllerSecretResolver(ControllerSecretResolver):

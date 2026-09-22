@@ -4,9 +4,10 @@ import json
 import re
 from collections.abc import Callable
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from pathlib import Path
 from typing import Protocol
 
 from sqlalchemy import or_, select
@@ -14,6 +15,10 @@ from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import Session
 
 from backend.app.core.database import SessionLocal
+from backend.app.infra.credential_resolver import (
+    MIHOMO_CONTROLLER_SECRET_PURPOSE,
+    MIHOMO_CONTROLLER_SECRET_REF,
+)
 from backend.app.infra.mihomo_blocker import (
     MIHOMO_BLOCKER_KIND_FINALIZATION,
     MIHOMO_BLOCKER_KIND_LOCK_RELEASE,
@@ -23,21 +28,54 @@ from backend.app.infra.mihomo_blocker import (
     mihomo_blocker_dedupe_key,
     validate_mihomo_operation_id,
 )
+from backend.app.infra.mihomo_generation import snapshot_identity
+from backend.app.infra.mihomo_materialization import (
+    load_transport_materialization,
+    verify_materialization,
+)
 from backend.app.infra.mihomo_projection_lock import (
     SESSION_INFO_DURABLE_STATE_UNKNOWN_KEY,
     SESSION_INFO_RELEASE_METADATA_KEY,
     mihomo_projection_write,
     session_holds_mihomo_projection_lock,
 )
-from backend.app.models import Job, JobStatus
-from backend.app.providers.base import DesiredForwarderState
+from backend.app.models import (
+    EgressBinding,
+    EgressEndpoint,
+    EgressGroup,
+    EgressTransportAssignment,
+    Job,
+    JobStatus,
+    MihomoProjectionGeneration,
+    MihomoTransportMaterialization,
+    RouteBinding,
+    RouteEgressBinding,
+    RouteGroup,
+    RouteGroupStatus,
+    Secret,
+    TrafficRule,
+    TransportEndpointRecord,
+    TransportProviderRecord,
+)
+from backend.app.providers.base import (
+    DesiredForwarderState,
+    ForwarderEgressProxyDTO,
+    ForwarderListenerDTO,
+)
 from backend.app.providers.forwarder.mihomo import (
     ControllerSecretResolver,
     MihomoApplyError,
     MihomoRollbackUnknownError,
     MihomoRollbackVerifiedError,
 )
-from backend.app.providers.forwarder.mihomo_projection import MihomoProjectionError
+from backend.app.providers.forwarder.mihomo_projection import (
+    MihomoProjectionError,
+    TransportMaterializationReference,
+)
+from backend.app.providers.transport.resolver import (
+    SubscriptionTransportResolver,
+    TransportProviderDescriptor,
+)
 
 MIHOMO_RECONCILE_JOB_TYPE = "MIHOMO_RECONCILE"
 MIHOMO_OPERATION_KINDS = frozenset(
@@ -85,6 +123,345 @@ class ProjectionVerification:
 
 class MihomoDesiredSnapshotLoader(Protocol):
     def load(self, db: Session, job: Job) -> DesiredForwarderState: ...
+
+
+class SqlMihomoDesiredSnapshotLoader:
+    """Rebuild the complete desired projection from committed DB authority."""
+
+    def __init__(self, cache_root: Path, external_controller: str) -> None:
+        self._cache_root = cache_root
+        self._external_controller = external_controller
+
+    def load_current(self, db: Session) -> DesiredForwarderState:
+        groups = list(
+            db.scalars(
+                select(RouteGroup)
+                .where(RouteGroup.status == RouteGroupStatus.ACTIVE)
+                .order_by(RouteGroup.code, RouteGroup.id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        )
+        group_ids = {group.id for group in groups}
+        bindings = list(
+            db.scalars(
+                select(RouteBinding)
+                .where(
+                    RouteBinding.enabled.is_(True),
+                    RouteBinding.route_group_id.in_(group_ids or {-1}),
+                )
+                .order_by(RouteBinding.route_group_id, RouteBinding.priority, RouteBinding.id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        )
+        egress_bindings = list(
+            db.scalars(
+                select(RouteEgressBinding)
+                .where(
+                    RouteEgressBinding.enabled.is_(True),
+                    RouteEgressBinding.route_group_id.in_(group_ids or {-1}),
+                )
+                .order_by(RouteEgressBinding.route_group_id, RouteEgressBinding.id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        )
+        rules = list(
+            db.scalars(
+                select(TrafficRule)
+                .where(TrafficRule.enabled.is_(True))
+                .order_by(TrafficRule.priority, TrafficRule.id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        )
+        egress_groups = list(
+            db.scalars(
+                select(EgressGroup)
+                .where(EgressGroup.status == "ACTIVE")
+                .order_by(EgressGroup.code, EgressGroup.id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        )
+        egress_group_ids = {group.id for group in egress_groups}
+        endpoints = list(
+            db.scalars(
+                select(EgressEndpoint)
+                .where(
+                    EgressEndpoint.status.in_(("AVAILABLE", "ASSIGNED", "DEGRADED")),
+                    EgressEndpoint.group_id.in_(egress_group_ids or {-1}),
+                )
+                .order_by(EgressEndpoint.code, EgressEndpoint.id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        )
+        provider_ids = {binding.provider_id for binding in bindings}
+        providers = list(
+            db.scalars(
+                select(TransportProviderRecord)
+                .where(
+                    TransportProviderRecord.enabled.is_(True),
+                    TransportProviderRecord.id.in_(provider_ids or {-1}),
+                )
+                .order_by(TransportProviderRecord.code, TransportProviderRecord.id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        )
+        provider_id_set = {provider.id for provider in providers}
+        transport_endpoints = tuple(
+            db.scalars(
+                select(TransportEndpointRecord)
+                .where(
+                    # Assignment validation needs to distinguish a missing node
+                    # from a node belonging to the wrong provider.  Endpoint
+                    # status and operational metadata are not projection inputs.
+                    TransportEndpointRecord.id.is_not(None),
+                )
+                .order_by(
+                    TransportEndpointRecord.provider_id,
+                    TransportEndpointRecord.external_id,
+                    TransportEndpointRecord.id,
+                )
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        )
+        assignments = tuple(
+            db.scalars(
+                select(EgressTransportAssignment)
+                .where(
+                    EgressTransportAssignment.state == "ACTIVE",
+                )
+                .order_by(
+                    EgressTransportAssignment.transport_provider_id,
+                    EgressTransportAssignment.transport_node_id,
+                    EgressTransportAssignment.id,
+                )
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        )
+        transport_by_id = {endpoint.id: endpoint for endpoint in transport_endpoints}
+        egress_ids = {endpoint.id for endpoint in endpoints}
+        assignments_by_egress: dict[int, EgressTransportAssignment] = {}
+        for assignment in assignments:
+            node = transport_by_id.get(assignment.transport_node_id)
+            if node is None:
+                raise MihomoReconciliationError("MIHOMO_TRANSPORT_ASSIGNMENT_NODE_MISSING")
+            if assignment.transport_provider_id != node.provider_id:
+                raise MihomoReconciliationError(
+                    "MIHOMO_TRANSPORT_ASSIGNMENT_PROVIDER_MISMATCH"
+                )
+            if assignment.egress_id not in egress_ids:
+                raise MihomoReconciliationError("MIHOMO_TRANSPORT_ASSIGNMENT_EGRESS_UNKNOWN")
+            if assignment.egress_id in assignments_by_egress:
+                raise MihomoReconciliationError("MIHOMO_TRANSPORT_ASSIGNMENT_AMBIGUOUS")
+            assignments_by_egress[assignment.egress_id] = assignment
+        active_bindings = list(
+            db.scalars(
+                select(EgressBinding)
+                .where(EgressBinding.released_at.is_(None))
+                .order_by(EgressBinding.subscription_id, EgressBinding.egress_id, EgressBinding.id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        )
+        if any(binding.egress_id not in egress_ids for binding in active_bindings):
+            raise MihomoReconciliationError("MIHOMO_EGRESS_BINDING_INVALID")
+        receipts = {
+            receipt.owner_record_id: receipt
+            for receipt in db.scalars(
+                select(MihomoTransportMaterialization)
+                .where(MihomoTransportMaterialization.owner_record_id.in_(provider_id_set or {-1}))
+                .order_by(MihomoTransportMaterialization.owner_record_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        }
+        materials = []
+        references = []
+        resolver = SubscriptionTransportResolver(self._cache_root)
+        try:
+            for provider in providers:
+                receipt = receipts.get(provider.id)
+                if receipt is None:
+                    raise MihomoReconciliationError("MIHOMO_MATERIALIZATION_RECEIPT_MISSING")
+                source = db.scalar(
+                    select(Secret)
+                    .where(
+                        Secret.secret_ref == provider.secret_ref,
+                        Secret.purpose == "TRANSPORT_SUBSCRIPTION_URL",
+                    )
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+                if source is None or source.revision != receipt.source_revision:
+                    raise MihomoReconciliationError(
+                        "MIHOMO_MATERIALIZATION_SOURCE_REVISION_MISMATCH"
+                    )
+                descriptor = TransportProviderDescriptor(
+                    provider.id,
+                    provider.code,
+                    provider.kind.value,
+                    provider.secret_ref,
+                )
+                cache_path = resolver._cache_path(descriptor)  # noqa: SLF001
+                verified = verify_materialization(
+                    db,
+                    provider.id,
+                    cache_path,
+                    provider.code,
+                    source_revision=receipt.source_revision,
+                )
+                material = load_transport_materialization(verified)
+                materials.append(material)
+                references.append(
+                    TransportMaterializationReference(
+                        provider.id,
+                        provider.code,
+                        receipt.source_revision,
+                        receipt.cache_identity,
+                    )
+                )
+        finally:
+            resolver.close()
+        egress_proxies: list[ForwarderEgressProxyDTO] = []
+        for endpoint in endpoints:
+            binding = next(
+                (item for item in active_bindings if item.egress_id == endpoint.id), None
+            )
+            override = binding.credential_secret_ref if binding is not None else None
+            if override is None or override == "":
+                credential_ref = endpoint.credential_secret_ref.strip()
+            elif not isinstance(override, str) or not override.strip():
+                raise MihomoReconciliationError("MIHOMO_EGRESS_CREDENTIAL_REF_INVALID")
+            else:
+                credential_ref = override
+            if not credential_ref:
+                raise MihomoReconciliationError("MIHOMO_EGRESS_CREDENTIAL_REF_INVALID")
+            secret = db.scalar(
+                select(Secret)
+                .where(Secret.secret_ref == credential_ref)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if secret is None or isinstance(secret.revision, bool) or secret.revision <= 0:
+                raise MihomoReconciliationError("MIHOMO_EGRESS_CREDENTIAL_METADATA_INVALID")
+            selected_assignment = assignments_by_egress.get(endpoint.id)
+            node = (
+                transport_by_id.get(selected_assignment.transport_node_id)
+                if selected_assignment
+                else None
+            )
+            egress_proxies.append(
+                ForwarderEgressProxyDTO(
+                    name=endpoint.code,
+                    protocol=endpoint.protocol,
+                    host=endpoint.host,
+                    port=endpoint.port,
+                    credential_secret_ref=credential_ref,
+                    credential_revision=secret.revision,
+                    transport_proxy_name=node.name if node else None,
+                    transport_node_identity=(node.name, node.host, node.port) if node else None,
+                )
+            )
+        egress_proxies.sort(key=lambda item: item.name)
+        endpoint_names = {endpoint.id: endpoint.code for endpoint in endpoints}
+        groups_by_id = {group.id: group.code for group in groups}
+        proxy_groups = tuple(
+            {
+                "name": groups_by_id[group_id],
+                "type": "select",
+                "proxies": tuple(
+                    endpoint_names[binding.egress_endpoint_id]
+                    for binding in egress_bindings
+                    if binding.route_group_id == group_id
+                    and binding.egress_endpoint_id in endpoint_names
+                ),
+            }
+            for group_id in sorted(groups_by_id)
+        )
+        listeners = tuple(
+            ForwarderListenerDTO(
+                f"listener-{endpoint.code}",
+                "mixed",
+                "127.0.0.1",
+                endpoint.mihomo_listen_port,
+                endpoint.code,
+            )
+            for endpoint in endpoints
+        )
+        desired_rules = tuple(
+            {
+                "match": rule.match_type,
+                **({"value": rule.match_value} if rule.match_type != "MATCH" else {}),
+                "target": rule.target_egress,
+            }
+            for rule in rules
+        )
+        if not desired_rules or desired_rules[-1].get("match") != "MATCH":
+            desired_rules = (*desired_rules, {"match": "MATCH", "target": "BLOCK"})
+        controller = db.scalar(
+            select(Secret)
+            .where(
+                Secret.secret_ref == MIHOMO_CONTROLLER_SECRET_REF,
+                Secret.purpose == MIHOMO_CONTROLLER_SECRET_PURPOSE,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if (
+            controller is None
+            or isinstance(controller.revision, bool)
+            or not isinstance(controller.revision, int)
+            or controller.revision <= 0
+        ):
+            raise MihomoReconciliationError("MIHOMO_CONTROLLER_SECRET_METADATA_INVALID")
+        constants = {
+            "external-controller": self._external_controller,
+            "api-secret-ref": MIHOMO_CONTROLLER_SECRET_REF,
+            "api-secret-revision": controller.revision,
+        }
+        return DesiredForwarderState(
+            listener_specs=listeners,
+            proxies=(),
+            egress_proxies=tuple(egress_proxies),
+            proxy_groups=proxy_groups,
+            rules=desired_rules,
+            dns={"enable": True, "ipv6": False},
+            transport_materializations=tuple(materials),
+            transport_references=tuple(references),
+            deployment_constants=constants,
+        )
+
+    def load(self, db: Session, job: Job) -> DesiredForwarderState:
+        payload = _payload(job)
+        try:
+            revision = _validate_revision(payload.get("snapshot_revision"))
+        except ValueError as exc:
+            raise MihomoPayloadError("MIHOMO_RECONCILIATION_PAYLOAD_INVALID") from exc
+        generation = db.scalar(
+            select(MihomoProjectionGeneration)
+            .where(MihomoProjectionGeneration.revision == revision)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if generation is None:
+            raise MihomoReconciliationError("MIHOMO_GENERATION_MISSING")
+        desired = self.load_current(db)
+        return replace(
+            desired,
+            snapshot_revision=generation.revision,
+            snapshot_identity=snapshot_identity(
+                generation.revision,
+                generation.desired_fingerprint,
+                manifest_version=generation.manifest_version,
+            ),
+        )
 
 
 class ProjectionVerifier(Protocol):
