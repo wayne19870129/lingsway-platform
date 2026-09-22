@@ -126,6 +126,7 @@ def seed_mihomo_loader_graph(
     binding_egress_id: int = 1,
     assignments: list[dict[str, Any]] | None = None,
     assignment_node_id: int = 11,
+    transport_nodes: list[dict[str, Any]] | None = None,
     transport_non_identity: dict[str, object] | None = None,
     secret_revisions: dict[str, int] | None = None,
     transport_cache_content: bytes | None = None,
@@ -177,6 +178,15 @@ def seed_mihomo_loader_graph(
     order = insertion_order or list(reversed(list(rows_by_code)))
     revisions = secret_revisions or {"egress/a": 3}
     non_identity = transport_non_identity or {}
+    node_rows = transport_nodes or [
+        {
+            "id": 11,
+            "external_id": "node-a",
+            "name": "Node A",
+            "host": "203.0.113.11",
+            "port": 443,
+        }
+    ]
     with Session(engine) as session:
         from backend.app.models import ProviderStatus, RouteGroupStatus
 
@@ -206,21 +216,6 @@ def seed_mihomo_loader_graph(
                 ),
                 RouteGroup(id=1, code="route-a", name="A", status=RouteGroupStatus.ACTIVE),
                 EgressGroup(id=1, code="egress", region="test", status="ACTIVE"),
-                TransportEndpointRecord(
-                    id=11,
-                    provider_id=1,
-                    external_id="node-a",
-                    name="Node A",
-                    protocol="https",
-                    host="203.0.113.11",
-                    port=443,
-                    auth_secret_ref="node/a",
-                    status=non_identity.get("status", "AVAILABLE"),
-                    region=non_identity.get("region", "UNKNOWN"),
-                    latency_ms=non_identity.get("latency_ms"),
-                    packet_loss=None,
-                    raw_metadata_json=non_identity.get("raw_metadata_json", "{}"),
-                ),
                 RouteBinding(route_group_id=1, provider_id=1, role="PRIMARY", enabled=True),
                 TrafficRule(
                     rule_set="default",
@@ -239,6 +234,26 @@ def seed_mihomo_loader_graph(
                 ),
             ]
         )
+        for node in node_rows:
+            session.add(
+                TransportEndpointRecord(
+                    id=int(node.get("id", 11)),
+                    provider_id=int(node.get("provider_id", 1)),
+                    external_id=str(node.get("external_id", "node-a")),
+                    name=str(node.get("name", "Node A")),
+                    protocol=str(node.get("protocol", "https")),
+                    host=str(node.get("host", "203.0.113.11")),
+                    port=int(node.get("port", 443)),
+                    auth_secret_ref=str(node.get("auth_secret_ref", "node/a")),
+                    status=non_identity.get("status", node.get("status", "AVAILABLE")),
+                    region=non_identity.get("region", node.get("region", "UNKNOWN")),
+                    latency_ms=non_identity.get("latency_ms", node.get("latency_ms")),
+                    packet_loss=None,
+                    raw_metadata_json=non_identity.get(
+                        "raw_metadata_json", node.get("raw_metadata_json", "{}")
+                    ),
+                )
+            )
         for index, code in enumerate(order, 1):
             row = rows_by_code[code]
             endpoint_id = int(row.get("id", index))
@@ -326,169 +341,17 @@ def test_sql_desired_loader_rebuilds_db_authority_with_stable_order(
     assert first.deployment_constants["api-secret-revision"] == 7
     session.close()
     engine.dispose()
-    return
-
-    engine = create_engine(
-        "sqlite://",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
+def test_whitespace_only_credential_override_fails_closed(
+    tmp_path: Path,
+) -> None:
+    engine, session, loader = seed_mihomo_loader_graph(
+        tmp_path, binding_credential_secret_ref="   "
     )
-    event.listen(
-        engine,
-        "connect",
-        lambda connection, _record: connection.create_function(
-            "IF",
-            3,
-            lambda condition, when_true, when_false: when_true if condition else when_false,
-            deterministic=True,
-        ),
-    )
-    tables = [
-        RouteGroup.__table__,
-        TransportProviderRecord.__table__,
-        RouteBinding.__table__,
-        EgressGroup.__table__,
-        EgressEndpoint.__table__,
-        RouteEgressBinding.__table__,
-        TrafficRule.__table__,
-        MihomoTransportMaterialization.__table__,
-        TransportEndpointRecord.__table__,
-        EgressTransportAssignment.__table__,
-        EgressBinding.__table__,
-        Secret.__table__,
-    ]
-    Base.metadata.create_all(engine, tables=tables)
-    cache_root = tmp_path
-    transport_resolver = SubscriptionTransportResolver(cache_root)
-    descriptor = TransportProviderDescriptor(
-        1, "transport-a", "SUBSCRIPTION", "transport/subscription-a"
-    )
-    cache_path = transport_resolver._cache_path(descriptor)  # noqa: SLF001
-    content = b"proxies:\n  - {name: Node A, type: ss, server: 203.0.113.11, port: 443}\n"
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    cache_path.write_bytes(content)
-    from backend.app.models import ProviderStatus, RouteGroupStatus
-
-    now = datetime.now(UTC)
-    with Session(engine) as session:
-        provider = TransportProviderRecord(
-            id=1,
-            code="transport-a",
-            slug="transport-a",
-            name="Transport A",
-            kind=TransportProviderKind.SUBSCRIPTION,
-            secret_ref="transport/subscription-a",
-            status=ProviderStatus.HEALTHY,
-            enabled=True,
-        )
-        session.add_all(
-            [
-                provider,
-                Secret(
-                    secret_ref="transport/subscription-a",
-                    ciphertext="opaque",
-                    purpose="TRANSPORT_SUBSCRIPTION_URL",
-                    revision=2,
-                ),
-                Secret(
-                    secret_ref=credential_resolver.MIHOMO_CONTROLLER_SECRET_REF,
-                    ciphertext="opaque-controller",
-                    purpose=credential_resolver.MIHOMO_CONTROLLER_SECRET_PURPOSE,
-                    revision=7,
-                ),
-                Secret(
-                    secret_ref="egress/a",
-                    ciphertext="opaque-egress",
-                    purpose="EGRESS_CREDENTIAL",
-                    revision=3,
-                ),
-                RouteGroup(id=1, code="route-b", name="B", status=RouteGroupStatus.ACTIVE),
-                RouteGroup(id=2, code="route-a", name="A", status=RouteGroupStatus.ACTIVE),
-                EgressGroup(id=1, code="egress", region="test", status="ACTIVE"),
-                EgressEndpoint(
-                    id=1,
-                    group_id=1,
-                    code="egress-a",
-                    provider_name="test",
-                    host="203.0.113.10",
-                    port=443,
-                    protocol="ss",
-                    credential_secret_ref="egress/a",
-                    mihomo_listen_port=10001,
-                    status="AVAILABLE",
-                ),
-                EgressBinding(subscription_id=10, egress_id=1, credential_secret_ref=None),
-                TransportEndpointRecord(
-                    id=11,
-                    provider_id=1,
-                    external_id="node-a",
-                    name="Node A",
-                    protocol="https",
-                    host="203.0.113.11",
-                    port=443,
-                    auth_secret_ref="node/a",
-                    status="AVAILABLE",
-                    latency_ms=None,
-                    packet_loss=None,
-                    raw_metadata_json="{}",
-                ),
-                EgressTransportAssignment(
-                    egress_id=1,
-                    transport_provider_id=1,
-                    transport_node_id=11,
-                    state="ACTIVE",
-                    allocation_generation=1,
-                    last_latency_ms=None,
-                    last_checked_at=None,
-                    unavailable_since=None,
-                ),
-                RouteBinding(
-                    route_group_id=1,
-                    provider_id=1,
-                    role="PRIMARY",
-                    enabled=True,
-                ),
-                RouteEgressBinding(
-                    route_group_id=1,
-                    egress_endpoint_id=1,
-                    role="PRIMARY",
-                    enabled=True,
-                ),
-                TrafficRule(
-                    rule_set="default",
-                    match_type="MATCH",
-                    target_egress="BLOCK",
-                    priority=100,
-                    enabled=True,
-                ),
-                MihomoTransportMaterialization(
-                    owner_record_id=1,
-                    provider_code="transport-a",
-                    source_revision=2,
-                    cache_identity=str(cache_path),
-                    content_hash=hashlib.sha256(content).hexdigest(),
-                    freshness_deadline=now + timedelta(hours=1),
-                ),
-            ]
-        )
-        session.commit()
-        monkeypatch.setattr(
-            credential_resolver,
-            "reveal_secret_snapshot_for_purpose",
-            lambda *_args: pytest.fail("loader must not resolve controller plaintext"),
-        )
-        loader = reconciliation.SqlMihomoDesiredSnapshotLoader(cache_root, "203.0.113.20:9090")
-        first = loader.load_current(session)
-        session.expire_all()
-        second = loader.load_current(session)
-        assert tuple(item.name for item in first.egress_proxies) == ("egress-a",)
-        assert first.egress_proxies[0].credential_secret_ref == "egress/a"
-        assert first.egress_proxies[0].credential_revision == 3
-        assert first.egress_proxies[0].transport_proxy_name == "Node A"
-        assert tuple(item["name"] for item in first.proxy_groups) == ("route-b", "route-a")
-        assert first == second
-        assert first.deployment_constants["api-secret-revision"] == 7
-    transport_resolver.close()
+    with pytest.raises(
+        MihomoReconciliationError, match="MIHOMO_EGRESS_CREDENTIAL_REF_INVALID"
+    ):
+        loader.load_current(session)
+    session.close()
     engine.dispose()
 
 
