@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -53,11 +54,7 @@ def test_composer_emits_all_canonical_owners_and_ignores_template_values() -> No
     candidate = _provider().render(
         DesiredRoutingState(
             {"principal": "egress"},
-            (
-                XrayOutboundDTO(
-                    "egress", "proxy.example.invalid", 1080, "socks5", "credential/ref"
-                ),
-            ),
+            (XrayOutboundDTO("egress", "proxy.example.invalid", 1080, "socks5", "credential/ref"),),
         ),
         _Resolver(),
     )
@@ -77,6 +74,61 @@ def test_unknown_template_field_fails_closed_without_copying_it() -> None:
 
     with pytest.raises(XrayCompositionError, match="unknown top-level"):
         XrayStaticSkeleton.from_template(template)
+
+
+def _composition_input(
+    outbound: XrayOutboundDTO, credentials: dict[str, CredentialDTO]
+) -> XrayFullConfigInput:
+    return XrayFullConfigInput(
+        XrayStaticSkeleton.canonical(),
+        XrayDeploymentConfig(
+            xray_log_level="warning",
+            reality_dest="dest.example:443",
+            reality_server_names=("dest.example",),
+        ),
+        XrayRealityConfig("private-key", ("short-id",)),
+        DesiredRoutingState({"principal": outbound.tag}, (outbound,)),
+        credentials,
+    )
+
+
+def test_non_loopback_outbound_without_credential_fails_closed() -> None:
+    with pytest.raises(XrayCompositionError, match="XRAY_OUTBOUND_CREDENTIAL_REQUIRED"):
+        compose_xray_config(
+            _composition_input(
+                XrayOutboundDTO("egress", "proxy.example.invalid", 1080, "socks", None), {}
+            )
+        )
+
+
+def test_loopback_outbound_renders_without_users_block() -> None:
+    candidate = compose_xray_config(
+        _composition_input(XrayOutboundDTO("egress", "127.0.0.1", 11081, "socks", None), {})
+    )
+    outbounds = cast(list[dict[str, object]], candidate.content["outbounds"])
+    outbound = next(item for item in outbounds if item["tag"] == "egress")
+    settings = cast(dict[str, object], outbound["settings"])
+    servers = cast(list[dict[str, object]], settings["servers"])
+    server = servers[0]
+    assert server["address"] == "127.0.0.1"
+    assert server["port"] == 11081
+    assert "users" not in server
+
+    credentialed = compose_xray_config(
+        _composition_input(
+            XrayOutboundDTO("egress", "proxy.example.invalid", 1080, "socks", "secret/ref"),
+            {"secret/ref": CredentialDTO("user", "password")},
+        )
+    )
+    credentialed_outbounds = cast(list[dict[str, object]], credentialed.content["outbounds"])
+    credentialed_outbound = next(
+        item for item in credentialed_outbounds if item["tag"] == "egress"
+    )
+    credentialed_settings = cast(dict[str, object], credentialed_outbound["settings"])
+    credentialed_servers = cast(list[dict[str, object]], credentialed_settings["servers"])
+    assert credentialed_servers[0]["users"] == [
+        {"username": "user", "password": "password"}
+    ]
 
 
 def test_secret_bearing_composition_types_are_not_generic_dataclasses() -> None:
@@ -126,4 +178,3 @@ def test_pure_composer_has_no_runtime_dependency() -> None:
 
     candidate = compose_xray_config(full_input)
     assert candidate.content["log"] == {"loglevel": "error"}
-

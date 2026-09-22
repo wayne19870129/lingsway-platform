@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -8,6 +9,7 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.dialects import mysql
 from sqlalchemy.orm import Session
 
+import backend.app.infra.provisioning_state as provisioning_state
 import backend.app.models  # noqa: F401
 from backend.app.core.database import Base
 from backend.app.infra.provisioning_state import (
@@ -114,16 +116,69 @@ def test_full_snapshot_is_complete_deterministic_and_uses_override_precedence() 
     assert "FOR UPDATE" in str(db.statements[0].compile(dialect=mysql.dialect()))
 
 
+def test_mihomo_mode_xray_outbound_targets_loopback_listener(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    endpoint = _endpoint(1, "residential/ref")
+    route = _route(1, 10, 1, "principal", "egress")
+    binding = EgressBinding(subscription_id=10, egress_id=1, credential_secret_ref="override/ref")
+    monkeypatch.setattr(
+        provisioning_state, "get_settings", lambda: SimpleNamespace(forwarder_provider="mihomo")
+    )
+    desired = SqlAlchemyProvisioningState(
+        cast(Session, _SnapshotSession([(route, endpoint, binding)], [binding])), 1
+    )._full_desired_routing_snapshot()
+    assert desired.outbounds == (
+        XrayOutboundDTO("egress", "127.0.0.1", endpoint.mihomo_listen_port, "socks", None),
+    )
+
+
+def test_mihomo_mode_xray_outbound_carries_no_residential_credential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    endpoint = _endpoint(1, "residential/ref")
+    route = _route(1, 10, 1, "principal", "egress")
+    binding = EgressBinding(subscription_id=10, egress_id=1, credential_secret_ref="override/ref")
+    monkeypatch.setattr(
+        provisioning_state, "get_settings", lambda: SimpleNamespace(forwarder_provider="mihomo")
+    )
+    desired = SqlAlchemyProvisioningState(
+        cast(Session, _SnapshotSession([(route, endpoint, binding)], [binding])), 1
+    )._full_desired_routing_snapshot()
+    assert desired.outbounds[0].credential_secret_ref is None
+    assert "residential/ref" not in repr(desired.outbounds[0])
+    assert "override/ref" not in repr(desired.outbounds[0])
+
+
+def test_non_mihomo_mode_xray_outbound_keeps_direct_residential_dial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    endpoint = _endpoint(1, "residential/ref")
+    route = _route(1, 10, 1, "principal", "egress")
+    binding = EgressBinding(subscription_id=10, egress_id=1, credential_secret_ref="override/ref")
+    monkeypatch.setattr(
+        provisioning_state, "get_settings", lambda: SimpleNamespace(forwarder_provider="xray")
+    )
+    desired = SqlAlchemyProvisioningState(
+        cast(Session, _SnapshotSession([(route, endpoint, binding)], [binding])), 1
+    )._full_desired_routing_snapshot()
+    assert desired.outbounds == (
+        XrayOutboundDTO("egress", endpoint.host, endpoint.port, endpoint.protocol, "override/ref"),
+    )
+
+
 @pytest.mark.parametrize(
     ("rows", "bindings", "code"),
     [
         (
-            [(_route(1, 1, 1, "same", "egress-a"), _endpoint(1), None),
-             (_route(2, 2, 2, "same", "egress-b"), _endpoint(2), None)],
+            [
+                (_route(1, 1, 1, "same", "egress-a"), _endpoint(1), None),
+                (_route(2, 2, 2, "same", "egress-b"), _endpoint(2), None),
+            ],
             [],
             "ROUTE_PRINCIPAL_DUPLICATE",
         ),
-        ([( _route(1, 1, 1, "principal", "egress-a"), None, None)], [], "ROUTE_ENDPOINT_MISSING"),
+        ([(_route(1, 1, 1, "principal", "egress-a"), None, None)], [], "ROUTE_ENDPOINT_MISSING"),
         (
             [(_route(1, 1, 1, "principal", "egress-a"), _endpoint(1), None)],
             [EgressBinding(subscription_id=1, egress_id=2, credential_secret_ref="other/ref")],
@@ -166,9 +221,7 @@ def test_sqlite_snapshot_excludes_inactive_routes_and_applies_fallbacks() -> Non
         def sqlite_if(condition: Any, when_true: Any, when_false: Any) -> Any:
             return when_true if condition else when_false
 
-        dbapi_connection.create_function(
-            "IF", 3, sqlite_if, deterministic=True
-        )
+        dbapi_connection.create_function("IF", 3, sqlite_if, deterministic=True)
 
     Base.metadata.create_all(engine)
     released_at = datetime(2026, 9, 14, tzinfo=UTC)
@@ -206,18 +259,18 @@ def test_sqlite_snapshot_excludes_inactive_routes_and_applies_fallbacks() -> Non
             db.add_all([*endpoints, *routes, *bindings])
             db.commit()
 
-            desired = SqlAlchemyProvisioningState(
-                db, 1
-            )._full_desired_routing_snapshot()
+            desired = SqlAlchemyProvisioningState(db, 1)._full_desired_routing_snapshot()
 
             assert [outbound.tag for outbound in desired.outbounds] == [
                 "active-empty",
                 "active-none",
                 "active-released-binding",
             ]
-            assert {
-                outbound.credential_secret_ref for outbound in desired.outbounds
-            } == {"endpoint/ref-1", "endpoint/ref-2", "endpoint/ref-3"}
+            assert {outbound.credential_secret_ref for outbound in desired.outbounds} == {
+                "endpoint/ref-1",
+                "endpoint/ref-2",
+                "endpoint/ref-3",
+            }
             assert set(desired.user_routes) == {
                 "principal-none",
                 "principal-empty",

@@ -371,37 +371,53 @@ def full_desired_routing_snapshot(db: Session) -> DesiredRoutingState:
         if joined_binding is not None and joined_binding.egress_id != route.egress_id:
             raise DesiredRoutingStateError("ROUTE_BINDING_EGRESS_MISMATCH")
 
-        if not isinstance(endpoint.host, str) or not endpoint.host.strip():
-            raise DesiredRoutingStateError("ENDPOINT_HOST_INVALID")
-        if (
-            not isinstance(endpoint.port, int)
-            or isinstance(endpoint.port, bool)
-            or not 1 <= endpoint.port <= 65535
-        ):
-            raise DesiredRoutingStateError("ENDPOINT_PORT_INVALID")
-        if not isinstance(endpoint.protocol, str) or endpoint.protocol.lower() not in {
-            "socks",
-            "socks5",
-        }:
-            raise DesiredRoutingStateError("ENDPOINT_PROTOCOL_UNSUPPORTED")
+        if get_settings().forwarder_provider == "mihomo":
+            listen_port = endpoint.mihomo_listen_port
+            if (
+                not isinstance(listen_port, int)
+                or isinstance(listen_port, bool)
+                or not 1 <= listen_port <= 65535
+            ):
+                raise DesiredRoutingStateError("MIHOMO_LISTEN_PORT_INVALID")
+            outbound = XrayOutboundDTO(
+                tag=route.outbound_tag,
+                host="127.0.0.1",
+                port=listen_port,
+                protocol="socks",
+                credential_secret_ref=None,
+            )
+        else:
+            if not isinstance(endpoint.host, str) or not endpoint.host.strip():
+                raise DesiredRoutingStateError("ENDPOINT_HOST_INVALID")
+            if (
+                not isinstance(endpoint.port, int)
+                or isinstance(endpoint.port, bool)
+                or not 1 <= endpoint.port <= 65535
+            ):
+                raise DesiredRoutingStateError("ENDPOINT_PORT_INVALID")
+            if not isinstance(endpoint.protocol, str) or endpoint.protocol.lower() not in {
+                "socks",
+                "socks5",
+            }:
+                raise DesiredRoutingStateError("ENDPOINT_PROTOCOL_UNSUPPORTED")
 
-        selected_ref = endpoint.credential_secret_ref
-        if (
-            joined_binding is not None
-            and joined_binding.credential_secret_ref is not None
-            and joined_binding.credential_secret_ref != ""
-        ):
-            selected_ref = joined_binding.credential_secret_ref
-        if not isinstance(selected_ref, str) or selected_ref == "":
-            raise DesiredRoutingStateError("CREDENTIAL_REF_INVALID")
+            selected_ref = endpoint.credential_secret_ref
+            if (
+                joined_binding is not None
+                and joined_binding.credential_secret_ref is not None
+                and joined_binding.credential_secret_ref != ""
+            ):
+                selected_ref = joined_binding.credential_secret_ref
+            if not isinstance(selected_ref, str) or selected_ref == "":
+                raise DesiredRoutingStateError("CREDENTIAL_REF_INVALID")
 
-        outbound = XrayOutboundDTO(
-            tag=route.outbound_tag,
-            host=endpoint.host,
-            port=endpoint.port,
-            protocol=endpoint.protocol,
-            credential_secret_ref=selected_ref,
-        )
+            outbound = XrayOutboundDTO(
+                tag=route.outbound_tag,
+                host=endpoint.host,
+                port=endpoint.port,
+                protocol=endpoint.protocol,
+                credential_secret_ref=selected_ref,
+            )
         existing = outbounds_by_tag.get(outbound.tag)
         if existing is not None:
             raise DesiredRoutingStateError("ROUTE_TAG_DUPLICATE")

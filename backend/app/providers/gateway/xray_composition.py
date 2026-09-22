@@ -140,9 +140,7 @@ class XrayStaticSkeleton:
                 raise XrayCompositionError("Xray template clients skeleton must be empty")
             _nonblank_string(settings["decryption"], "Xray template decryption is invalid")
 
-            stream = _mapping(
-                inbound["streamSettings"], "Xray template streamSettings is invalid"
-            )
+            stream = _mapping(inbound["streamSettings"], "Xray template streamSettings is invalid")
             _keys(
                 stream,
                 {"network", "security", "realitySettings"},
@@ -224,9 +222,7 @@ class XrayDeploymentConfig:
         normalized_level = _normalize_log_level(xray_log_level)
         dest = _nonblank_string(reality_dest, "XRAY_REALITY_DEST is required").strip()
         names = tuple(
-            item.strip()
-            for item in reality_server_names
-            if isinstance(item, str) and item.strip()
+            item.strip() for item in reality_server_names if isinstance(item, str) and item.strip()
         )
         if not names or len(names) != len(reality_server_names):
             raise XrayCompositionError("XRAY_REALITY_SERVER_NAME is required")
@@ -277,9 +273,7 @@ class XrayRealityConfig:
         if isinstance(short_ids, (str, bytes)):
             raise XrayCompositionError("Reality shortIds are invalid")
         key = _nonblank_string(private_key, "Reality privateKey is invalid")
-        ids = tuple(
-            item for item in short_ids if isinstance(item, str) and item.strip()
-        )
+        ids = tuple(item for item in short_ids if isinstance(item, str) and item.strip())
         if not ids or len(ids) != len(short_ids):
             raise XrayCompositionError("Reality shortIds are invalid")
         object.__setattr__(self, "_private_key", key)
@@ -382,30 +376,27 @@ def compose_xray_config(value: XrayFullConfigInput) -> CandidateConfig:
         protocol = _nonblank_string(outbound.protocol, "invalid desired outbound protocol").lower()
         if protocol not in {"socks", "socks5"}:
             raise XrayCompositionError("unsupported desired outbound protocol")
-        credential = value.credentials.get(outbound.credential_secret_ref)
-        if credential is None:
-            raise XrayCompositionError("missing resolved outbound credential")
-        username = _nonblank_string(credential.username, "resolved outbound username is invalid")
-        password = _nonblank_string(credential.password, "resolved outbound password is invalid")
         outbound_tags.add(tag)
+        server: dict[str, object] = {"address": host, "port": port}
+        if outbound.credential_secret_ref is None:
+            if host != "127.0.0.1":
+                raise XrayCompositionError("XRAY_OUTBOUND_CREDENTIAL_REQUIRED")
+        else:
+            credential = value.credentials.get(outbound.credential_secret_ref)
+            if credential is None:
+                raise XrayCompositionError("missing resolved outbound credential")
+            username = _nonblank_string(
+                credential.username, "resolved outbound username is invalid"
+            )
+            password = _nonblank_string(
+                credential.password, "resolved outbound password is invalid"
+            )
+            server["users"] = [{"username": username, "password": password}]
         outbounds.append(
             {
                 "tag": tag,
                 "protocol": "socks",
-                "settings": {
-                    "servers": [
-                        {
-                            "address": host,
-                            "port": port,
-                            "users": [
-                                {
-                                    "username": username,
-                                    "password": password,
-                                }
-                            ],
-                        }
-                    ]
-                },
+                "settings": {"servers": [server]},
             }
         )
 
@@ -557,9 +548,7 @@ def _validate_repo_owned_xray_config(config: Mapping[str, object]) -> None:
         if settings["decryption"] != XRAY_RENDERER_CONSTANTS["decryption"]:
             raise XrayCompositionError("repo-owned Xray decryption is invalid")
 
-        stream = _mapping(
-            inbound["streamSettings"], "repo-owned Xray streamSettings are malformed"
-        )
+        stream = _mapping(inbound["streamSettings"], "repo-owned Xray streamSettings are malformed")
         _keys(
             stream,
             {"network", "security", "realitySettings"},
@@ -586,9 +575,7 @@ def _validate_repo_owned_xray_config(config: Mapping[str, object]) -> None:
             reality["serverNames"],
             "repo-owned Xray Reality serverNames are invalid",
         )
-        _nonblank_string(
-            reality["privateKey"], "repo-owned Xray Reality identity is invalid"
-        )
+        _nonblank_string(reality["privateKey"], "repo-owned Xray Reality identity is invalid")
         _string_list(reality["shortIds"], "repo-owned Xray Reality identity is invalid")
 
     outbounds = config["outbounds"]
@@ -694,9 +681,11 @@ def _normalize_log_level(value: object) -> str:
 
 
 def _string_list(value: object, message: str, *, allow_empty: bool = False) -> list[str]:
-    if not isinstance(value, list) or any(
-        not isinstance(item, str) or not item.strip() for item in value
-    ) or (not allow_empty and not value):
+    if (
+        not isinstance(value, list)
+        or any(not isinstance(item, str) or not item.strip() for item in value)
+        or (not allow_empty and not value)
+    ):
         raise XrayCompositionError(message)
     return value
 

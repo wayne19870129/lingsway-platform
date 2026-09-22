@@ -21,6 +21,7 @@ from backend.app.core.config import Settings
 from backend.app.providers.base import (
     ApplyResult,
     CandidateConfig,
+    CredentialDTO,
     CredentialResolver,
     DesiredRoutingState,
     HealthReport,
@@ -126,12 +127,11 @@ class XrayFileProvider:
 
         try:
             reality = resolver.resolve_reality_identity()
-            credentials = {
-                outbound.credential_secret_ref: resolver.resolve(
-                    outbound.credential_secret_ref
-                )
-                for outbound in desired.outbounds
-            }
+            credentials: dict[str, CredentialDTO] = {}
+            for outbound in desired.outbounds:
+                ref = outbound.credential_secret_ref
+                if ref is not None:
+                    credentials[ref] = resolver.resolve(ref)
             input_value = XrayFullConfigInput(
                 skeleton,
                 self._deployment_config,

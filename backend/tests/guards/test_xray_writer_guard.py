@@ -6,6 +6,7 @@ from typing import cast
 
 import pytest
 
+from backend.app.core.config import Settings
 from backend.app.providers.base import (
     CandidateConfig,
     CredentialDTO,
@@ -522,6 +523,37 @@ def test_baseline_contains_only_non_secret_metadata(tmp_path: Path) -> None:
     assert "private-key" not in text
     assert "short-id" not in text
     assert "password-egress-a" not in text
+
+
+def test_credential_free_loopback_outbound_does_not_resolve_residential_secret() -> None:
+    class FailingResolver:
+        def resolve(self, _secret_ref: str) -> CredentialDTO:
+            raise AssertionError("residential credential resolver must not be called")
+
+        def resolve_reality_identity(self) -> XrayRealityConfig:
+            return XrayRealityConfig("private-key", ("short-id",))
+
+    template_path = Path(__file__).parents[3] / "infrastructure/marzban/xray_config.base.json"
+    template = json.loads(template_path.read_text(encoding="utf-8"))
+    provider = XrayFileProvider.from_template(
+        None,  # type: ignore[arg-type]
+        template,
+        Settings(
+            xray_reality_dest="reality.example.invalid:443",
+            xray_reality_server_name="reality.example.invalid",
+        ),
+    )
+    desired = DesiredRoutingState(
+        {"principal": "mihomo-egress"},
+        (XrayOutboundDTO("mihomo-egress", "127.0.0.1", 11081, "socks", None),),
+    )
+
+    candidate = provider.render(desired, FailingResolver())
+
+    assert candidate.content["outbounds"][1]["settings"]["servers"][0] == {  # type: ignore[index]
+        "address": "127.0.0.1",
+        "port": 11081,
+    }
 
 
 def test_standalone_writer_does_not_advance_applied_baseline(tmp_path: Path) -> None:

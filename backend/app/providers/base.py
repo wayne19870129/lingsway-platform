@@ -116,7 +116,7 @@ class XrayOutboundDTO:
     _host: str
     _port: int
     _protocol: str
-    _credential_secret_ref: str
+    _credential_secret_ref: str | None
 
     def __init__(
         self,
@@ -124,7 +124,7 @@ class XrayOutboundDTO:
         host: str,
         port: int,
         protocol: str,
-        credential_secret_ref: str,
+        credential_secret_ref: str | None = None,
     ) -> None:
         object.__setattr__(self, "_tag", tag)
         object.__setattr__(self, "_host", host)
@@ -149,7 +149,7 @@ class XrayOutboundDTO:
         return self._protocol
 
     @property
-    def credential_secret_ref(self) -> str:
+    def credential_secret_ref(self) -> str | None:
         return self._credential_secret_ref
 
     def __setattr__(self, name: str, value: object) -> None:
