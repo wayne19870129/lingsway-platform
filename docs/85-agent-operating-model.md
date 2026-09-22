@@ -604,7 +604,10 @@ Claude 的产出形态是：ADR、`docs/81-reviews/REVIEW-*.md`、以及直接�
 > 唯一仍需你自己核对的是**未合并分支**：本节写的是 `main` 上的状态，
 > 刚推上去还没合并的东西看不到（见 §1）。
 >
-> 最后更新：2026-09-20（**B2-B2 触发返工熔断，已再切分为 `B2-B2.1` ~ `B2-B2.6`
+> 最后更新：2026-09-22（**`ADR-038` 落地：B2-B2c 的 resolver 契约唯一化，
+> 其 allowed files 由 4 个扩为 8 个，新增 3 条证明 production wiring 的测试；
+> `B2-B2.1`~`.6` 已全部合并，`.6` 为 PR #174**；
+> 2026-09-20：**B2-B2 触发返工熔断，已再切分为 `B2-B2.1` ~ `B2-B2.6`
 > 六个 checkpoint，队列 §5.1 已按新粒度重排；B2-B2a 已合并（#167）**；
 > **ADR-036：每阶段回 Claude 的固定卡点取消——TASK、
 > 队列、粒度、返工都归你；只有 ADR 仍是 Claude 独占，且架构缺口路由到 User
@@ -628,7 +631,9 @@ Claude 的产出形态是：ADR、`docs/81-reviews/REVIEW-*.md`、以及直接�
 | **S04-B2-B1** receipt / secret resolver / manifest / allocator / DNS gate | ✅ **已合并（PR #156）**，2026-09-19 |
 | **S04-B2-B2a** contract substrate | ✅ **已合并（PR #167）**，2026-09-20 —— DTO + manifest 键 + `MANIFEST_VERSION "1"→"2"` |
 | **S04-B2-B2** concrete DB desired loader + preparation transaction | ⚠️ **2026-09-20 触发返工熔断（§6.1 第一层），已再切分为 6 个 checkpoint `B2-B2.1` ~ `B2-B2.6`**。在途 PR #163 收敛为 **`B2-B2.1`**。逐个 checkpoint 的 allowed files / 测试见 TASK「**B2-B2 的再切分**」一节。**`.3` 含生产实现**（receipt-verified transport proxy 解析），其余中间 checkpoint 是 tests-only |
-| **S04-B2-B2c / B2-B2d / B2-B3 / B2-B4** | 按 §5.1 的完整顺序依次排（单向依赖，见 TASK） |
+| **S04-B2-B2** 的 `.1` ~ `.6` | ✅ **全部已合并**，`.6`（preparation + production wiring）为 PR #174 |
+| **S04-B2-B2c** render / finalization | **下一个** —— ⛔ 前置 **`ADR-038` 已合并**。2026-09-22 重做范围闭包，allowed files 由 4 个扩为 8 个，接口落点见 ADR-038 §2 |
+| **S04-B2-B2d / B2-B3 / B2-B4** | 按 §5.1 的完整顺序依次排（单向依赖，见 TASK） |
 
 > **当前唯一顺序（与 §5.1 一致，不要各写一套）：**
 > `B2-B1 ✅ → B2-B2a ✅ → B2-B2.1(#163) → .2 → .3 → .4 → .5 → .6`
@@ -794,13 +799,13 @@ S07 一个任务里，「允许修改的文件」漏项**连续发生两次**：
 | # | 任务 | TASK 文件 | 闸门状态 |
 |---|---|---|---|
 | 1 | ~~**S04-B2-B2a** contract substrate~~ | `docs/82-tasks/TASK-S04-mihomo-activation.md` | ✅ **已合并（PR #167）**，见 §5.3b |
-| 2 | **S04-B2-B2.1** loader 实现 + 测试基座 | 同上 | **在途：PR #163**。⛔ 前置：B2-B2a ✅。增量只有三项：提出可参数化 fixture 基座、whitespace-only override fail-closed、**把 `prepare` + `reconcile_mihomo_job()` 的 `None` 接线迁出到 .6**。**不接生产路径** |
-| 3 | **S04-B2-B2.2** in-scope 集合与文档形状 | 同上 | ⛔ 前置：.1。**tests-only，只能改 `backend/tests/unit/test_mihomo_reconciliation.py`** |
-| 4 | **S04-B2-B2.3** assignment 校验 + receipt-verified transport proxy 解析 | 同上 | ⛔ 前置：.2。**唯一一个含生产实现的中间 checkpoint**：allowed files 是 `backend/app/infra/mihomo_reconciliation.py` + `backend/tests/unit/test_mihomo_reconciliation.py`。补上 `(name, host, port)` 三元组在 receipt-verified cache 内的唯一匹配与 `MIHOMO_TRANSPORT_PROXY_UNRESOLVED`。**必须早于 .6** |
-| 5 | **S04-B2-B2.4** credential identity 与 precedence | 同上 | ⛔ 前置：.3。**tests-only，只能改 `backend/tests/unit/test_mihomo_reconciliation.py`**（注意：上一行 `.3` 不是 tests-only）；关键断言之一是**全程不解密** |
-| 6 | **S04-B2-B2.5** fingerprint 不变式 | 同上 | ⛔ 前置：.4（真实依赖 .3/.4 建好的变体）。**tests-only，只能改同一个测试文件** |
-| 7 | **S04-B2-B2.6** preparation 事务 + production wiring | 同上 | ⛔ 前置：.5。**唯一能生产 generation 的 checkpoint**；交付物全部从 #163 迁出，原样带过来 |
-| 8 | **S04-B2-B2c** render / finalization | 同上 | ⛔ 前置：B2-B2a + **B2-B2.6**。`dialer-proxy` 渲染 + 明文在 render 边界解析。**scope 已闭合**：原先那条 `test_transport_proxy_unresolved_fails_closed` 的归属不一致已解决——它连同实现正式归 **B2-B2.3**，本 checkpoint 的测试表里不再有任何 `test_mihomo_reconciliation.py` 的测试 |
+| 2 | ~~**S04-B2-B2.1** loader 实现 + 测试基座~~ | 同上 | ✅ **已合并（PR #163）**。交付：可参数化 fixture 基座、whitespace-only override fail-closed、**把 `prepare` + `reconcile_mihomo_job()` 的 `None` 接线迁出到 .6**。**不接生产路径** |
+| 3 | ~~**S04-B2-B2.2** in-scope 集合与文档形状~~ | 同上 | ✅ **已合并（PR #170）**。tests-only，只动了 `backend/tests/unit/test_mihomo_reconciliation.py` |
+| 4 | ~~**S04-B2-B2.3** assignment 校验 + receipt-verified transport proxy 解析~~ | 同上 | ✅ **已合并（PR #171）**。**六个子 checkpoint 里唯一含生产实现的中间一个**：allowed files 是 `backend/app/infra/mihomo_reconciliation.py` + `backend/tests/unit/test_mihomo_reconciliation.py`。补上了 `(name, host, port)` 三元组在 receipt-verified cache 内的唯一匹配与 `MIHOMO_TRANSPORT_PROXY_UNRESOLVED`，并早于 .6 落地 |
+| 5 | ~~**S04-B2-B2.4** credential identity 与 precedence~~ | 同上 | ✅ **已合并（PR #172）**。tests-only，只动同一个测试文件（注意：上一行 `.3` 不是 tests-only）；关键断言之一是**全程不解密** |
+| 6 | ~~**S04-B2-B2.5** fingerprint 不变式~~ | 同上 | ✅ **已合并（PR #173）**。tests-only，只动同一个测试文件；依赖 .3/.4 建好的变体 |
+| 7 | ~~**S04-B2-B2.6** preparation 事务 + production wiring~~ | 同上 | ✅ **已合并（PR #174）**。**唯一能生产 generation 的 checkpoint**；交付物全部从 #163 迁出，原样带过来 |
+| 8 | **S04-B2-B2c** render / finalization | 同上 | **⬅ 下一项未完成 checkpoint。** ⛔ 唯一未解除的前置：**`ADR-038` 合并（PR #175 在途）** —— B2-B2a ✅ 与 `.1`~`.6` ✅ 均已满足。`dialer-proxy` 渲染 + 明文在 render 边界解析。**2026-09-22 重做了一次范围闭包**：原 4 文件清单**做不到** ADR-037 §6 的 revision identity（`SqlAlchemyCredentialResolver.resolve()` 不暴露 `Secret.revision`、`finalize()` 只收一个 controller resolver、`reconcile_mihomo_job()` 只构造 controller resolver）。**现为 8 个文件**，接口落点由 **ADR-038** 唯一裁定，并新增 3 条落在 `test_mihomo_reconciliation.py` 的测试证明 production wiring 不是 fake |
 | 9 | **S04-B2-B2d** Xray → Mihomo 交接 | 同上 | ⛔ 前置：B2-B2c。Xray outbound 改指 `127.0.0.1:{mihomo_listen_port}`，该跳无凭据。**没有这一段链路 B 不可达** |
 | 10 | **S04-B2-B3** freshness 三点复核 / recovery / runtime exact readback | 同上 | 等 B2-B2d 合并 |
 | 11 | **S04-B2-B4** 完整 integration / guard / migration / concurrency 验收 | 同上 | 等 B2-B3 合并 |
@@ -808,6 +813,12 @@ S07 一个任务里，「允许修改的文件」漏项**连续发生两次**：
 | 13 | **C1：开通链路 forwarder 契约兼容** | **待定** | ⛔ **S04-C 硬前置，尚无 owner**（2026-09-21 审计 `REVIEW-089`）。形状与步数两处不兼容，`mypy` 抓不到，**放行即开通停摆**。触及 `domain/**` + `providers/base.py` ⇒ **铁律 5 要求先有 ADR** —— 报告 User |
 | 14 | **C2：Mihomo reconcile 的 producer + runner** | **待定** | ⛔ **S04-C 硬前置，尚无 owner**（同上）。`reconcile_mihomo_job()` 非测试调用者为 0，`workers/` 零 mihomo 命中。「哪些业务事件触发一次 reconcile」是设计选择 —— 报告 User |
 | 15 | **S04-C** registry 放行 + 激活闸门 | 同上 | ⛔ **BLOCKED**。前置：B2-B4 + writer **+ C1 + C2**。闸门：每个 in-scope egress 恰好一条 ACTIVE assignment |
+
+> **📍 2026-09-22 队列位置（一句话）**：`B2-B2a` 与 `B2-B2.1`~`.6` **六个子
+> checkpoint 全部已合并**（#167 / #163 / #170 / #171 / #172 / #173 / #174）。
+> **下一项未完成 checkpoint 是第 8 行的 `S04-B2-B2c`**，它**只**等
+> `ADR-038`（PR #175）合并解除前置 —— 没有其它未满足的闸门。
+> 第 9~15 行都排在 B2-B2c 之后。
 
 > **⛔ 2026-09-21：不要派 S04-C，直到 C1 与 C2 被 User 裁定。**
 > 它的允许文件里**确实**有 `main.py` 与 `workers/scheduler.py`，
@@ -1002,12 +1013,17 @@ User 全权授权 Claude 决定，结论写在 ADR-027 §7.1–7.4。
 其中只有一个被 git 判为冲突，另一个差点静默合入。**认领新的 ADR / TASK 编号
 时，要对着当前 `main` 加上所有 open PR 一起查，不能只看 `main`。**
 
-当前已用到：**ADR-037**、**TASK-S11**。下一个分别是 **ADR-038**、**TASK-S12**。
+当前已用到：**ADR-038**、**TASK-S11**。下一个分别是 **ADR-039**、**TASK-S12**。
 
+> **2026-09-22 更新**：`ADR-038`（Mihomo finalization 的 resolver 契约）
+> 已落地 —— 它扩展 ADR-037 §6，定义 egress credential 的
+> plaintext + revision identity 由哪个接口承载。
+> **下一个可用的 ADR 编号是 `ADR-039`。**（认领时按下面那条规则对着
+> `main` **加上所有 open PR** 一起查；本次认领时实测 open PR 为 0。）
+>
 > **2026-09-20 更新**：`ADR-035`（Mihomo deployment 常量落点）、
 > `ADR-036`（取消每阶段回 Claude 的固定卡点）与
 > `ADR-037`（Mihomo 出站链路 + egress credential 契约）**都已落地**。
-> 下一个可用的 ADR 编号是 **ADR-038**。
 >
 > **ADR 仍由 Claude 独占撰写**（ADR-036 没有改这一条）；**TASK 编号现在由你
 > 认领**，认领时按下面那条规则对着 `main` **加上所有 open PR** 一起查。

@@ -427,10 +427,28 @@ different contents) and the PR #128 version won.
   (`ADR-025-mihomo-projection-generation-authority.md`) and the S-series
   implementation TASK (`TASK-S04-mihomo-activation.md`). Architecture and
   documentation only — no Python, no ORM, no migration, as specified.
-- **S04-B2-B:** **IN FLIGHT. Current order (2026-09-20, after the fourth
-  revision — B2-B2 was re-split):
-  `B2-B1 ✅ -> B2-B2a ✅ -> B2-B2.1 -> .2 -> .3 -> .4 -> .5 -> .6
-  -> B2-B2c -> B2-B2d -> B2-B3 -> B2-B4`.**
+- **S04-B2-B:** **IN FLIGHT. Current order (2026-09-22):
+  `B2-B1 ✅ -> B2-B2a ✅ -> B2-B2.1 ✅ -> .2 ✅ -> .3 ✅ -> .4 ✅ -> .5 ✅ -> .6 ✅
+  -> B2-B2c (next) -> B2-B2d -> B2-B3 -> B2-B4`.**
+  `B2-B2.6` (preparation + production wiring) merged as **PR #174**.
+
+  **B2-B2c's scope was re-closed on 2026-09-22 and it now gates on
+  `ADR-038`.** Its old four-file allowed list could not implement ADR-037 §6:
+  `SqlAlchemyCredentialResolver.resolve()` returns a bare `CredentialDTO` and
+  never exposes the `Secret.revision` it just read
+  (`credential_resolver.py:73-102`), `MihomoForwarderProvider.finalize()`
+  accepts a single controller resolver (`mihomo.py:217-219`), and
+  `reconcile_mihomo_job()` only ever constructs
+  `SqlMihomoControllerSecretResolver(db)` (`mihomo_reconciliation.py:1004-1005`).
+  A hand-written fake resolver in `test_mihomo_projection.py` would have made
+  all five of B2-B2c's tests pass while the production path still violated
+  §6 — **false green, not accepted.** `ADR-038` fixes the interface (a frozen
+  `MihomoFinalizationResolvers` bundle; one new method on the *existing*
+  resolver with `resolve()` delegating to it, so the decryption logic exists
+  exactly once), the allowed list went from 4 files to 8 (all already inside
+  the S04-B2-B master union — **the overall scope did not grow**), and three
+  new tests in `test_mihomo_reconciliation.py` prove the wiring rather than
+  the fake.
   The 2026-09-19 four-checkpoint split is history; ADR-037 extended it to six,
   and the 2026-09-20 re-split broke `B2-B2` itself into six sub-checkpoints.
   Both

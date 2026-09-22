@@ -880,21 +880,53 @@ backend/tests/unit/test_registry.py
 > `ForwarderEgressProxyDTO`，但不修改它的定义。
 
 **B2-B2c —— render / finalization（⛔ 前置：**B2-B2a 与 B2-B2 都已合并**；
-2026-09-20 第四次修订后，「B2-B2 已合并」= **`B2-B2.6` 已合并**）：**
+2026-09-20 第四次修订后，「B2-B2 已合并」= **`B2-B2.6` 已合并**（✅ PR #174）；
+2026-09-22 新增前置：**`ADR-038` 已合并**）：**
+
+> ## ⚠️ 2026-09-22：这份 4 文件清单**无法闭合 ADR-037 §6**，已按 ADR-038 扩为 8 个
+>
+> **旧清单（已作废）**只有 `mihomo_projection.py` / `mihomo.py` /
+> `test_mihomo_projection.py` / `test_secret_leak.py`。
+> 实测 `main` = `bb95ffc`，它做不到 ADR-037 §6 要求的 revision identity：
+>
+> | 事实 | 位置 |
+> |---|---|
+> | `SqlAlchemyCredentialResolver.resolve()` 只返回 `CredentialDTO`，**不暴露 `Secret.revision`** | `credential_resolver.py:73-102` |
+> | `MihomoForwarderProvider.finalize(template, resolver)` 只接受**一个 controller resolver** | `mihomo.py:217-219` |
+> | `MihomoProjectionProvider` Protocol 的 `finalize` 同样只有 controller resolver | `mihomo_reconciliation.py:512-514` |
+> | `reconcile_mihomo_job()` 在 `resolver is None` 时只构造 `SqlMihomoControllerSecretResolver(db)` | `mihomo_reconciliation.py:1004-1005` |
+> | `ProjectionTemplate` 不携带任何 egress credential 需求 | `base.py:337-360` |
+>
+> **在 `test_mihomo_projection.py` 里造一个 fake resolver 可以让五条测试全绿，
+> 但 production path 依然不满足 ADR-037 §6 —— 那是假绿，不接受。**
+>
+> 接口落点由 **`ADR-038`** 唯一裁定（组合式 resolver bundle，
+> 复用现有 `SqlAlchemyCredentialResolver` 加一个方法、零复制解密逻辑）。
+> **照抄 ADR-038 §2，不要重新设计。**
 
 ```
-backend/app/providers/forwarder/mihomo_projection.py   # dialer-proxy 渲染 + 协议白名单 + 并入既有重名校验
-backend/app/providers/forwarder/mihomo.py              # render/finalize 边界接 CredentialResolver
+backend/app/providers/base.py                          # ADR-038 §2.1：EgressCredentialRequirement / EgressCredentialSnapshot / EgressCredentialResolver Protocol + ProjectionTemplate.egress_credentials（带默认值 ()）
+backend/app/infra/credential_resolver.py               # ADR-038 §2.3：给现有 SqlAlchemyCredentialResolver 加 resolve_egress_credential()，resolve() 改为一行委托 —— 解密逻辑仓库里只留一份
+backend/app/infra/mihomo_reconciliation.py             # ADR-038 §2.4：Protocol 的 finalize 签名 + reconcile_mihomo_job() 的参数与 None 默认构造 + 调用点
+backend/app/providers/forwarder/mihomo.py              # ADR-038 §2.2：MihomoFinalizationResolvers + finalize 注入明文与 revision 校验
+backend/app/providers/forwarder/mihomo_projection.py   # dialer-proxy 渲染 + 协议白名单 + 并入既有重名校验 + 消费 egress_proxies
 backend/tests/unit/test_mihomo_projection.py
+backend/tests/unit/test_mihomo_reconciliation.py       # 证明 production wiring 不是 fake（见下面测试表后三条）
 backend/tests/guards/test_secret_leak.py
 ```
 
-> **`providers/base.py` 与 `mihomo_generation.py` 已在 B2-B2a 落地，
-> `mihomo_reconciliation.py` 的 loader 填充已在 B2-B2 落地** ——
-> B2-B2c **不再包含这三者**，它只做渲染与明文边界。
+> **这 8 个文件全部已在本 TASK 的「允许修改的文件 / S04-B2-B」总并集里
+> —— 本次只扩 B2-B2c 这个 checkpoint 的子集，总 scope 一个文件都没加。**
+
+> **`mihomo_generation.py` 仍不在 B2-B2c 范围内**（manifest 契约已在 B2-B2a
+> 落地，明文永不进 manifest，本 checkpoint 没有理由碰它）。
+> `providers/base.py` 回到范围内是因为 `ProjectionTemplate` 定义在那里
+> —— 它属**铁律 5** 管辖，所以本次先有 `ADR-038` 才动它。
 
 **不需要新的 resolver 文件** —— 复用 `credential_resolver.py` 已有的
-`SqlAlchemyCredentialResolver`（ADR-037 §6）。
+`SqlAlchemyCredentialResolver`（ADR-037 §6、ADR-038 §2.3）。
+**禁止**新建 `SqlAlchemyEgressCredentialResolver` 类、复制一份解密逻辑、
+或用继承/覆盖绕开 `resolve()` → `resolve_egress_credential()` 的委托。
 
 ##### B2-B2 必须新增的测试（**精确名称与关键断言**）
 
@@ -1348,17 +1380,42 @@ readback（均属 B2-B3）；不改 `mihomo_projection_lock.py` / `mihomo_blocke
 > receipt-verified cache 内的唯一匹配）。
 > 理由：新顺序里 `.6` 在本 checkpoint **之前**接线 generation producer，
 > 把这条校验留在这里会留下一个「producer 已接线、assignment 指向的
-> transport proxy 未验证」的窗口。**本表不再包含任何
-> `test_mihomo_reconciliation.py` 里的测试**，与 B2-B2c 的 allowed files
-> 一致 —— 之前那处不一致已随此修正消失。
+> transport proxy 未验证」的窗口。
+>
+> > **⚠️ 2026-09-22 再次修正（ADR-038）**：上一行原本还写着「**本表不再包含
+> > 任何 `test_mihomo_reconciliation.py` 里的测试**」。**那条结论现在反过来
+> > 了**：五条旧测试**全部**可以用 fake resolver 通过，**证明不了 production
+> > wiring**。本表因此新增三条落在 `test_mihomo_reconciliation.py` 的测试，
+> > 该文件也已进入 B2-B2c 的 allowed files（见上）。
+
+**前五条（render / document 形状 —— 沿用，其中第 2 条按 ADR-038 改写）：**
 
 | 测试名 | 放哪 | 关键断言 |
 |---|---|---|
-| `test_manifest_excludes_egress_plaintext_credentials` | `test_secret_leak.py` | 种一个明文可辨识的 Secret；断言 `manifest` 的递归序列化、`DesiredForwarderState.__repr__()`、`ForwarderEgressProxyDTO.__repr__()`、generation row 的 `repr()` **均不含** username/password 子串；且 `credential_secret_ref` 不出现在 `repr()` 里（`repr=False`） |
-| `test_finalization_resolves_egress_credential_at_provider_boundary` | `test_mihomo_projection.py` | 明文**只**在 render/finalize 边界出现：loader 阶段 monkeypatch 解密为「调用即失败」仍能构造出完整 snapshot；render 阶段注入 resolver 后，候选 document 的 proxy 条目含 `username`/`password`；且 resolve 时 revision 与 snapshot 不一致 ⇒ 候选作废（**不**用新明文配旧 fingerprint） |
+| `test_manifest_excludes_egress_plaintext_credentials` | `test_secret_leak.py` | 种一个明文可辨识的 Secret；断言 `manifest` 的递归序列化、`DesiredForwarderState.__repr__()`、`ForwarderEgressProxyDTO.__repr__()`、generation row 的 `repr()` **均不含** username/password 子串；且 `credential_secret_ref` 不出现在 `repr()` 里（`repr=False`）。**2026-09-22 追加一档**：`ProjectionTemplate.__repr__()` 与 `EgressCredentialRequirement.__repr__()` 同样不得含 username/password **或 `secret_ref` 的值**（ADR-038 §2.1 的 `repr=False`） |
+| `test_finalization_resolves_egress_credential_at_provider_boundary` | `test_mihomo_projection.py` | **（2026-09-22 按 ADR-038 改写）** 明文**只**在 render/finalize 边界出现：loader 阶段 monkeypatch 解密为「调用即失败」仍能构造出完整 snapshot；`render()` 产出的 `ProjectionTemplate` 里 **`egress_credentials` 只含 `(proxy_name, secret_ref, revision)`、content 里没有任何 `username`/`password` 键**；把 `MihomoFinalizationResolvers(controller=…, egress=…)` 交给 `finalize()` 之后，候选 document 的 proxy 条目才含 `username`/`password`。**注意：本条用注入的 resolver，只证明边界位置，不证明 production wiring** —— 那由下面第 6、7 条负责 |
 | `test_mihomo_document_contains_egress_transport_binding` | `test_mihomo_projection.py` | 有 ACTIVE assignment 的出口 ⇒ 其 proxy 条目含 `dialer-proxy == <transport proxy name>`；**无** ACTIVE assignment 的出口 ⇒ 该条目**完全没有** `dialer-proxy` 键（不是空值）；且 `listeners[*].proxy` 与 `proxies[*].name` 一一对应 |
 | `test_egress_proxy_name_collision_fails_closed` | `test_mihomo_projection.py` | repo-owned 出口 `code` 与某个 materialized proxy 同名 ⇒ 复用既有 `MIHOMO_DUPLICATE_PROXY_IDENTITY` fail closed |
 | `test_unsupported_egress_protocol_fails_closed` | `test_mihomo_projection.py` | `EgressEndpoint.protocol` 非 `{socks, socks5}` ⇒ `MIHOMO_EGRESS_PROTOCOL_UNSUPPORTED` |
+
+**后三条（**2026-09-22 新增，ADR-038 §4** —— 证明 production wiring，
+不是 fake）：**
+
+> **为什么必须新增这三条。** 上面五条**全部**可以用一个手写的 fake resolver
+> 通过。而 ADR-037 §6 要求的是 **production path** 上成立：复用真实
+> `SqlAlchemyCredentialResolver`、同一命名锁 span、revision identity 校验。
+> **测试绿 ≠ 接线对** —— 这三条就是把两者钉在一起的那颗钉子。
+
+| 测试名 | 放哪 | 关键断言 |
+|---|---|---|
+| `test_reconcile_resolves_egress_plaintext_with_no_injected_resolver` | `test_mihomo_reconciliation.py` | **调用 `reconcile_mihomo_job(provider, loader=None, resolvers=None, verifier=…)` —— 一个 resolver 都不注入**，让它自己按 ADR-038 §2.4 构造。断言候选 document 里该 proxy 的 `username` / `password` **等于库里那条真实 `Secret` 解密出来的值**。**这条只有默认接线真的工作才能过**，是针对"假绿"的唯一机械防线 |
+| `test_finalization_fails_closed_on_egress_credential_revision_drift` | `test_mihomo_reconciliation.py` | snapshot 之后、`finalize()` 之前把该 `Secret` 的 `revision` 由 N 改为 **N+1** 并同时改明文 ⇒ 抛 **`MIHOMO_EGRESS_CREDENTIAL_REVISION_MISMATCH`**；断言 **`provider.apply()` 从未被调用**（monkeypatch 成调用即失败）；断言**新明文不出现在** job payload / blocker row / `last_error_code` / 日志的任何位置。**绝不用新明文配旧 fingerprint** |
+| `test_egress_plaintext_is_only_decrypted_inside_the_projection_lock` | `test_mihomo_reconciliation.py` | monkeypatch `decrypt_secret`，在**它被调用的那一刻**断言 `session_holds_mihomo_projection_lock(db)` 为 `True`（该 helper 已存在，`mihomo_projection_lock.py:157`）。这是 ADR-037 §6「resolve 与 snapshot 同一锁 span」的机械证明 |
+
+> **另外必须保留的一条既有断言**：`test_registry.py` 里
+> `test_build_registry_still_rejects_mihomo_selection` 继续通过 ——
+> B2-B2c 结束时 `FORWARDER_PROVIDER=mihomo` **仍然被拒绝**，
+> 本 checkpoint 不放行 registry。
 
 ##### B2-B2d —— Xray → Mihomo 交接（**ADR-037 §1a，2026-09-20 新增**）
 
@@ -1802,7 +1859,7 @@ backend/tests/integration/test_mihomo_reconciliation_mysql.py
 backend/tests/integration/test_db_adapters.py
 backend/tests/integration/test_models.py                # 2026-09-19 补入，依据见下
 backend/tests/unit/test_registry.py                     # 2026-09-20 补入（ADR-035）：仅上面那条非空校验的单测
-backend/app/providers/base.py                           # 2026-09-20（ADR-037）：B2-B2a（ForwarderEgressProxyDTO + egress_proxies）+ B2-B2d（XrayOutboundDTO.credential_secret_ref -> str | None）
+backend/app/providers/base.py                           # 2026-09-20（ADR-037）：B2-B2a（ForwarderEgressProxyDTO + egress_proxies）+ B2-B2d（XrayOutboundDTO.credential_secret_ref -> str | None）；2026-09-22（ADR-038）：B2-B2c（EgressCredentialRequirement / EgressCredentialSnapshot / EgressCredentialResolver + ProjectionTemplate.egress_credentials）
 backend/app/infra/provisioning_state.py                  # 2026-09-20 补入（ADR-037 §1a）：仅 B2-B2d，Mihomo 模式下构造 loopback outbound
 backend/app/providers/gateway/xray_composition.py        # 2026-09-20 补入（ADR-037 §1a）：仅 B2-B2d，None 时渲染不带 users 的 socks outbound
 backend/app/providers/gateway/xray_file.py               # 2026-09-20 补入（ADR-037 §1a）：仅 B2-B2d，跳过 None
