@@ -436,6 +436,82 @@ def test_synthetic_subscription_proxy_group_is_not_used(tmp_path: Path) -> None:
     engine.dispose()
 
 
+def test_loader_rejects_assignment_with_missing_transport_endpoint(tmp_path: Path) -> None:
+    engine, session, loader = seed_mihomo_loader_graph(tmp_path, assignment_node_id=999)
+    with pytest.raises(
+        MihomoReconciliationError, match="MIHOMO_TRANSPORT_ASSIGNMENT_NODE_MISSING"
+    ):
+        loader.load_current(session)
+    session.close()
+    engine.dispose()
+
+
+def test_loader_rejects_assignment_provider_mismatch(tmp_path: Path) -> None:
+    engine, session, loader = seed_mihomo_loader_graph(
+        tmp_path,
+        transport_nodes=[
+            {
+                "id": 11,
+                "provider_id": 2,
+                "external_id": "node-a",
+                "name": "Node A",
+                "host": "203.0.113.11",
+                "port": 443,
+            }
+        ],
+    )
+    with pytest.raises(
+        MihomoReconciliationError, match="MIHOMO_TRANSPORT_ASSIGNMENT_PROVIDER_MISMATCH"
+    ):
+        loader.load_current(session)
+    session.close()
+    engine.dispose()
+
+
+@pytest.mark.parametrize("state", ["RELEASED", "DRAINING"])
+def test_released_transport_assignment_does_not_block_projection(
+    tmp_path: Path, state: str
+) -> None:
+    engine, session, loader = seed_mihomo_loader_graph(
+        tmp_path,
+        assignments=[
+            {
+                "egress_id": 1,
+                "transport_provider_id": 999,
+                "transport_node_id": 999,
+                "state": state,
+            }
+        ],
+    )
+    desired = loader.load_current(session)
+    assert desired.egress_proxies[0].transport_proxy_name is None
+    assert desired.egress_proxies[0].transport_node_identity is None
+    session.close()
+    engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"proxies:\n  - {name: wrong, type: ss, server: 203.0.113.11, port: 443}\n",
+        b"proxies:\n  - {name: Node A, type: ss, server: 203.0.113.11, port: 443}\n"
+        b"  - {name: Node A, type: ss, server: 203.0.113.11, port: 443}\n",
+    ],
+)
+def test_transport_proxy_unresolved_fails_closed(
+    tmp_path: Path, content: bytes
+) -> None:
+    engine, session, loader = seed_mihomo_loader_graph(
+        tmp_path, transport_cache_content=content
+    )
+    with pytest.raises(
+        MihomoReconciliationError, match="MIHOMO_TRANSPORT_PROXY_UNRESOLVED"
+    ):
+        loader.load_current(session)
+    session.close()
+    engine.dispose()
+
+
 def test_sql_desired_loader_binds_exact_job_generation_identity(tmp_path: Path) -> None:
     engine = create_engine(
         "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
