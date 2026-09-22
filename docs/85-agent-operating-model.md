@@ -799,13 +799,13 @@ S07 一个任务里，「允许修改的文件」漏项**连续发生两次**：
 | # | 任务 | TASK 文件 | 闸门状态 |
 |---|---|---|---|
 | 1 | ~~**S04-B2-B2a** contract substrate~~ | `docs/82-tasks/TASK-S04-mihomo-activation.md` | ✅ **已合并（PR #167）**，见 §5.3b |
-| 2 | **S04-B2-B2.1** loader 实现 + 测试基座 | 同上 | **在途：PR #163**。⛔ 前置：B2-B2a ✅。增量只有三项：提出可参数化 fixture 基座、whitespace-only override fail-closed、**把 `prepare` + `reconcile_mihomo_job()` 的 `None` 接线迁出到 .6**。**不接生产路径** |
-| 3 | **S04-B2-B2.2** in-scope 集合与文档形状 | 同上 | ⛔ 前置：.1。**tests-only，只能改 `backend/tests/unit/test_mihomo_reconciliation.py`** |
-| 4 | **S04-B2-B2.3** assignment 校验 + receipt-verified transport proxy 解析 | 同上 | ⛔ 前置：.2。**唯一一个含生产实现的中间 checkpoint**：allowed files 是 `backend/app/infra/mihomo_reconciliation.py` + `backend/tests/unit/test_mihomo_reconciliation.py`。补上 `(name, host, port)` 三元组在 receipt-verified cache 内的唯一匹配与 `MIHOMO_TRANSPORT_PROXY_UNRESOLVED`。**必须早于 .6** |
-| 5 | **S04-B2-B2.4** credential identity 与 precedence | 同上 | ⛔ 前置：.3。**tests-only，只能改 `backend/tests/unit/test_mihomo_reconciliation.py`**（注意：上一行 `.3` 不是 tests-only）；关键断言之一是**全程不解密** |
-| 6 | **S04-B2-B2.5** fingerprint 不变式 | 同上 | ⛔ 前置：.4（真实依赖 .3/.4 建好的变体）。**tests-only，只能改同一个测试文件** |
-| 7 | **S04-B2-B2.6** preparation 事务 + production wiring | 同上 | ⛔ 前置：.5。**唯一能生产 generation 的 checkpoint**；交付物全部从 #163 迁出，原样带过来 |
-| 8 | **S04-B2-B2c** render / finalization | 同上 | ⛔ 前置：B2-B2a + **B2-B2.6**（✅ PR #174）+ **`ADR-038` 已合并**。`dialer-proxy` 渲染 + 明文在 render 边界解析。**2026-09-22 重做了一次范围闭包**：原 4 文件清单**做不到** ADR-037 §6 的 revision identity（`SqlAlchemyCredentialResolver.resolve()` 不暴露 `Secret.revision`、`finalize()` 只收一个 controller resolver、`reconcile_mihomo_job()` 只构造 controller resolver）。**现为 8 个文件**，接口落点由 **ADR-038** 唯一裁定，并新增 3 条落在 `test_mihomo_reconciliation.py` 的测试证明 production wiring 不是 fake |
+| 2 | ~~**S04-B2-B2.1** loader 实现 + 测试基座~~ | 同上 | ✅ **已合并（PR #163）**。交付：可参数化 fixture 基座、whitespace-only override fail-closed、**把 `prepare` + `reconcile_mihomo_job()` 的 `None` 接线迁出到 .6**。**不接生产路径** |
+| 3 | ~~**S04-B2-B2.2** in-scope 集合与文档形状~~ | 同上 | ✅ **已合并（PR #170）**。tests-only，只动了 `backend/tests/unit/test_mihomo_reconciliation.py` |
+| 4 | ~~**S04-B2-B2.3** assignment 校验 + receipt-verified transport proxy 解析~~ | 同上 | ✅ **已合并（PR #171）**。**六个子 checkpoint 里唯一含生产实现的中间一个**：allowed files 是 `backend/app/infra/mihomo_reconciliation.py` + `backend/tests/unit/test_mihomo_reconciliation.py`。补上了 `(name, host, port)` 三元组在 receipt-verified cache 内的唯一匹配与 `MIHOMO_TRANSPORT_PROXY_UNRESOLVED`，并早于 .6 落地 |
+| 5 | ~~**S04-B2-B2.4** credential identity 与 precedence~~ | 同上 | ✅ **已合并（PR #172）**。tests-only，只动同一个测试文件（注意：上一行 `.3` 不是 tests-only）；关键断言之一是**全程不解密** |
+| 6 | ~~**S04-B2-B2.5** fingerprint 不变式~~ | 同上 | ✅ **已合并（PR #173）**。tests-only，只动同一个测试文件；依赖 .3/.4 建好的变体 |
+| 7 | ~~**S04-B2-B2.6** preparation 事务 + production wiring~~ | 同上 | ✅ **已合并（PR #174）**。**唯一能生产 generation 的 checkpoint**；交付物全部从 #163 迁出，原样带过来 |
+| 8 | **S04-B2-B2c** render / finalization | 同上 | **⬅ 下一项未完成 checkpoint。** ⛔ 唯一未解除的前置：**`ADR-038` 合并（PR #175 在途）** —— B2-B2a ✅ 与 `.1`~`.6` ✅ 均已满足。`dialer-proxy` 渲染 + 明文在 render 边界解析。**2026-09-22 重做了一次范围闭包**：原 4 文件清单**做不到** ADR-037 §6 的 revision identity（`SqlAlchemyCredentialResolver.resolve()` 不暴露 `Secret.revision`、`finalize()` 只收一个 controller resolver、`reconcile_mihomo_job()` 只构造 controller resolver）。**现为 8 个文件**，接口落点由 **ADR-038** 唯一裁定，并新增 3 条落在 `test_mihomo_reconciliation.py` 的测试证明 production wiring 不是 fake |
 | 9 | **S04-B2-B2d** Xray → Mihomo 交接 | 同上 | ⛔ 前置：B2-B2c。Xray outbound 改指 `127.0.0.1:{mihomo_listen_port}`，该跳无凭据。**没有这一段链路 B 不可达** |
 | 10 | **S04-B2-B3** freshness 三点复核 / recovery / runtime exact readback | 同上 | 等 B2-B2d 合并 |
 | 11 | **S04-B2-B4** 完整 integration / guard / migration / concurrency 验收 | 同上 | 等 B2-B3 合并 |
@@ -813,6 +813,12 @@ S07 一个任务里，「允许修改的文件」漏项**连续发生两次**：
 | 13 | **C1：开通链路 forwarder 契约兼容** | **待定** | ⛔ **S04-C 硬前置，尚无 owner**（2026-09-21 审计 `REVIEW-089`）。形状与步数两处不兼容，`mypy` 抓不到，**放行即开通停摆**。触及 `domain/**` + `providers/base.py` ⇒ **铁律 5 要求先有 ADR** —— 报告 User |
 | 14 | **C2：Mihomo reconcile 的 producer + runner** | **待定** | ⛔ **S04-C 硬前置，尚无 owner**（同上）。`reconcile_mihomo_job()` 非测试调用者为 0，`workers/` 零 mihomo 命中。「哪些业务事件触发一次 reconcile」是设计选择 —— 报告 User |
 | 15 | **S04-C** registry 放行 + 激活闸门 | 同上 | ⛔ **BLOCKED**。前置：B2-B4 + writer **+ C1 + C2**。闸门：每个 in-scope egress 恰好一条 ACTIVE assignment |
+
+> **📍 2026-09-22 队列位置（一句话）**：`B2-B2a` 与 `B2-B2.1`~`.6` **六个子
+> checkpoint 全部已合并**（#167 / #163 / #170 / #171 / #172 / #173 / #174）。
+> **下一项未完成 checkpoint 是第 8 行的 `S04-B2-B2c`**，它**只**等
+> `ADR-038`（PR #175）合并解除前置 —— 没有其它未满足的闸门。
+> 第 9~15 行都排在 B2-B2c 之后。
 
 > **⛔ 2026-09-21：不要派 S04-C，直到 C1 与 C2 被 User 裁定。**
 > 它的允许文件里**确实**有 `main.py` 与 `workers/scheduler.py`，
