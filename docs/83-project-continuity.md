@@ -449,8 +449,9 @@ different contents) and the PR #128 version won.
   new tests in `test_mihomo_reconciliation.py` prove the wiring rather than
   the fake. **`ADR-038` merged as PR #175.**
 
-  **Then 8 became 9 (2026-09-22), and this time the master union really did
-  grow.** The earlier note here said the eight files were "all already inside
+  **B2-B2c's allowed list then went 8 → 9 → 11 over 2026-09-22.** The first
+  step grew the master union; the second did not. Step one:
+  the earlier note here said the eight files were "all already inside
   the S04-B2-B master union — the overall scope did not grow"; that has been
   deleted because it is no longer true. While reworking **PR #176**, a full
   `mypy` run mechanically found three surviving call sites that the new public
@@ -466,19 +467,40 @@ different contents) and the PR #128 version won.
   reason to add egress assertions. This is an existing-call-site adaptation,
   not a new architectural decision, so **no ADR-039 is needed.**
 
-  **The closure is still only half done, and that is recorded, not resolved.**
-  A repo-wide `grep` for `.finalize(` found two more files the same signature
-  breaks: `backend/tests/integration/test_db_adapters.py` (`:706`, `:779`) and
+  **Then 9 became 11 (2026-09-22, user's ruling) — and this time the master
+  union did *not* grow.** A repo-wide `grep` for `.finalize(` found two more
+  files the same signature breaks:
+  `backend/tests/integration/test_db_adapters.py` (`:706`, `:779`) and
   `backend/tests/integration/test_mihomo_reconciliation_mysql.py` (`:127`,
-  which passes the `reconcile_mihomo_job()` positional that ADR-038 renames to
-  `resolvers`). **`mypy` cannot see them** — `pyproject.toml` excludes
+  inside the shared `_run_worker()` helper, passing the
+  `reconcile_mihomo_job()` positional that ADR-038 renames to `resolvers`).
+  **`mypy` cannot see them** — `pyproject.toml` excludes
   `backend/tests/integration` — and the `test_db_adapters.py` pair has no skip
   guard while CI's `backend` job runs `pytest backend/tests` over the whole
-  tree, so they execute and would fail at runtime. Both files are already in
-  the master union under B2-B4 but **not** in B2-B2c's nine; whether to pull
-  them in is the user's call per ADR-036 §2. **Method note worth keeping: for a
-  public-signature change, `mypy` alone is not a closure check — pair it with a
-  `grep` over call sites.**
+  tree, so they execute and would fail at runtime.
+
+  The user ruled both into **B2-B2c** rather than leaving them to B2-B4:
+  ADR-038 §2.2/§2.4 change *public function signatures*, so the checkpoint
+  that changes them must synchronise every surviving static call site —
+  merging B2-B2c while `main` still holds known old-signature calls, to be
+  repaired by some later checkpoint, is not acceptable. This is a mechanical
+  call-site migration, **not a new architectural decision, so no ADR-039.**
+  The authorisation is deliberately narrow: bundle-signature migration only —
+  no change to those two tests' rollback / restore / unhealthy-after-reload
+  assertions, no change to `test_mysql_two_workers_only_one_applies`'s
+  concurrency semantics or the worker / locking / apply-count behaviour, no
+  new business meaning read into the egress resolver (these templates carry no
+  egress credential requirements, so it is only a legal bundle member), and no
+  early delivery of B2-B4's own tests. **B2-B4 keeps full ownership of the
+  integration and concurrency acceptance for both files.** Because both were
+  already in the master union under B2-B4, this second expansion widened the
+  **checkpoint scope only** — the S04-B2-B master union grew by exactly one
+  file in total, `test_mihomo_safe_reload.py`.
+
+  **Method note worth keeping:** closing a public-signature change needs all
+  three of (1) `mypy`, (2) a repo-wide `grep` over call sites, and (3) which
+  paths CI actually executes. `mypy` alone is not a closure check here,
+  precisely because the integration directory is excluded from it.
   The 2026-09-19 four-checkpoint split is history; ADR-037 extended it to six,
   and the 2026-09-20 re-split broke `B2-B2` itself into six sub-checkpoints.
   Both

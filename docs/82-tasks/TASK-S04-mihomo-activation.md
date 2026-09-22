@@ -914,9 +914,21 @@ backend/tests/unit/test_mihomo_projection.py
 backend/tests/unit/test_mihomo_reconciliation.py       # 证明 production wiring 不是 fake（见下面测试表后三条）
 backend/tests/guards/test_secret_leak.py
 backend/tests/guards/test_mihomo_safe_reload.py        # 2026-09-22 补入（见下）：仅迁移 3 个既有 finalize() 调用点到 bundle
+backend/tests/integration/test_db_adapters.py          # 2026-09-22 补入（User 裁定）：仅迁移 :706 / :779 两处 finalize() 调用点到 bundle
+backend/tests/integration/test_mihomo_reconciliation_mysql.py  # 2026-09-22 补入（User 裁定）：仅迁移 _run_worker() 里 reconcile_mihomo_job() 的第 3 个位置参数
 ```
 
-> ## ⚠️ 2026-09-22：由 8 个改为 **9 个**，且总并集确实增加了 1 个文件
+> ## ⚠️ 2026-09-22：由 8 个改为 **11 个**（8 → 9 → 11），分两次
+>
+> **两次扩张的性质不同，必须分清：**
+>
+> | 步 | 变化 | 由什么发现 | master union 是否扩大 |
+> |---|---|---|---|
+> | 8 → 9 | `+test_mihomo_safe_reload.py` | **全量 mypy** | ✅ **扩大 1 个**（该文件原本不在并集里） |
+> | 9 → 11 | `+test_db_adapters.py`、`+test_mihomo_reconciliation_mysql.py` | **全仓静态调用点 grep**（mypy 看不见，见下） | ❌ **不扩大**（两者早已在并集里，挂 B2-B4 名下） |
+>
+> **第二次扩的是 checkpoint scope，不是 master union。** 不要把它写成
+> 「总 scope 又加了 2 个文件」。
 >
 > **上一版这里写着「这 8 个文件全部已在总并集里 —— 总 scope 一个文件都没加」。
 > 那句话现在不成立，是本次必须更正的事实。**
@@ -955,33 +967,76 @@ backend/tests/guards/test_mihomo_safe_reload.py        # 2026-09-22 补入（见
 > **这不是新的架构决策，只是既有测试调用点适配，因此不需要 `ADR-039`。**
 > `ADR-038` 已经裁定了签名；本次只是把它的机械后果补进允许文件清单。
 
-> ## ⛔ 同一次闭包检查发现的另外两个调用点 —— **尚未裁定，需 User 决定**
+> ## ✅ 两个 integration 调用点 —— **2026-09-22 已由 User 裁定，划入 B2-B2c**
 >
-> **本节是 2026-09-22 这次闭包的副产品，不在本次修订的授权范围内，
-> 但必须记下来，否则 PR #176 会以同样的方式再停一次。**
+> **裁决**：`ADR-038` §2.2 / §2.4 改的是**公共函数签名**
+> （`MihomoForwarderProvider.finalize(..., resolvers)` 与
+> `reconcile_mihomo_job(..., resolvers, ...)`），因此**该 checkpoint 必须
+> 同步仓库里所有现存静态调用点**。
+> **不得让 B2-B2c 合并后 `main` 上保留已知的旧签名调用，再等未来 B2-B4 去修。**
 >
-> 全仓 `grep -rn "\.finalize(" --include=*.py backend ops` 实测，除上面那 3 处
-> 之外还有**两个文件**会被同一个签名变更打破：
+> 全仓 `grep -rn "\.finalize(" --include=*.py backend ops` 实测（`main` = `0439f67`）：
 >
 > | 文件 | 调用点 | 为什么 `mypy` 没报 |
 > |---|---|---|
 > | `backend/tests/integration/test_db_adapters.py` | `:706`、`:779` 的 `provider.finalize(template, FakeControllerSecretResolver())` | **`pyproject.toml` 的 `[tool.mypy]` 把 `backend/tests/integration` 整个 `exclude` 掉了** |
-> | `backend/tests/integration/test_mihomo_reconciliation_mysql.py` | `:127` 向 `reconcile_mihomo_job()` 第 3 个位置参数传 `cast(ControllerSecretResolver, …)` —— 那正是 ADR-038 §2.4 改名改型为 `resolvers` 的参数 | 同上 |
+> | `backend/tests/integration/test_mihomo_reconciliation_mysql.py` | `:127`（`_run_worker()` 内）向 `reconcile_mihomo_job()` 第 3 个位置参数传 `cast(ControllerSecretResolver, …)` —— 正是 §2.4 改名改型为 `resolvers` 的那个参数 | 同上 |
 >
 > **`test_db_adapters.py` 的两处没有任何 skip 守卫**，而 CI 的 `backend` job
-> 跑的是 `python -m pytest backend/tests`（整棵树）—— 所以它们**会真的执行**，
+> 跑的是 `python -m pytest backend/tests`（整棵树）—— 它们**会真的执行**，
 > 在新签名下 `FakeControllerSecretResolver()` 没有 `.controller` / `.egress`，
 > 运行期即失败。
 >
-> > **这次要记住的教训**：`mypy` **不足以**为这个签名变更做闭包检查，
-> > 正因为它 `exclude` 了 integration 目录。**完整闭包必须同时做一次
-> > `grep` 调用点扫描。** 这与 `docs/85` §5.0 记的「只沿一条轴查出来的是
-> > 『这条轴上闭合』，不是『闭合』」是同一条。
+> **这不是新的架构决策，是机械调用点迁移，因此不需要新 ADR。**
 >
-> **两个文件都已在 master union 里**（挂在 B2-B4 名下），
-> **但都不在 B2-B2c 的 9 文件清单里**。**本次刻意不加** —— 是否把它们也
-> 划进 B2-B2c，属 User 的裁决（ADR-036 §2）。在裁定之前，PR #176 一旦跑到
-> 这两处就会再次停下并上报，**这是正确行为，不是失败**。
+> ### `test_db_adapters.py` 的授权（严格限定）
+>
+> - ✅ **仅**把 `:706` 与 `:779` 两处改成符合 `ADR-038` §2.2 的
+>   `MihomoFinalizationResolvers` bundle；
+> - ⛔ **不得改变这两个测试原有的 rollback / restore / unhealthy-after-reload
+>   行为断言** —— 它们分别属于
+>   `test_mihomo_render_failure_restores_exact_pre_operation_state`（`:651`）与
+>   `test_mihomo_unhealthy_post_reload_restores_exact_pre_operation_state`（`:721`）；
+> - ⛔ **不得增加任何新的 integration 行为**；
+> - ⛔ 当前 template **没有 egress credential requirements**，所以 bundle 里的
+>   egress resolver **只作为合法成员存在**，不得借此引入新业务语义或新断言；
+> - ⛔ **不得提前实施 B2-B4 新增的测试**。
+>
+> ### `test_mihomo_reconciliation_mysql.py` 的授权（严格限定）
+>
+> - ✅ **仅**适配 `_run_worker()`（`:123-131`）里 `reconcile_mihomo_job()`
+>   第 3 个位置参数，由单一 `ControllerSecretResolver` 改为 `ADR-038` §2.4
+>   要求的 `MihomoFinalizationResolvers`；
+> - ℹ️ `_run_worker()` 是**共用 helper**，被 `:144`
+>   （`test_mysql_two_workers_only_one_applies`）与 `:190`
+>   （`test_mysql_older_unresolved_intent_blocks_newer_writer`）调用 ——
+>   **改这一处即覆盖两者，且两者的断言都不得改动**；
+> - ⛔ **保持 `test_mysql_two_workers_only_one_applies` 原有并发语义与断言不变**；
+> - ⛔ **不得新增或重写 B2-B4 的 MySQL 验收**；
+> - ⛔ **不得改变 worker / locking / apply-count 行为** —— 这里只是公共签名迁移。
+>
+> ### master union 不因本次裁决而扩大
+>
+> 这两个文件**早已在** S04-B2-B 的 master union 里（挂 **B2-B4** 名下），
+> 所以**本次不新增任何路径**。正确描述是：
+> **B2-B2c 的 checkpoint scope 由 9 → 11，而 S04-B2-B master union 不扩大。**
+>
+> **B2-B4 对这两个文件的职责不变** —— 它仍然拥有完整的
+> integration / concurrency 验收；B2-B2c 只是**额外**获得一项窄授权：
+> 做 `ADR-038` 的公共签名迁移，别的一律不碰。
+>
+> ### 完整闭包原则（保留，写死）
+>
+> **公共签名变更必须同时走这三条检查，缺一不可：**
+>
+> 1. **mypy / type checker**；
+> 2. **全仓静态调用点 grep / search**；
+> 3. **CI 实际执行路径**（哪些测试真的会跑）。
+>
+> **不能只依赖 mypy** —— `pyproject.toml` 把 `backend/tests/integration`
+> `exclude` 掉了，第 2、3 条正是这次抓出那两个文件的原因。
+> 与 `docs/85` §5.0 记的「只沿一条轴查出来的是『这条轴上闭合』，
+> 不是『闭合』」同源。
 
 > **`mihomo_generation.py` 仍不在 B2-B2c 范围内**（manifest 契约已在 B2-B2a
 > 落地，明文永不进 manifest，本 checkpoint 没有理由碰它）。
@@ -1943,12 +1998,18 @@ docs/83-project-continuity.md
 > 判断某个文件能不能改，要同时满足两条：**在总并集里** ✅ **且在当前 checkpoint
 > 自己的 exact list 里** ✅。
 >
-> **⚠️ 2026-09-22：这份总并集本次新增了一个文件。**
+> **⚠️ 2026-09-22：这份总并集本次新增了一个文件（只有一个）。**
 > `backend/tests/guards/test_mihomo_safe_reload.py` 原先**既不在**总并集、
 > **也不在** B2-B2c 的清单里，是 `ADR-038` 签名变更暴露出的规格漏项。
 > 它在总并集里的授权范围是**「仅 B2-B2c」** —— **不授权给 B2-B2d /
 > B2-B3 / B2-B4**，用途逐条写在上面 B2-B2c 那一节。
 > **因此不能再说「总 scope 一个文件都没加」。**
+>
+> **同日 B2-B2c 又从 9 扩到 11**（`test_db_adapters.py` 与
+> `test_mihomo_reconciliation_mysql.py`，User 裁定），**但那两个文件早已在
+> 本并集里**（挂 B2-B4 名下），所以**第二次扩张不扩大本并集** ——
+> 它只是给 B2-B2c 额外开了一项窄授权（仅 `ADR-038` 公共签名迁移）。
+> **B2-B4 对这两个文件的完整 integration / concurrency 验收职责不变。**
 
 > **2026-09-20 第四次修订后尤其要注意**：`B2-B2` 已再切分为六个 checkpoint，
 > 其中 **`.2` / `.4` / `.5` 的 exact list 只有
