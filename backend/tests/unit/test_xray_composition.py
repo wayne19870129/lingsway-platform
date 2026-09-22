@@ -16,6 +16,7 @@ from backend.app.providers.gateway.xray_composition import (
     XrayRealityConfig,
     XrayStaticSkeleton,
     compose_xray_config,
+    validate_repo_owned_xray_config,
 )
 from backend.app.providers.gateway.xray_file import XrayFileProvider, XrayValidationError
 
@@ -129,6 +130,28 @@ def test_loopback_outbound_renders_without_users_block() -> None:
     assert credentialed_servers[0]["users"] == [
         {"username": "user", "password": "password"}
     ]
+
+
+def test_repo_owned_validation_accepts_credential_free_loopback_outbound() -> None:
+    candidate = compose_xray_config(
+        _composition_input(XrayOutboundDTO("egress", "127.0.0.1", 11081, "socks", None), {})
+    )
+    assert validate_repo_owned_xray_config(candidate.content) == ()
+
+    non_loopback = compose_xray_config(
+        _composition_input(
+            XrayOutboundDTO("egress", "proxy.example.invalid", 1080, "socks", "secret/ref"),
+            {"secret/ref": CredentialDTO("user", "password")},
+        )
+    )
+    outbounds = cast(list[dict[str, object]], non_loopback.content["outbounds"])
+    outbound_settings = cast(dict[str, object], outbounds[1]["settings"])
+    servers = cast(list[dict[str, object]], outbound_settings["servers"])
+    server = servers[0]
+    server.pop("users")
+    assert validate_repo_owned_xray_config(non_loopback.content) == (
+        "XRAY_OUTBOUND_CREDENTIAL_REQUIRED",
+    )
 
 
 def test_secret_bearing_composition_types_are_not_generic_dataclasses() -> None:

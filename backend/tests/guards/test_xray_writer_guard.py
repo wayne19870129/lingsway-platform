@@ -536,7 +536,7 @@ def test_credential_free_loopback_outbound_does_not_resolve_residential_secret()
     template_path = Path(__file__).parents[3] / "infrastructure/marzban/xray_config.base.json"
     template = json.loads(template_path.read_text(encoding="utf-8"))
     provider = XrayFileProvider.from_template(
-        None,  # type: ignore[arg-type]
+        Runtime(None),
         template,
         Settings(
             xray_reality_dest="reality.example.invalid:443",
@@ -550,6 +550,7 @@ def test_credential_free_loopback_outbound_does_not_resolve_residential_secret()
 
     candidate = provider.render(desired, FailingResolver())
 
+    assert provider.validate(candidate).valid
     assert candidate.content["outbounds"][1]["settings"]["servers"][0] == {  # type: ignore[index]
         "address": "127.0.0.1",
         "port": 11081,

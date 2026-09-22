@@ -619,16 +619,21 @@ def _validate_repo_owned_xray_config(config: Mapping[str, object]) -> None:
         if not isinstance(servers, list) or len(servers) != 1:
             raise XrayCompositionError("repo-owned Xray outbound servers are malformed")
         server = _mapping(servers[0], "repo-owned Xray outbound server is malformed")
-        _keys(server, {"address", "port", "users"}, "repo-owned Xray server is malformed")
-        _nonblank_string(server["address"], "repo-owned Xray outbound host is invalid")
-        _valid_port(server["port"], "repo-owned Xray outbound port is invalid")
-        users = server["users"]
-        if not isinstance(users, list) or len(users) != 1:
-            raise XrayCompositionError("repo-owned Xray outbound users are malformed")
-        user = _mapping(users[0], "repo-owned Xray outbound credential is malformed")
-        _keys(user, {"username", "password"}, "repo-owned Xray credential is malformed")
-        _nonblank_string(user["username"], "repo-owned Xray credential is invalid")
-        _nonblank_string(user["password"], "repo-owned Xray credential is invalid")
+        _valid_port(server.get("port"), "repo-owned Xray outbound port is invalid")
+        if "users" not in server:
+            _keys(server, {"address", "port"}, "repo-owned Xray server is malformed")
+            if server.get("address") != "127.0.0.1":
+                raise XrayCompositionError("XRAY_OUTBOUND_CREDENTIAL_REQUIRED")
+        else:
+            _keys(server, {"address", "port", "users"}, "repo-owned Xray server is malformed")
+            _nonblank_string(server["address"], "repo-owned Xray outbound host is invalid")
+            users = server["users"]
+            if not isinstance(users, list) or len(users) != 1:
+                raise XrayCompositionError("repo-owned Xray outbound users are malformed")
+            user = _mapping(users[0], "repo-owned Xray outbound credential is malformed")
+            _keys(user, {"username", "password"}, "repo-owned Xray credential is malformed")
+            _nonblank_string(user["username"], "repo-owned Xray credential is invalid")
+            _nonblank_string(user["password"], "repo-owned Xray credential is invalid")
 
     if XRAY_RENDERER_CONSTANTS["block_tag"] not in outbound_tags:
         raise XrayCompositionError("repo-owned Xray BLOCK outbound is missing")
