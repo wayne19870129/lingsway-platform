@@ -16,6 +16,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
+import backend.app.core.secrets as secrets
 import backend.app.models  # noqa: F401
 from backend.app.core.database import Base
 from backend.app.core.secrets import SecretSnapshot
@@ -355,6 +356,92 @@ def test_whitespace_only_credential_override_fails_closed(
         loader.load_current(session)
     session.close()
     engine.dispose()
+
+
+def test_loader_populates_egress_proxies_with_opaque_credential_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail_plaintext(*_args: object, **_kwargs: object) -> str:
+        pytest.fail("loader must not resolve credential plaintext")
+
+    monkeypatch.setattr(secrets, "reveal_secret_for_purpose", fail_plaintext)
+    monkeypatch.setattr(secrets, "reveal_secret", fail_plaintext)
+    monkeypatch.setattr(secrets, "decrypt_secret", fail_plaintext)
+    engine, session, loader = seed_mihomo_loader_graph(
+        tmp_path,
+        endpoints=[
+            {"id": 1, "code": "egress-b", "status": "AVAILABLE"},
+            {"id": 2, "code": "egress-a", "status": "AVAILABLE"},
+        ],
+        insertion_order=["egress-b", "egress-a"],
+    )
+    binding = session.scalar(select(EgressBinding))
+    assert binding is not None
+    binding.credential_secret_ref = "override/ref"
+    session.add(
+        Secret(
+            secret_ref="override/ref",
+            ciphertext="opaque-override",
+            purpose="EGRESS_CREDENTIAL",
+            revision=9,
+        )
+    )
+    session.commit()
+    desired = loader.load_current(session)
+    assert tuple(item.name for item in desired.egress_proxies) == ("egress-a", "egress-b")
+    first, second = desired.egress_proxies
+    assert first.credential_secret_ref == "egress/a"
+    assert first.credential_revision == 3
+    assert second.credential_secret_ref == "override/ref"
+    assert second.credential_revision == 9
+    assert second.transport_proxy_name == "Node A"
+    assert second.transport_node_identity == ("Node A", "203.0.113.11", 443)
+    session.close()
+    engine.dispose()
+
+
+def test_active_binding_credential_override_is_preserved_as_opaque_identity(
+    tmp_path: Path,
+) -> None:
+    cases = [
+        ("override/ref", "override/ref", None),
+        (None, "egress/a", None),
+        ("", "egress/a", None),
+        ("missing/ref", None, "MIHOMO_EGRESS_CREDENTIAL_METADATA_INVALID"),
+        ("invalid/revision", None, "MIHOMO_EGRESS_CREDENTIAL_METADATA_INVALID"),
+    ]
+    for index, (override, expected_ref, expected_error) in enumerate(cases):
+        engine, session, loader = seed_mihomo_loader_graph(tmp_path / str(index))
+        binding = session.scalar(select(EgressBinding))
+        assert binding is not None
+        binding.credential_secret_ref = override
+        if override == "override/ref":
+            session.add(
+                Secret(
+                    secret_ref=override,
+                    ciphertext="opaque-override",
+                    purpose="EGRESS_CREDENTIAL",
+                    revision=9,
+                )
+            )
+        elif override == "invalid/revision":
+            session.add(
+                Secret(
+                    secret_ref=override,
+                    ciphertext="opaque-invalid",
+                    purpose="EGRESS_CREDENTIAL",
+                    revision=0,
+                )
+            )
+        session.commit()
+        if expected_error is None:
+            desired = loader.load_current(session)
+            assert desired.egress_proxies[0].credential_secret_ref == expected_ref
+        else:
+            with pytest.raises(MihomoReconciliationError, match=expected_error):
+                loader.load_current(session)
+        session.close()
+        engine.dispose()
 
 
 def test_assigned_and_degraded_endpoints_are_in_scope(tmp_path: Path) -> None:
