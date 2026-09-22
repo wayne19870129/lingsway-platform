@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager, nullcontext
+from dataclasses import fields, is_dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -29,6 +30,7 @@ from backend.app.infra.mihomo_blocker import (
     MihomoBlockerError,
     ensure_mihomo_blocker,
 )
+from backend.app.infra.mihomo_generation import build_projection_source_manifest
 from backend.app.infra.mihomo_projection_lock import SESSION_INFO_DURABLE_STATE_UNKNOWN_KEY
 from backend.app.infra.mihomo_reconciliation import (
     MIHOMO_FINALIZATION_UNKNOWN,
@@ -351,6 +353,85 @@ def test_whitespace_only_credential_override_fails_closed(
         MihomoReconciliationError, match="MIHOMO_EGRESS_CREDENTIAL_REF_INVALID"
     ):
         loader.load_current(session)
+    session.close()
+    engine.dispose()
+
+
+def test_assigned_and_degraded_endpoints_are_in_scope(tmp_path: Path) -> None:
+    engine, session, loader = seed_mihomo_loader_graph(
+        tmp_path,
+        endpoints=[
+            {"id": 1, "code": "egress-a", "status": "AVAILABLE"},
+            {"id": 2, "code": "egress-b", "status": "ASSIGNED"},
+            {"id": 3, "code": "egress-c", "status": "DEGRADED"},
+        ],
+        insertion_order=["egress-c", "egress-a", "egress-b"],
+    )
+    desired = loader.load_current(session)
+    assert len(desired.listener_specs) == 3
+    assert tuple(listener.proxy for listener in desired.listener_specs) == (
+        "egress-a",
+        "egress-b",
+        "egress-c",
+    )
+    session.close()
+    engine.dispose()
+
+
+def test_egress_binding_egress_id_mismatch_fails_closed(tmp_path: Path) -> None:
+    engine, session, loader = seed_mihomo_loader_graph(tmp_path, binding_egress_id=999)
+    with pytest.raises(MihomoReconciliationError, match="MIHOMO_EGRESS_BINDING_INVALID"):
+        loader.load_current(session)
+    session.close()
+    engine.dispose()
+
+
+def test_synthetic_subscription_proxy_group_is_not_used(tmp_path: Path) -> None:
+    sentinel_subscription_id = 987654321
+    engine, session, loader = seed_mihomo_loader_graph(
+        tmp_path,
+        endpoints=[
+            {"id": 1, "code": "egress-a", "status": "AVAILABLE"},
+            {"id": 2, "code": "egress-b", "status": "DEGRADED"},
+        ],
+        insertion_order=["egress-b", "egress-a"],
+    )
+    binding = session.scalar(select(EgressBinding))
+    assert binding is not None
+    binding.subscription_id = sentinel_subscription_id
+    session.commit()
+    desired = loader.load_current(session)
+    assert not any(
+        str(group["name"]).startswith("subscription-") for group in desired.proxy_groups
+    )
+
+    def assert_without_subscription_id(value: object) -> None:
+        if isinstance(value, Mapping):
+            for key, item in value.items():
+                assert str(sentinel_subscription_id) not in str(key)
+                assert str(sentinel_subscription_id) not in str(item)
+                assert_without_subscription_id(key)
+                assert_without_subscription_id(item)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                assert str(sentinel_subscription_id) not in str(item)
+                assert_without_subscription_id(item)
+        elif is_dataclass(value):
+            for field in fields(value):
+                item = getattr(value, field.name)
+                assert str(sentinel_subscription_id) not in field.name
+                assert str(sentinel_subscription_id) not in str(item)
+                assert_without_subscription_id(item)
+        else:
+            assert str(sentinel_subscription_id) not in str(value)
+
+    for structure in (
+        desired.proxy_groups,
+        desired.proxies,
+        desired.listener_specs,
+        build_projection_source_manifest(desired),
+    ):
+        assert_without_subscription_id(structure)
     session.close()
     engine.dispose()
 
