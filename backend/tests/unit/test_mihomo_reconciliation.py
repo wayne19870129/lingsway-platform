@@ -80,7 +80,6 @@ from backend.app.models import (
 )
 from backend.app.providers.base import (
     ApplyResult,
-    CredentialDTO,
     DesiredForwarderState,
     EgressCredentialResolver,
     EgressCredentialSnapshot,
@@ -126,43 +125,80 @@ def test_finalization_fails_closed_on_egress_credential_revision_drift(
     endpoint.protocol = "socks5"
     db.commit()
     desired = loader.load_current(db)
-    desired = replace(desired, transport_materializations=(), transport_references=())
-    provider = MihomoForwarderProvider(cast(MihomoRuntime, object()))
-    template = provider.render(desired)
-    secret = db.scalar(select(Secret).where(Secret.secret_ref == "egress/a"))
-    assert secret is not None
-    secret.revision = 4
-    secret.ciphertext = json.dumps(
-        {"username": "DRIFT_USER_SENTINEL", "password": "DRIFT_PASSWORD_SENTINEL"}
-    )
+    generation = allocate_generation(db, build_projection_source_manifest(desired))
     db.commit()
+    enqueue_mihomo_reconciliation(
+        db,
+        operation_id="revision-drift",
+        operation_kind="RECONCILE",
+        snapshot_revision=generation.revision,
+    )
 
     def decrypt(ciphertext: str) -> str:
         return ciphertext
 
     monkeypatch.setattr(credential_resolver, "decrypt_secret", decrypt)
+    monkeypatch.setattr(secrets, "decrypt_secret", lambda _ciphertext: "controller-secret")
+    monkeypatch.setattr(
+        reconciliation,
+        "mihomo_projection_write",
+        lambda session: _fake_lock_with_durable_fallback(session),
+    )
+    monkeypatch.setattr(
+        reconciliation,
+        "get_settings",
+        lambda: SimpleNamespace(
+            transport_cache_root=str(tmp_path), mihomo_external_controller="172.30.0.10:9090"
+        ),
+    )
 
     class Controller:
         def resolve(self, _ref: str) -> ControllerSecretSnapshot:
             return ControllerSecretSnapshot("mihomo/api-secret", 7, "controller")
 
     class Provider(MihomoForwarderProvider):
-        applied = False
+        def __init__(self) -> None:
+            super().__init__(cast(MihomoRuntime, object()))
+            self.finalization_error: MihomoRuntimeError | None = None
+            self.apply_count = 0
+
+        def render(self, desired: DesiredForwarderState) -> Any:
+            template = super().render(
+                replace(desired, transport_materializations=(), transport_references=())
+            )
+            secret = db.scalar(select(Secret).where(Secret.secret_ref == "egress/a"))
+            assert secret is not None
+            secret.revision = 4
+            secret.ciphertext = json.dumps(
+                {"username": "DRIFT_USER_SENTINEL", "password": "DRIFT_PASSWORD_SENTINEL"}
+            )
+            db.flush()
+            return template
+
+        def finalize(self, template: Any, resolvers: MihomoFinalizationResolvers) -> Any:
+            try:
+                return super().finalize(template, resolvers)
+            except MihomoRuntimeError as exc:
+                self.finalization_error = exc
+                raise
 
         def apply(self, candidate: object) -> ApplyResult:
-            self.applied = True
-            return ApplyResult(applied=True, version="unexpected")
+            self.apply_count += 1
+            pytest.fail("apply must not run after credential revision drift")
 
-    finalizer = Provider(cast(MihomoRuntime, object()))
-    with pytest.raises(MihomoRuntimeError, match="MIHOMO_EGRESS_CREDENTIAL_REVISION_MISMATCH"):
-        finalizer.finalize(
-            template,
-            MihomoFinalizationResolvers(
-                controller=cast(ControllerSecretResolver, Controller()),
-                egress=credential_resolver.SqlAlchemyCredentialResolver(db),
-            ),
-        )
-    assert finalizer.applied is False
+    provider = Provider()
+    result = reconcile_mihomo_job(
+        cast(reconciliation.MihomoProjectionProvider, provider),
+        None,
+        None,
+        cast(ProjectionVerifier, _Verifier(ProjectionVerification(True, "readback-v1"))),
+        db_factory=lambda: db,
+    )
+    assert result is not None
+    assert result.applied is False
+    assert provider.finalization_error is not None
+    assert str(provider.finalization_error) == "MIHOMO_EGRESS_CREDENTIAL_REVISION_MISMATCH"
+    assert provider.apply_count == 0
     leaked = " ".join(
         str(value)
         for row in db.scalars(select(Job)).all()
@@ -174,36 +210,84 @@ def test_finalization_fails_closed_on_egress_credential_revision_drift(
     assert "DRIFT_PASSWORD_SENTINEL" not in " ".join(
         record.getMessage() for record in caplog.records
     )
+    blockers = db.scalars(
+        select(Job).where(Job.job_type == MIHOMO_RECONCILE_BLOCKER_JOB_TYPE)
+    ).all()
+    for blocker in blockers:
+        assert "DRIFT_USER_SENTINEL" not in str(blocker.payload_json)
+        assert "DRIFT_PASSWORD_SENTINEL" not in str(blocker.payload_json)
+        assert "DRIFT_USER_SENTINEL" not in str(blocker.last_error_code)
+        assert "DRIFT_PASSWORD_SENTINEL" not in str(blocker.last_error_code)
     engine.dispose()
 
 
 def test_egress_plaintext_is_only_decrypted_inside_the_projection_lock(
-    db: Session, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    cast(Table, Secret.__table__).create(bind=db.get_bind())
-    db.add(
-        Secret(
-            secret_ref="egress/ref",
-            ciphertext="ciphertext",
-            purpose="EGRESS_CREDENTIAL",
-            revision=3,
-        )
-    )
+    engine, db, loader = seed_mihomo_loader_graph(tmp_path)
+    endpoint = db.get(EgressEndpoint, 1)
+    assert endpoint is not None
+    endpoint.protocol = "socks5"
     db.commit()
-    db.info["mihomo_projection_lock_held"] = True
+    desired = loader.load_current(db)
+    generation = allocate_generation(db, build_projection_source_manifest(desired))
+    db.commit()
+    enqueue_mihomo_reconciliation(
+        db,
+        operation_id="lock-boundary",
+        operation_kind="RECONCILE",
+        snapshot_revision=generation.revision,
+    )
     seen: list[bool] = []
 
     def decrypt(_ciphertext: str) -> str:
         seen.append(session_holds_mihomo_projection_lock(db))
+        assert seen[-1] is True
         return json.dumps({"username": "user", "password": "pass"})
 
     monkeypatch.setattr(credential_resolver, "decrypt_secret", decrypt)
-    snapshot = credential_resolver.SqlAlchemyCredentialResolver(db).resolve_egress_credential(
-        "egress/ref"
+    monkeypatch.setattr(secrets, "decrypt_secret", lambda _ciphertext: "controller-secret")
+    monkeypatch.setattr(
+        reconciliation,
+        "mihomo_projection_write",
+        lambda session: _fake_lock_with_durable_fallback(session),
     )
-    assert snapshot.revision == 3
-    assert snapshot.credential == CredentialDTO("user", "pass")
-    assert seen == [True]
+    monkeypatch.setattr(
+        reconciliation,
+        "get_settings",
+        lambda: SimpleNamespace(
+            transport_cache_root=str(tmp_path), mihomo_external_controller="172.30.0.10:9090"
+        ),
+    )
+
+    class Provider(MihomoForwarderProvider):
+        def __init__(self) -> None:
+            super().__init__(cast(MihomoRuntime, object()))
+            self.captured: object | None = None
+
+        def render(self, desired: DesiredForwarderState) -> Any:
+            return super().render(
+                replace(desired, transport_materializations=(), transport_references=())
+            )
+
+        def apply(self, candidate: object) -> ApplyResult:
+            self.captured = candidate
+            return ApplyResult(applied=True, version="captured")
+
+    provider = Provider()
+    result = reconcile_mihomo_job(
+        cast(reconciliation.MihomoProjectionProvider, provider),
+        None,
+        None,
+        cast(ProjectionVerifier, _Verifier(ProjectionVerification(True, "readback-v1"))),
+        db_factory=lambda: db,
+    )
+    assert result is not None
+    assert result.applied is True
+    assert provider.captured is not None
+    assert seen and all(seen)
+    db.close()
+    engine.dispose()
 
 
 def test_reconcile_resolves_egress_plaintext_with_no_injected_resolver(
