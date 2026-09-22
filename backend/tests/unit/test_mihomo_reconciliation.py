@@ -31,7 +31,12 @@ from backend.app.infra.mihomo_blocker import (
     MihomoBlockerError,
     ensure_mihomo_blocker,
 )
-from backend.app.infra.mihomo_generation import build_projection_source_manifest, canonical_manifest
+from backend.app.infra.mihomo_generation import (
+    allocate_generation,
+    build_projection_source_manifest,
+    canonical_manifest,
+    manifest_fingerprint,
+)
 from backend.app.infra.mihomo_projection_lock import SESSION_INFO_DURABLE_STATE_UNKNOWN_KEY
 from backend.app.infra.mihomo_reconciliation import (
     MIHOMO_FINALIZATION_UNKNOWN,
@@ -158,6 +163,7 @@ def seed_mihomo_loader_graph(
         RouteEgressBinding.__table__,
         TrafficRule.__table__,
         MihomoTransportMaterialization.__table__,
+        MihomoProjectionGeneration.__table__,
         TransportEndpointRecord.__table__,
         EgressTransportAssignment.__table__,
         EgressBinding.__table__,
@@ -442,6 +448,147 @@ def test_active_binding_credential_override_is_preserved_as_opaque_identity(
                 loader.load_current(session)
         session.close()
         engine.dispose()
+
+
+def test_assignment_node_change_changes_manifest_fingerprint(tmp_path: Path) -> None:
+    cache = (
+        b"proxies:\n"
+        b"  - {name: Node A, type: ss, server: 203.0.113.11, port: 443}\n"
+        b"  - {name: Node B, type: ss, server: 203.0.113.12, port: 444}\n"
+    )
+    engine, session, loader = seed_mihomo_loader_graph(
+        tmp_path,
+        transport_nodes=[
+            {
+                "id": 11,
+                "external_id": "node-a",
+                "name": "Node A",
+                "host": "203.0.113.11",
+                "port": 443,
+            },
+            {
+                "id": 12,
+                "external_id": "node-b",
+                "name": "Node B",
+                "host": "203.0.113.12",
+                "port": 444,
+            },
+        ],
+        transport_cache_content=cache,
+        assignment_node_id=11,
+    )
+    assignment = session.scalar(select(EgressTransportAssignment))
+    assert assignment is not None
+
+    desired_a = loader.load_current(session)
+    manifest_a = build_projection_source_manifest(desired_a)
+    generation_a = allocate_generation(session, manifest_a)
+    session.commit()
+
+    assignment.transport_node_id = 12
+    session.commit()
+    desired_b = loader.load_current(session)
+    manifest_b = build_projection_source_manifest(desired_b)
+    generation_b = allocate_generation(session, manifest_b)
+    session.commit()
+
+    assert desired_a.egress_proxies[0].transport_proxy_name == "Node A"
+    assert desired_b.egress_proxies[0].transport_proxy_name == "Node B"
+    assert desired_a.egress_proxies[0].transport_node_identity == (
+        "Node A",
+        "203.0.113.11",
+        443,
+    )
+    assert desired_b.egress_proxies[0].transport_node_identity == (
+        "Node B",
+        "203.0.113.12",
+        444,
+    )
+    assert manifest_fingerprint(manifest_a) != manifest_fingerprint(manifest_b)
+    assert generation_b.revision > generation_a.revision
+    session.close()
+    engine.dispose()
+
+
+def test_binding_credential_ref_change_changes_manifest_fingerprint(tmp_path: Path) -> None:
+    engine, session, loader = seed_mihomo_loader_graph(tmp_path / "ref-change")
+    binding = session.scalar(select(EgressBinding))
+    assert binding is not None
+    session.add(
+        Secret(
+            secret_ref="egress/b",
+            ciphertext="opaque-b",
+            purpose="EGRESS_CREDENTIAL",
+            revision=4,
+        )
+    )
+    binding.credential_secret_ref = "egress/b"
+    session.commit()
+
+    desired_a = loader.load_current(session)
+    manifest_a = build_projection_source_manifest(desired_a)
+    generation_a = allocate_generation(session, manifest_a)
+    session.commit()
+    binding.credential_secret_ref = "egress/a"
+    session.commit()
+    desired_b = loader.load_current(session)
+    manifest_b = build_projection_source_manifest(desired_b)
+    generation_b = allocate_generation(session, manifest_b)
+    session.commit()
+    assert manifest_fingerprint(manifest_a) != manifest_fingerprint(manifest_b)
+    assert generation_b.revision > generation_a.revision
+    session.close()
+    engine.dispose()
+
+    engine, session, loader = seed_mihomo_loader_graph(tmp_path / "revision-change")
+    desired_n = loader.load_current(session)
+    manifest_n = build_projection_source_manifest(desired_n)
+    generation_n = allocate_generation(session, manifest_n)
+    session.commit()
+    secret = session.scalar(select(Secret).where(Secret.secret_ref == "egress/a"))
+    assert secret is not None
+    secret.revision = 4
+    session.commit()
+    desired_n1 = loader.load_current(session)
+    manifest_n1 = build_projection_source_manifest(desired_n1)
+    generation_n1 = allocate_generation(session, manifest_n1)
+    session.commit()
+    assert manifest_fingerprint(manifest_n) != manifest_fingerprint(manifest_n1)
+    assert generation_n1.revision > generation_n.revision
+    session.close()
+    engine.dispose()
+
+
+def test_transport_endpoint_record_non_identity_columns_are_not_inputs(
+    tmp_path: Path,
+) -> None:
+    engine, session, loader = seed_mihomo_loader_graph(
+        tmp_path,
+        transport_non_identity={
+            "region": "region-a",
+            "latency_ms": 10,
+            "status": "HEALTHY",
+            "raw_metadata_json": '{"zone":"a"}',
+        },
+    )
+    node = session.scalar(select(TransportEndpointRecord))
+    assert node is not None
+    identity = (node.name, node.host, node.port)
+    desired_a = loader.load_current(session)
+    fingerprint_a = manifest_fingerprint(build_projection_source_manifest(desired_a))
+
+    node.region = "region-b"
+    node.latency_ms = 99
+    node.status = "DEGRADED"
+    node.raw_metadata_json = '{"zone":"b","changed":true}'
+    session.commit()
+    desired_b = loader.load_current(session)
+    fingerprint_b = manifest_fingerprint(build_projection_source_manifest(desired_b))
+
+    assert (node.name, node.host, node.port) == identity
+    assert fingerprint_b == fingerprint_a
+    session.close()
+    engine.dispose()
 
 
 def test_assigned_and_degraded_endpoints_are_in_scope(tmp_path: Path) -> None:
